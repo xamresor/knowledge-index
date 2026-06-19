@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SmartMonitor Knowledge Base builder.
+# Code Knowledge Base builder.
 # Reads kb.projects.toml, builds per-project graphify graphs into repos/<name>/,
 # merges them into one cross-repo graph, injects HTTP edges (frontend -> controllers),
 # clusters + renders the full graph.html, and (re)indexes docs into qmd.
@@ -12,7 +12,7 @@ cd "$KB"
 PY=python3
 CFG="$KB/kb.projects.toml"
 OUT="$KB/graphify-out"
-COLLECTION="smartmonitor"
+COLLECTION="${KB_COLLECTION:-kb}"
 export GRAPHIFY_VIZ_NODE_LIMIT="${GRAPHIFY_VIZ_NODE_LIMIT:-20000}"
 
 # --- tiny TOML reader: emits "name|code(csv)|docs|routes|calls(csv)|serves" per project

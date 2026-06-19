@@ -1,8 +1,8 @@
-# SmartMonitor Knowledge Base
+# Code Knowledge Base
 
-A standalone, read-only knowledge layer over the SmartMonitor projects (`api`, `webclient`,
-`bo`/webadmin). It builds **one merged code-connection graph** — including cross-repo edges that
-link frontend API calls to the Laravel controllers that serve them — and a **vectorized search
+A standalone, read-only knowledge layer over a set of related code projects (for example a Laravel
+API and a Vue frontend). It builds **one merged code-connection graph** — including cross-repo edges
+that link frontend API calls to the Laravel controllers that serve them — and a **vectorized search
 index** over the projects' docs. Everything runs **on-device with no API keys**.
 
 Built on two existing tools: [**graphify**](https://github.com/) (AST code graph) and
@@ -13,9 +13,11 @@ Built on two existing tools: [**graphify**](https://github.com/) (AST code graph
 ```bash
 make build      # build the merged graph + qmd doc index
 make open       # open the interactive graph.html
-qmd query "how does auth work" -c smartmonitor
+qmd query "how does auth work" -c kb
 graphify path "useAuthFlow.js" "AuthMethodsController" --graph graphify-out/graph.json
 ```
+
+The qmd collection name defaults to `kb`; override it by setting `KB_COLLECTION` before a build.
 
 ## What you get
 
@@ -23,12 +25,54 @@ graphify path "useAuthFlow.js" "AuthMethodsController" --graph graphify-out/grap
   edges connect frontend call sites to backend controllers across repos.
 - `graphify-out/graph.html` — full interactive visualization.
 - `graphify-out/GRAPH_REPORT.md` — human-readable architecture report with communities.
-- qmd `smartmonitor` collection (`.qmd/`) — hybrid BM25 + vector search over all docs.
+- qmd `kb` collection (`.qmd/`) — hybrid BM25 + vector search over all docs.
 
 ## Configuration
 
-Edit `kb.projects.toml` to add/remove a project or change which paths are scanned/indexed.
-No symlinks — paths are explicit. `.graphifyignore` controls what graphify excludes.
+Copy `kb.projects.toml.example` to `kb.projects.toml` and edit it to add/remove a project or change
+which paths are scanned/indexed. No symlinks — paths are explicit. `.graphifyignore` controls what
+graphify excludes.
+
+## Install into a project
+
+Each consuming project needs two things: the **MCP server config** so its agent can query the KB,
+and the **`kb` skill** so the agent knows when/how to use it. Both point back here — this repo is
+the single source of truth.
+
+### 1. MCP server config
+
+Add the `kb` server to the project's `.mcp.json` (`mcpServers` object). No env, no install — it's a
+zero-dependency stdio server (use the absolute path to this checkout):
+
+```json
+{
+  "mcpServers": {
+    "kb": { "command": "/path/to/kb/bin/kb-mcp" }
+  }
+}
+```
+
+Restart the agent session to load it. It exposes `graph_query`, `graph_path`, `graph_explain`,
+`graph_affected`, `docs_search`, `docs_get`. (This repo's own `.mcp.json` only registers `qmd`,
+which `kb-mcp` calls internally — projects do **not** need the `qmd` entry.)
+
+### 2. The `kb` skill
+
+The canonical skill lives here at [`skills/kb/SKILL.md`](skills/kb/SKILL.md). Install it into a
+project by symlinking, so updates here propagate everywhere:
+
+```bash
+# Laravel projects that keep skills in .ai/skills with a .claude/skills symlink:
+ln -s /path/to/kb/skills/kb /path/to/project/.ai/skills/kb
+ln -s ../../.ai/skills/kb   /path/to/project/.claude/skills/kb
+
+# Or, for a project that reads skills straight from .claude/skills:
+ln -s /path/to/kb/skills/kb /path/to/project/.claude/skills/kb
+```
+
+Match each project's existing skill layout (check a sibling skill: some use `.ai/skills` + a
+`.claude/skills` symlink, others use `.claude/skills` directly). Restart the session to pick it up.
+If you prefer a self-contained copy over a symlink, `cp -r` the directory instead.
 
 ## How the projects connect
 
@@ -38,7 +82,7 @@ what makes `graphify path` traverse from a Vue file to the controller that serve
 
 ## Footprint
 
-The three projects are **never modified**. Their code is rsynced (code-only) into `repos/`
-(git-ignored) for scanning; all outputs live here in `/var/www/kb`.
+The indexed projects are **never modified**. Their code is rsynced (code-only) into `repos/`
+(git-ignored) for scanning; all outputs live here in this repo.
 
 See `CLAUDE.md` for the agent query workflow.

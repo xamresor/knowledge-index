@@ -8,7 +8,7 @@ Usage:
   link_http.py <graph.json> <routes.json> <target_repo> <fe_root> [<fe_root> ...]
 
 `target_repo` is the graphify repo tag whose controllers serve these routes
-(e.g. "api" for webclient->api, "bo" for the back-office's own frontend).
+(e.g. "api" for a webclient->api link, or an admin app's tag for its own frontend).
 Run once per (route table, frontend) pair; edges accumulate in the graph.
 """
 from __future__ import annotations

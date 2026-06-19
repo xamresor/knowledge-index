@@ -46,7 +46,7 @@ def safe(name: str) -> str:
 
 
 TEMPLATE = r"""<!doctype html><html><head><meta charset="utf-8">
-<title>SmartMonitor KB</title>
+<title>Code Knowledge Base</title>
 <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
 <style>
  body{margin:0;background:#1a1a1d;color:#ddd;font:13px system-ui}
@@ -58,7 +58,7 @@ TEMPLATE = r"""<!doctype html><html><head><meta charset="utf-8">
  #legend div{margin:2px 0} #hint{color:#9a9;margin:6px 0} #qres div{padding:2px 4px;cursor:pointer}
 </style></head><body>
 <div id="side">
- <h3>SmartMonitor KB</h3>
+ <h3>Code Knowledge Base</h3>
  <div>__NDOM__ domains · members load on demand</div>
  <input id="q" placeholder="search a class / method / table…" autocomplete="off">
  <div id="qres" style="max-height:150px;overflow:auto;font-size:12px"></div>

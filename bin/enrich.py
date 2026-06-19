@@ -4,7 +4,7 @@
 Adds, per node:
   - type   : class | controller | model | service | repository | resource | request
              | interface | enum | trait | method | template | file | symbol
-  - domain : entity/component/package the node belongs to (Vehicle, User, SmartCamera, ...)
+  - domain : entity/component/package the node belongs to (Order, Customer, Product, ...)
 
 Adds nodes/edges (rethought link logic, fixes orphans + builds domain clusters):
   - db_table nodes  : one per model $table, with model --defines_table--> table
@@ -52,7 +52,7 @@ def node_type(n: dict) -> str:
 
 
 def entity(name: str) -> str:
-    """VehicleController -> Vehicle ; UserResource -> User ; keep already-bare names."""
+    """OrderController -> Order ; CustomerResource -> Customer ; keep already-bare names."""
     prev = None
     while prev != name:
         prev = name
@@ -63,9 +63,9 @@ def entity(name: str) -> str:
 def layer_bucket(sf: str, repo: str) -> str:
     """Coarse fallback domain for nodes without a strong entity/module signal."""
     p = sf.lstrip("/").split("/")
-    if repo in ("webclient", "bo") or (p and p[0] in ("src", "assets-js")):
+    if p and p[0] in ("src", "assets-js", "resources", "app-js"):
         area = p[1] if len(p) > 1 else "app"
-        return f"{repo}:{area}"           # webclient:stores, bo:pages, ...
+        return f"{repo}:{area}"           # webclient:stores, admin:pages, ...
     if p and p[0] == "app" and len(p) > 1:
         return f"api:{p[1]}"              # api:Services, api:Http, api:Jobs, ...
     return f"{repo}:core"
@@ -79,7 +79,7 @@ def raw_domain(n: dict) -> str:
         return p[1]
     if len(p) > 2 and p[0] == "app" and p[1] == "Components":
         return p[2]
-    # entity from the class name (Vehicle, User, Equipment, ...)
+    # entity from the class name (Order, Customer, Product, ...)
     lab = n["label"]
     base = None
     if BARE_CLASS.match(lab):

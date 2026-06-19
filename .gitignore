@@ -14,5 +14,11 @@
 # Local project registry (real machine paths). Use kb.projects.toml.example as a template.
 /kb.projects.toml
 
+# Python bytecode
+__pycache__/
+*.pyc
+
 # IDE
 /.idea/
+/.claude/settings.local.json
+

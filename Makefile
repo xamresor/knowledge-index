@@ -20,7 +20,7 @@ status: ## Graph diagnostics + qmd index health
 	@bin/kb status
 
 open:   ## Open the full graph visualization in a browser
-	@xdg-open graphify-out/graph.html 2>/dev/null || echo "open graphify-out/graph.html"
+	@xdg-open graphify-out/kb-graph.html 2>/dev/null || echo "open graphify-out/kb-graph.html"
 
 help:
 	@grep -E '^[a-z]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:.*## /\t/' | sort

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Name graphify communities by their dominant namespace / domain (deterministic, zero-cost).
 
-Replaces "Community 204" with labels like "api · SmartCamera" or "webclient · stores",
+Replaces "Community 204" with labels like "api · Models" or "webclient · stores",
 derived from the source-file paths of each community's members. Writes
 graphify-out/.graphify_labels.json; run `graphify cluster-only --no-label` afterwards to
 bake the names into GRAPH_REPORT.md and graph.html.

@@ -1,9 +1,9 @@
-# SmartMonitor Knowledge Base — project registry (TEMPLATE).
+# Code Knowledge Base — project registry (TEMPLATE).
 # Copy to `kb.projects.toml` and edit for your machine; bin/kb reads it. No symlinks: paths are explicit.
 # The real kb.projects.toml is gitignored so each checkout keeps its own local paths.
 #
 #   code  : directories rsynced (code-only) into repos/<name>/ and scanned by graphify
-#   docs  : doc folder indexed by qmd into the unified "smartmonitor" collection
+#   docs  : doc folder indexed by qmd into the unified "kb" collection
 #   routes: optional — if set, this project is a Laravel app; bin/kb runs route:list
 #           and links its frontend callers to its controllers
 #   calls : optional — frontend source roots whose api.<verb>() calls target `serves`
