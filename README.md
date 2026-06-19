@@ -35,7 +35,7 @@ graphify --version && qmd --version && python3 --version
 ```bash
 make build      # build the merged graph + qmd doc index
 make open       # open the typed/domain visualization (kb-graph.html)
-qmd query "how does auth work" -c kb
+qmd qsearch "how does auth work" -c kb --no-rerank --no-expand
 graphify path "useAuthFlow.js" "AuthMethodsController" --graph graphify-out/graph.json
 ```
 
@@ -111,6 +111,67 @@ ln -s /path/to/kb/skills/kb /path/to/project/.claude/skills/kb
 Match each project's existing skill layout (check a sibling skill: some use `.ai/skills` + a
 `.claude/skills` symlink, others use `.claude/skills` directly). Restart the session to pick it up.
 If you prefer a self-contained copy over a symlink, `cp -r` the directory instead.
+
+### 3. Auto-reminder hook (recommended)
+
+**Skip this and the install reliably under-performs.** The skill only fires on the agent's own
+judgement, and the `kb` MCP tools may be **deferred** behind a tool-search index when a project has
+many MCP servers — so an agent can default to `grep`/`Explore` on a "how does X work / what connects
+to Y / impact" prompt and never reach the graph (exactly the failure this hook prevents). A
+`UserPromptSubmit` hook closes that gap deterministically: it scans the prompt for connection/impact
+trigger words and injects a one-line reminder to use the `kb` graph tools first.
+
+Add it in the consuming project (not here — this repo is read-only and isn't a Claude Code project).
+A ready-made matcher template ships at [`skills/kb/install/kb-reminder.py`](skills/kb/install/kb-reminder.py)
+(EN + RU triggers; extend `TRIGGERS` with your team's languages):
+
+```bash
+# 1. copy the matcher template (don't symlink — projects extend its TRIGGERS list)
+mkdir -p /path/to/project/.claude/hooks
+cp /path/to/kb/skills/kb/install/kb-reminder.py /path/to/project/.claude/hooks/
+
+# 2. wire it in .claude/settings.json (merge — never clobber existing hooks/keys)
+```
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command",
+        "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/kb-reminder.py\" 2>/dev/null || true",
+        "statusMessage": "Checking for kb-graph relevance" } ] }
+    ]
+  }
+}
+```
+
+The script reads the hook JSON on stdin, prints
+`{"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "<reminder>"}}`
+on a trigger hit, and stays silent + exit 0 otherwise so it can never block a prompt. Also add a
+**project-guideline line** ("for how-does-X / what-connects / impact questions, use the `kb` skill
+before grep, and tell delegated sub-agents to do the same"). See SKILL.md "How to use it well"
+points 5–6 for the rationale.
+
+### 4. Verify the install
+
+Run from the project root — every line should report present/YES:
+
+```bash
+# 1. MCP server registered and the binary is runnable
+python3 -c "import json;print('kb cmd:',json.load(open('.mcp.json'))['mcpServers']['kb']['command'])"
+test -x "$(python3 -c "import json;print(json.load(open('.mcp.json'))['mcpServers']['kb']['command'])")" && echo "kb-mcp executable: YES"
+
+# 2. skill reachable (whichever layout the project uses)
+test -f .claude/skills/kb/SKILL.md && echo "skill: YES"
+
+# 3. hook present, valid, and actually fires on a sample prompt
+test -f .claude/hooks/kb-reminder.py && echo "hook script: present"
+jq -e '.hooks.UserPromptSubmit' .claude/settings.json >/dev/null && echo "hook wired: YES"
+echo '{"prompt":"how does auth work"}' | python3 .claude/hooks/kb-reminder.py | jq -e .hookSpecificOutput >/dev/null && echo "hook fires: YES"
+```
+
+Then **restart the agent session** (or open `/hooks` once) so it loads the new `.mcp.json` server,
+the skill, and the freshly-created `settings.json` — the settings watcher only tracks `.claude/` if a
+settings file existed there at session start.
 
 ## How the projects connect
 

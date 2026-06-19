@@ -57,6 +57,17 @@ because it follows real edges (calls, eloquent, fk, sql, http_request) rather th
    re-running the same one.
 4. **Docs vs code.** Connection/architecture/impact → graph tools. "Where did we write about X" →
    `docs_search` → `docs_get` the most relevant path, then answer **with the citation**.
+5. **Reach for the graph BEFORE grep — and before delegating.** A spawned `Explore`/general
+   sub-agent defaults to text search and will *not* use these tools unless told. If you delegate a
+   "how does X work" investigation, either run the graph query yourself first, or instruct the
+   sub-agent explicitly to use the `kb` graph tools. Don't let a delegation silently downgrade the
+   answer to grep.
+6. **If the tools aren't visible, load them.** In a project with many MCP servers the host may
+   defer the `kb` tools behind a tool-search index — they won't appear in the live tool list and a
+   direct call fails until their schemas are loaded. Pull them in first via the host's tool-search
+   (e.g. a query like
+   `select:mcp__kb__graph_query,mcp__kb__graph_explain,mcp__kb__graph_affected,mcp__kb__graph_path,mcp__kb__docs_search`),
+   then call them normally. Activating this skill is the cue to do that — not to fall back to grep.
 
 ## Known caveats
 
@@ -81,7 +92,7 @@ graphify query   "<question>"  --graph graphify-out/graph.json
 graphify explain "<symbol>"    --graph graphify-out/graph.json
 graphify affected "<symbol>"   --graph graphify-out/graph.json
 graphify path    "<A>" "<B>"   --graph graphify-out/graph.json
-qmd query "<q>" -c kb   # then: qmd get <path>
+qmd qsearch "<q>" -c kb --no-rerank --no-expand   # then: qmd get <path>
 ```
 
 Broad architecture overview without a query: read `graphify-out/GRAPH_REPORT.md` in the KB checkout.

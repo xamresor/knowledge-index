@@ -47,7 +47,7 @@ and `docs_search`, `docs_get` (qmd `kb` collection). It wraps the `graphify`/`qm
   - `graphify affected "<symbol>" --graph graphify-out/graph.json` — reverse impact.
   - Broad architecture → read `graphify-out/GRAPH_REPORT.md` or open `graphify-out/graph.html`.
 - **Docs / "where did we write about X"** → qmd MCP tools (`mcp__qmd__query` → `get` → answer with
-  citation), or CLI: `qmd query "<q>" -c kb` → `qmd get <path>`. Search by meaning, then
+  citation), or CLI: `qmd qsearch "<q>" -c kb --no-rerank --no-expand` → `qmd get <path>`. Search by meaning, then
   read the full doc before answering.
 
 ## Maintenance

@@ -153,7 +153,23 @@ build_kb() {
   [ -d "$KB/.qmd" ] || qmd init >/dev/null 2>&1 || true
   while IFS='|' read -r name code docs routes calls serves; do
     [ -z "$docs" ] || [ ! -d "$docs" ] && continue
-    qmd collection add "$docs" --name "$COLLECTION" 2>/dev/null || true
+    # Stage a sanitized .md mirror: qmd 0.3.2's chunker slices on byte offsets and
+    # panics on multibyte UTF-8 at a chunk boundary. Transliterate docs to ASCII into
+    # repos/_docs/<name>/ and index that copy; the project's own docs are never touched.
+    local sdocs="$KB/repos/_docs/$name"
+    rm -rf "$sdocs"; mkdir -p "$sdocs"
+    rsync -a --include '*/' --include '*.md' --exclude '*' "$docs/" "$sdocs/" 2>/dev/null || true
+    "$PY" - "$sdocs" <<'PY'
+import sys, unicodedata, pathlib
+root = pathlib.Path(sys.argv[1])
+for p in root.rglob("*.md"):
+    s = p.read_text(encoding="utf-8", errors="ignore")
+    # decompose accents then drop anything outside ASCII (emoji, dashes, smart quotes)
+    clean = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    if clean != s:
+        p.write_text(clean, encoding="utf-8")
+PY
+    qmd collection add "$sdocs" --name "$COLLECTION" 2>/dev/null || true
   done < <(read_projects)
   qmd update 2>/dev/null || true
   qmd_embed
