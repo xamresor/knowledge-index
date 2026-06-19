@@ -4,7 +4,7 @@
 # merges them into one cross-repo graph, injects HTTP edges (frontend -> controllers),
 # clusters + renders the full graph.html, and (re)indexes docs into qmd.
 #
-# Usage: bin/kb build | update | graph | kb | label | status
+# Usage: bin/kb build | update | graph | kb | label | status | qmd-backend
 set -euo pipefail
 
 KB="$(cd "$(dirname "$0")/.." && pwd)"
@@ -16,6 +16,14 @@ COLLECTION="${KB_COLLECTION:-kb}"
 LOCAL_CFG="$KB/.kb.local"   # persisted local choices (e.g. QMD_BACKEND); gitignored
 [ -f "$LOCAL_CFG" ] && . "$LOCAL_CFG"
 export GRAPHIFY_VIZ_NODE_LIMIT="${GRAPHIFY_VIZ_NODE_LIMIT:-20000}"
+
+require_cfg() {
+  [ -f "$CFG" ] && return
+  echo "error: $CFG not found." >&2
+  echo "Copy the template first:  cp kb.projects.toml.example kb.projects.toml" >&2
+  echo "then edit it with your projects' paths." >&2
+  exit 1
+}
 
 # --- tiny TOML reader: emits "name|code(csv)|docs|routes|calls(csv)|serves" per project
 read_projects() { "$PY" - "$CFG" <<'PY'
@@ -49,6 +57,7 @@ stage_and_build() {
 }
 
 build_graph() {
+  require_cfg
   echo "==> Building per-project graphs"
   local merge_inputs=() routes_specs=()
   while IFS='|' read -r name code docs routes calls serves; do
@@ -139,6 +148,7 @@ qmd_embed() {
 }
 
 build_kb() {
+  require_cfg
   echo "==> Indexing docs into qmd collection '$COLLECTION'"
   [ -d "$KB/.qmd" ] || qmd init >/dev/null 2>&1 || true
   while IFS='|' read -r name code docs routes calls serves; do

@@ -13,8 +13,8 @@ how does it work, architecture, cross-repo, frontend to controller, who calls, w
 ## What this is
 
 The Code Knowledge Base is a **read-only** knowledge layer over a set of related repos — typically a
-Laravel API plus one or more Vue frontends. It exposes two on-device, zero-API-key layers through
-the `kb` MCP server (registered in each consuming project's `.mcp.json`):
+Laravel API plus one or more Vue frontends. It exposes two layers — on-device and zero-API-key by
+default — through the `kb` MCP server (registered in each consuming project's `.mcp.json`):
 
 - **Code graph** (graphify) — one merged AST graph. Every node is tagged with its `repo`, and
   `http_request` edges link a frontend `api.<verb>('<path>')` call site to the Laravel controller

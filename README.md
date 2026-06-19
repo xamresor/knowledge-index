@@ -3,10 +3,12 @@
 A standalone, read-only knowledge layer over a set of related code projects (for example a Laravel
 API and a Vue frontend). It builds **one merged code-connection graph** — including cross-repo edges
 that link frontend API calls to the Laravel controllers that serve them — and a **vectorized search
-index** over the projects' docs. Everything runs **on-device with no API keys**.
+index** over the projects' docs. By default everything runs **on-device with no API keys** (the
+`none` and `llama` embedding backends); only the optional `other` backend can reach an external
+service.
 
-Built on two existing tools: [**graphify**](https://github.com/) (AST code graph) and
-[**qmd**](https://github.com/tobi/qmd) (on-device markdown vector search).
+Built on two existing tools: [**graphify**](https://github.com/safishamsi/graphify) (AST code graph)
+and [**qmd**](https://github.com/tobi/qmd) (on-device markdown vector search).
 
 ## Requirements
 
@@ -15,13 +17,14 @@ before running a build:
 
 | Tool                  | Version (tested) | Used for |
 |-----------------------|---|---|
-| **graphify(https://github.com/safishamsi/graphify)**        | `>= 0.8.39` | AST code graph (`update`, `merge-graphs`, `cluster-only`, `query`, `path`, `explain`, `affected`). The build and `bin/kb-mcp` shell out to it. |
+| [**graphify**](https://github.com/safishamsi/graphify) | `>= 0.8.39` | AST code graph (`update`, `merge-graphs`, `cluster-only`, `query`, `path`, `explain`, `affected`). The build and `bin/kb-mcp` shell out to it. |
 | **qmd**               | `>= 2.5.3` | On-device markdown vector + BM25 doc search. |
 | **python3**           | `>= 3.10` | The enrichment scripts in `bin/` (standard library only — no packages). |
 | **rsync**             | any recent | Code-only staging of the indexed projects into `repos/`. |
 | **php** + **artisan** | the indexed app's version | Only needed if a project sets `routes` — `bin/kb` runs `php artisan route:list --json` to build cross-repo `http_request` edges. |
 
-Everything runs **on-device with no API keys**. Check what's installed:
+By default everything runs **on-device with no API keys** (see the embedding-backend choice under
+Configuration). Check what's installed:
 
 ```bash
 graphify --version && qmd --version && python3 --version
@@ -31,7 +34,7 @@ graphify --version && qmd --version && python3 --version
 
 ```bash
 make build      # build the merged graph + qmd doc index
-make open       # open the interactive graph.html
+make open       # open the typed/domain visualization (kb-graph.html)
 qmd query "how does auth work" -c kb
 graphify path "useAuthFlow.js" "AuthMethodsController" --graph graphify-out/graph.json
 ```
@@ -42,7 +45,9 @@ The qmd collection name defaults to `kb`; override it by setting `KB_COLLECTION`
 
 - `graphify-out/graph.json` — merged graph: every node tagged with its `repo`; `http_request`
   edges connect frontend call sites to backend controllers across repos.
-- `graphify-out/graph.html` — full interactive visualization.
+- `graphify-out/kb-graph.html` — the **primary** visualization: typed/domain view (shape = type,
+  color = domain), hierarchical and lazy-loaded. This is what `make open` opens.
+- `graphify-out/graph.html` — graphify's full interactive visualization (fallback).
 - `graphify-out/GRAPH_REPORT.md` — human-readable architecture report with communities.
 - qmd `kb` collection (`.qmd/`) — hybrid BM25 + vector search over all docs.
 

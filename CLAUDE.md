@@ -1,7 +1,8 @@
 # Code Knowledge Base — agent operating instructions
 
 This repo is a **read-only knowledge layer** over a set of related code projects. It never modifies
-them. Two layers, both on-device / zero-API-key:
+them. Two layers, on-device / zero-API-key by default (only the optional `other` qmd embedding
+backend can reach an external service):
 
 | Layer | Tool | Artifact |
 |---|---|---|
@@ -51,7 +52,9 @@ and `docs_search`, `docs_get` (qmd `kb` collection). It wraps the `graphify`/`qm
 
 ## Maintenance
 
-- `make update` — refresh graph + embeddings (AST only, no API cost). Run after the projects change.
+- `make update` — refresh the graph (AST extraction) + re-embed docs. No API cost with the `none`/
+  `llama` backends; the `other` backend may cost depending on what you point it at. Run after the
+  projects change.
 - `make graph` / `make kb` — rebuild one layer.
 - `make label` — (re)name communities by namespace/domain (deterministic, zero API cost).
 - `make status` — graph diagnostics + qmd index health.
