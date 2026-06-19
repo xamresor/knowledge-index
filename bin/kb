@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# SmartMonitor Knowledge Base builder.
+# Reads kb.projects.toml, builds per-project graphify graphs into repos/<name>/,
+# merges them into one cross-repo graph, injects HTTP edges (frontend -> controllers),
+# clusters + renders the full graph.html, and (re)indexes docs into qmd.
+#
+# Usage: bin/kb build | update | graph | kb | label | status
+set -euo pipefail
+
+KB="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$KB"
+PY=python3
+CFG="$KB/kb.projects.toml"
+OUT="$KB/graphify-out"
+COLLECTION="smartmonitor"
+export GRAPHIFY_VIZ_NODE_LIMIT="${GRAPHIFY_VIZ_NODE_LIMIT:-20000}"
+
+# --- tiny TOML reader: emits "name|code(csv)|docs|routes|calls(csv)|serves" per project
+read_projects() { "$PY" - "$CFG" <<'PY'
+import re, sys
+txt = open(sys.argv[1]).read()
+blocks = re.split(r'(?m)^\[\[project\]\]\s*$', txt)[1:]
+def val(b, k):
+    m = re.search(rf'(?m)^\s*{k}\s*=\s*(.+)$', b)
+    if not m: return ""
+    raw = m.group(1).split('#',1)[0].strip()
+    if raw.startswith('['):
+        return ",".join(re.findall(r'"([^"]+)"', raw))
+    return raw.strip('"')
+for b in blocks:
+    print("|".join(val(b,k) for k in ("name","code","docs","routes","calls","serves")))
+PY
+}
+
+stage_and_build() {
+  local name="$1" code_csv="$2"
+  local dest="$KB/repos/$name"
+  rm -rf "$dest"; mkdir -p "$dest"
+  IFS=',' read -ra dirs <<< "$code_csv"
+  for d in "${dirs[@]}"; do
+    [ -d "$d" ] && rsync -a --exclude vendor --exclude node_modules --exclude storage \
+      --exclude tests --exclude '*.png' --exclude '*.svg' --exclude '*.jpg' --exclude '*.jpeg' \
+      --exclude '*.gif' --exclude '*.ico' --exclude '*.webp' "$d" "$dest/" 2>/dev/null || true
+  done
+  echo "  [$name] staged $(find "$dest" -type f \( -name '*.php' -o -name '*.js' -o -name '*.vue' -o -name '*.ts' \) | wc -l) source files"
+  graphify update "$dest" >/dev/null 2>&1 || true
+}
+
+build_graph() {
+  echo "==> Building per-project graphs"
+  local merge_inputs=() routes_specs=()
+  while IFS='|' read -r name code docs routes calls serves; do
+    [ -z "$name" ] && continue
+    stage_and_build "$name" "$code"
+    merge_inputs+=("$KB/repos/$name/graphify-out/graph.json")
+    [ -n "$routes" ] && env -C "$routes" php artisan route:list --json >"$KB/routes.$name.json" 2>/dev/null || true
+    [ -n "$calls" ] && [ -n "$serves" ] && routes_specs+=("$serves|$calls")
+  done < <(read_projects)
+
+  echo "==> Merging into one cross-repo graph"
+  mkdir -p "$OUT"
+  graphify merge-graphs "${merge_inputs[@]}" --out "$OUT/graph.json" >/dev/null
+
+  echo "==> Injecting HTTP edges (frontend -> controllers)"
+  # re-walk config for calls/serves with their frontend roots
+  while IFS='|' read -r name code docs routes calls serves; do
+    [ -z "$calls" ] || [ -z "$serves" ] && continue
+    IFS=',' read -ra fe <<< "$calls"
+    "$PY" "$KB/bin/link_http.py" "$OUT/graph.json" "$KB/routes.$serves.json" "$serves" "${fe[@]}"
+  done < <(read_projects)
+
+  echo "==> Canonicalizing duplicate symbol/reference nodes"
+  "$PY" "$KB/bin/dedupe.py" "$OUT/graph.json"
+  echo "==> Decluttering framework god nodes (before clustering)"
+  "$PY" "$KB/bin/declutter.py" "$OUT/graph.json" "$KB/kb.hubs.txt"
+  echo "==> Clustering (locks final community ids)"
+  graphify cluster-only "$KB" --no-label >/dev/null
+  echo "==> Labeling communities by namespace/domain"
+  "$PY" "$KB/bin/label_namespaces.py" "$OUT/graph.json" "$OUT/.graphify_labels.json" | head -1
+  echo "==> Re-rendering report + full visualization with labels"
+  graphify cluster-only "$KB" --no-label >/dev/null
+  # final pass: ensure the labels file covers every community id in the rendered graph
+  "$PY" "$KB/bin/label_namespaces.py" "$OUT/graph.json" "$OUT/.graphify_labels.json" >/dev/null
+
+  echo "==> Enriching with node types, domains, db_table nodes + domain anchors"
+  "$PY" "$KB/bin/enrich.py" "$OUT/graph.json" "$KB/repos"
+  echo "==> Adding data-layer links (eloquent model rels, FK table->table, SQL code->table)"
+  "$PY" "$KB/bin/link_data.py" "$OUT/graph.json" "$KB/repos"
+  echo "==> Rendering custom typed/domain visualization"
+  "$PY" "$KB/bin/render_viz.py" "$OUT/graph.json" "$OUT/kb-graph.html"
+  echo "    graphify graph.html (fallback) + kb-graph.html (typed/domain) -> $OUT"
+}
+
+build_kb() {
+  echo "==> Indexing docs into qmd collection '$COLLECTION'"
+  [ -d "$KB/.qmd" ] || qmd init >/dev/null 2>&1 || true
+  while IFS='|' read -r name code docs routes calls serves; do
+    [ -z "$docs" ] || [ ! -d "$docs" ] && continue
+    qmd collection add "$docs" --name "$COLLECTION" 2>/dev/null || true
+  done < <(read_projects)
+  qmd update 2>/dev/null || true
+  qmd embed 2>/dev/null || true
+  qmd status || true
+}
+
+case "${1:-build}" in
+  build)  build_graph; build_kb ;;
+  graph)  build_graph ;;
+  kb)     build_kb ;;
+  update) build_graph; qmd update >/dev/null 2>&1 && qmd embed >/dev/null 2>&1 || true; echo "refreshed" ;;
+  label)  "$PY" "$KB/bin/label_namespaces.py" "$OUT/graph.json" "$OUT/.graphify_labels.json"
+          graphify cluster-only "$KB" --no-label >/dev/null; echo "relabeled + report regenerated" ;;
+  status) graphify diagnose multigraph --graph "$OUT/graph.json" | head -8; echo; qmd status ;;
+  *) echo "usage: bin/kb {build|graph|kb|update|label|status}"; exit 1 ;;
+esac

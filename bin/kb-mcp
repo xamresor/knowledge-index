@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""SmartMonitor KB — a zero-dependency MCP server (stdio) exposing the code graph + doc search.
+
+Plug into any agent via .mcp.json:
+    { "mcpServers": { "kb": { "command": "/var/www/kb/bin/kb-mcp" } } }
+
+Tools:
+  graph_query(question)      semantic BFS over the cross-repo code graph
+  graph_path(from, to)       shortest path between two symbols (incl. cross-repo http_request)
+  graph_explain(symbol)      a node, its neighbours and relations
+  graph_affected(symbol)     reverse impact (what depends on X)
+  docs_search(query)         hybrid vector/keyword search over the docs (qmd)
+  docs_get(path)             fetch a full doc by path/id
+
+Wraps the `graphify` and `qmd` CLIs; no Python packages required.
+"""
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+
+KB = "/var/www/kb"
+GRAPH = f"{KB}/graphify-out/graph.json"
+COLLECTION = "smartmonitor"
+PROTO = "2024-11-05"
+
+TOOLS = [
+    {"name": "graph_query", "description": "Semantic search over the SmartMonitor code graph "
+     "(api + webclient + bo). Returns a scoped subgraph for a question — cheaper/more precise "
+     "than grep. Use for architecture, 'how does X work', 'what connects to Y'.",
+     "inputSchema": {"type": "object", "properties": {"question": {"type": "string"}},
+                     "required": ["question"]}},
+    {"name": "graph_path", "description": "Shortest path between two symbols/files in the code "
+     "graph, traversing real relations incl. cross-repo http_request (frontend↔controller).",
+     "inputSchema": {"type": "object", "properties": {"from": {"type": "string"},
+                     "to": {"type": "string"}}, "required": ["from", "to"]}},
+    {"name": "graph_explain", "description": "Explain a symbol: its node, neighbours and relation "
+     "types (calls, eloquent, fk, sql, http_request, …).",
+     "inputSchema": {"type": "object", "properties": {"symbol": {"type": "string"}},
+                     "required": ["symbol"]}},
+    {"name": "graph_affected", "description": "Reverse impact analysis — what depends on / would be "
+     "affected by a change to the given symbol.",
+     "inputSchema": {"type": "object", "properties": {"symbol": {"type": "string"}},
+                     "required": ["symbol"]}},
+    {"name": "docs_search", "description": "Hybrid vector + keyword search over SmartMonitor docs "
+     "(api storage/dox, webclient/bo docs). Returns matching doc snippets with paths.",
+     "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}},
+                     "required": ["query"]}},
+    {"name": "docs_get", "description": "Fetch a full document by its qmd path or id "
+     "(e.g. from docs_search results).",
+     "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}},
+                     "required": ["path"]}},
+]
+
+
+def run(cmd: list[str], cwd: str | None = None) -> str:
+    try:
+        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=60)
+        out = (p.stdout or "") + (("\n[stderr] " + p.stderr) if p.returncode and p.stderr else "")
+        return out.strip()[:8000] or "(no results)"
+    except subprocess.TimeoutExpired:
+        return "(timed out)"
+    except Exception as e:  # noqa: BLE001
+        return f"(error: {e})"
+
+
+def call_tool(name: str, args: dict) -> str:
+    g = ["--graph", GRAPH]
+    if name == "graph_query":
+        return run(["graphify", "query", args.get("question", ""), *g, "--budget", "1800"])
+    if name == "graph_path":
+        return run(["graphify", "path", args.get("from", ""), args.get("to", ""), *g])
+    if name == "graph_explain":
+        return run(["graphify", "explain", args.get("symbol", ""), *g])
+    if name == "graph_affected":
+        return run(["graphify", "affected", args.get("symbol", ""), *g])
+    if name == "docs_search":
+        return run(["qmd", "query", args.get("query", ""), "-c", COLLECTION], cwd=KB)
+    if name == "docs_get":
+        return run(["qmd", "get", args.get("path", "")], cwd=KB)
+    return f"(unknown tool: {name})"
+
+
+def send(msg: dict) -> None:
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+
+
+def main() -> None:
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        method, mid = req.get("method"), req.get("id")
+        if method == "initialize":
+            send({"jsonrpc": "2.0", "id": mid, "result": {
+                "protocolVersion": req.get("params", {}).get("protocolVersion", PROTO),
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "kb", "version": "1.0"}}})
+        elif method == "tools/list":
+            send({"jsonrpc": "2.0", "id": mid, "result": {"tools": TOOLS}})
+        elif method == "tools/call":
+            p = req.get("params", {})
+            text = call_tool(p.get("name", ""), p.get("arguments", {}) or {})
+            send({"jsonrpc": "2.0", "id": mid,
+                  "result": {"content": [{"type": "text", "text": text}]}})
+        elif method == "ping":
+            send({"jsonrpc": "2.0", "id": mid, "result": {}})
+        elif mid is not None:  # unknown request -> respond so client isn't left hanging
+            send({"jsonrpc": "2.0", "id": mid,
+                  "error": {"code": -32601, "message": f"method not found: {method}"}})
+        # notifications (no id), incl. notifications/initialized: ignore
+
+
+if __name__ == "__main__":
+    main()

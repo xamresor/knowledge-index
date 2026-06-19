@@ -1,0 +1,33 @@
+# Dependencies / build output
+node_modules/
+vendor/
+dist/
+build/
+public/
+bootstrap/cache/
+storage/
+.git/
+
+# Tests & migrations (excluded to control graph size)
+tests/
+database/migrations/
+
+# Non-code assets (keep the corpus code-only → no LLM key needed for AST build)
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.ico
+*.webp
+*.bmp
+*.pdf
+*.woff
+*.woff2
+*.ttf
+*.eot
+*.map
+*.min.js
+*.min.css
+*.lock
+*.json
