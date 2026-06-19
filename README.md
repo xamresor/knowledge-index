@@ -18,7 +18,7 @@ before running a build:
 | Tool                  | Version (tested) | Used for |
 |-----------------------|---|---|
 | [**graphify**](https://github.com/safishamsi/graphify) | `>= 0.8.39` | AST code graph (`update`, `merge-graphs`, `cluster-only`, `query`, `path`, `explain`, `affected`). The build and `bin/kb-mcp` shell out to it. |
-| **qmd**               | `>= 2.5.3` | On-device markdown vector + BM25 doc search. |
+| **qmd**               | `>= 2.5.3` (the `query`/`search`/`vsearch` CLI) | On-device markdown vector + BM25 doc search. **Must be the modern lineage**: `bin/kb-mcp` and the docs use `qmd query`. The older `qsearch` lineage (e.g. 0.3.x) has an incompatible command set and will break doc search — see the note below. |
 | **python3**           | `>= 3.10` | The enrichment scripts in `bin/` (standard library only — no packages). |
 | **rsync**             | any recent | Code-only staging of the indexed projects into `repos/`. |
 | **php** + **artisan** | the indexed app's version | Only needed if a project sets `routes` — `bin/kb` runs `php artisan route:list --json` to build cross-repo `http_request` edges. |
@@ -28,7 +28,14 @@ Configuration). Check what's installed:
 
 ```bash
 graphify --version && qmd --version && python3 --version
+qmd query --help >/dev/null 2>&1 && echo "qmd: query CLI ok" || echo "qmd: WRONG lineage (no 'query' command)"
 ```
+
+> **qmd version compatibility.** This KB targets the modern qmd CLI (`query`/`search`/`vsearch`,
+> 2.5.3+). A divergent older lineage uses `qmd qsearch --no-rerank --no-expand` instead and lacks
+> `query`; `bin/kb-mcp`'s `docs_search` will fail against it. If you share one KB across several
+> machines, **install the same qmd lineage on all of them** — a `query`-based checkout and a
+> `qsearch`-based checkout cannot both work from the same `bin/kb-mcp`.
 
 ## Quick start
 
@@ -167,6 +174,9 @@ test -f .claude/skills/kb/SKILL.md && echo "skill: YES"
 test -f .claude/hooks/kb-reminder.py && echo "hook script: present"
 jq -e '.hooks.UserPromptSubmit' .claude/settings.json >/dev/null && echo "hook wired: YES"
 echo '{"prompt":"how does auth work"}' | python3 .claude/hooks/kb-reminder.py | jq -e .hookSpecificOutput >/dev/null && echo "hook fires: YES"
+
+# 4. qmd is the compatible lineage (kb-mcp's docs_search needs `qmd query`)
+qmd query --help >/dev/null 2>&1 && echo "qmd query CLI: YES" || echo "qmd query CLI: NO — wrong qmd lineage"
 ```
 
 Then **restart the agent session** (or open `/hooks` once) so it loads the new `.mcp.json` server,
