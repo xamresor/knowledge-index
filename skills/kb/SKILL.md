@@ -92,7 +92,7 @@ graphify query   "<question>"  --graph graphify-out/graph.json
 graphify explain "<symbol>"    --graph graphify-out/graph.json
 graphify affected "<symbol>"   --graph graphify-out/graph.json
 graphify path    "<A>" "<B>"   --graph graphify-out/graph.json
-qmd qsearch "<q>" -c kb --no-rerank --no-expand   # then: qmd get <path>
+qmd query "<q>" -c kb   # then: qmd get <path>
 ```
 
 Broad architecture overview without a query: read `graphify-out/GRAPH_REPORT.md` in the KB checkout.

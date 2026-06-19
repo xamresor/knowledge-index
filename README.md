@@ -35,7 +35,7 @@ graphify --version && qmd --version && python3 --version
 ```bash
 make build      # build the merged graph + qmd doc index
 make open       # open the typed/domain visualization (kb-graph.html)
-qmd qsearch "how does auth work" -c kb --no-rerank --no-expand
+qmd query "how does auth work" -c kb
 graphify path "useAuthFlow.js" "AuthMethodsController" --graph graphify-out/graph.json
 ```
 
