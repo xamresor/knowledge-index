@@ -52,6 +52,20 @@ Copy `kb.projects.toml.example` to `kb.projects.toml` and edit it to add/remove 
 which paths are scanned/indexed. No symlinks — paths are explicit. `.graphifyignore` controls what
 graphify excludes.
 
+### qmd embedding backend
+
+The first build asks **where to plug qmd's embeddings** and remembers the choice in `.kb.local`
+(gitignored):
+
+| Choice | What it does |
+|---|---|
+| `none` | Skip vectors entirely — BM25 keyword search only. No model download. |
+| `llama` | On-device llama.cpp embeddings (qmd's default; downloads a small GGUF model). |
+| `other` | Bring your own embedder: runs `$KB_QMD_EMBED_CMD` if set, otherwise plain `qmd embed` so you can point qmd at your own model/endpoint via its env. |
+
+Skip the prompt by setting `KB_QMD_BACKEND=none|llama|other` (e.g. in CI). Change it later with
+`make qmd-backend` (or `bin/kb qmd-backend`).
+
 ## Install into a project
 
 Each consuming project needs two things: the **MCP server config** so its agent can query the KB,

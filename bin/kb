@@ -13,6 +13,8 @@ PY=python3
 CFG="$KB/kb.projects.toml"
 OUT="$KB/graphify-out"
 COLLECTION="${KB_COLLECTION:-kb}"
+LOCAL_CFG="$KB/.kb.local"   # persisted local choices (e.g. QMD_BACKEND); gitignored
+[ -f "$LOCAL_CFG" ] && . "$LOCAL_CFG"
 export GRAPHIFY_VIZ_NODE_LIMIT="${GRAPHIFY_VIZ_NODE_LIMIT:-20000}"
 
 # --- tiny TOML reader: emits "name|code(csv)|docs|routes|calls(csv)|serves" per project
@@ -91,6 +93,51 @@ build_graph() {
   echo "    graphify graph.html (fallback) + kb-graph.html (typed/domain) -> $OUT"
 }
 
+# Where qmd gets its vector embeddings. Resolved once and remembered in .kb.local.
+#   none  - skip vectors; BM25 keyword search only (no model download)
+#   llama - on-device llama.cpp embeddings (qmd default; downloads a small GGUF model)
+#   other - bring your own: runs $KB_QMD_EMBED_CMD if set, else plain `qmd embed`
+#           (point qmd at your own model/endpoint via its env)
+# Precedence: KB_QMD_BACKEND env > persisted QMD_BACKEND > interactive prompt > llama.
+resolve_qmd_backend() {
+  local b="${KB_QMD_BACKEND:-${QMD_BACKEND:-}}"
+  if [ -z "$b" ]; then
+    if [ -t 0 ]; then
+      {
+        echo "Where should qmd plug its embeddings?"
+        echo "  none  - skip vectors; BM25 keyword search only (no model download)"
+        echo "  llama - on-device llama.cpp embeddings (qmd default; downloads a small model)"
+        echo "  other - configure qmd yourself, or set KB_QMD_EMBED_CMD"
+      } >&2
+      local ans; read -rp "  [none|llama|other] (llama): " ans </dev/tty || ans=""
+      b="${ans:-llama}"
+    else
+      b="llama"   # non-interactive (CI, hooks): default to the on-device backend
+    fi
+  fi
+  case "$b" in none|llama|other) ;; *) b="llama" ;; esac
+  # persist the resolved choice (env override is not persisted — it's a one-off)
+  if [ -z "${KB_QMD_BACKEND:-}" ] && [ "${QMD_BACKEND:-}" != "$b" ]; then
+    printf 'QMD_BACKEND=%s\n' "$b" > "$LOCAL_CFG"
+  fi
+  QMD_BACKEND="$b"
+  echo "$b"
+}
+
+qmd_embed() {
+  local b; b="$(resolve_qmd_backend)"
+  case "$b" in
+    none)  echo "    qmd backend=none — skipping embeddings (BM25 keyword search only)" ;;
+    other) if [ -n "${KB_QMD_EMBED_CMD:-}" ]; then
+             echo "    qmd backend=other — running KB_QMD_EMBED_CMD"; eval "$KB_QMD_EMBED_CMD" || true
+           else
+             echo "    qmd backend=other — running 'qmd embed' (configure qmd's model/endpoint via its env)"
+             qmd embed 2>/dev/null || true
+           fi ;;
+    llama) qmd embed 2>/dev/null || true ;;
+  esac
+}
+
 build_kb() {
   echo "==> Indexing docs into qmd collection '$COLLECTION'"
   [ -d "$KB/.qmd" ] || qmd init >/dev/null 2>&1 || true
@@ -99,7 +146,7 @@ build_kb() {
     qmd collection add "$docs" --name "$COLLECTION" 2>/dev/null || true
   done < <(read_projects)
   qmd update 2>/dev/null || true
-  qmd embed 2>/dev/null || true
+  qmd_embed
   qmd status || true
 }
 
@@ -107,9 +154,10 @@ case "${1:-build}" in
   build)  build_graph; build_kb ;;
   graph)  build_graph ;;
   kb)     build_kb ;;
-  update) build_graph; qmd update >/dev/null 2>&1 && qmd embed >/dev/null 2>&1 || true; echo "refreshed" ;;
+  update) build_graph; qmd update >/dev/null 2>&1 || true; qmd_embed; echo "refreshed" ;;
+  qmd-backend) rm -f "$LOCAL_CFG"; unset QMD_BACKEND; echo "qmd backend set to: $(resolve_qmd_backend)" ;;
   label)  "$PY" "$KB/bin/label_namespaces.py" "$OUT/graph.json" "$OUT/.graphify_labels.json"
           graphify cluster-only "$KB" --no-label >/dev/null; echo "relabeled + report regenerated" ;;
   status) graphify diagnose multigraph --graph "$OUT/graph.json" | head -8; echo; qmd status ;;
-  *) echo "usage: bin/kb {build|graph|kb|update|label|status}"; exit 1 ;;
+  *) echo "usage: bin/kb {build|graph|kb|update|label|status|qmd-backend}"; exit 1 ;;
 esac

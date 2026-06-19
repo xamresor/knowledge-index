@@ -14,6 +14,9 @@
 # Local project registry (real machine paths). Use kb.projects.toml.example as a template.
 /kb.projects.toml
 
+# Persisted local choices (e.g. the qmd embedding backend). Machine-specific.
+/.kb.local
+
 # Python bytecode
 __pycache__/
 *.pyc

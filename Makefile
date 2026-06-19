@@ -1,4 +1,4 @@
-.PHONY: build graph kb update label status open help
+.PHONY: build graph kb update label status open qmd-backend help
 .DEFAULT_GOAL := help
 
 build:  ## Full build: cross-repo graph + qmd KB
@@ -22,5 +22,8 @@ status: ## Graph diagnostics + qmd index health
 open:   ## Open the full graph visualization in a browser
 	@xdg-open graphify-out/kb-graph.html 2>/dev/null || echo "open graphify-out/kb-graph.html"
 
+qmd-backend: ## Re-pick the qmd embedding backend (none|llama|other)
+	@bin/kb qmd-backend
+
 help:
-	@grep -E '^[a-z]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:.*## /\t/' | sort
+	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:.*## /\t/' | sort
