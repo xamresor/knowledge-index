@@ -12,6 +12,7 @@ cd "$KB"
 PY=python3
 CFG="$KB/kb.projects.toml"
 OUT="$KB/graphify-out"
+DOCS_STAGE="$KB/.docs"      # aggregated docs root for qmd (one collection = one path); gitignored
 COLLECTION="${KB_COLLECTION:-kb}"
 LOCAL_CFG="$KB/.kb.local"   # persisted local choices (e.g. QMD_BACKEND); gitignored
 [ -f "$LOCAL_CFG" ] && . "$LOCAL_CFG"
@@ -149,17 +150,22 @@ qmd_embed() {
 
 build_kb() {
   require_cfg
-  echo "==> Indexing docs into qmd collection '$COLLECTION'"
+  echo "==> Staging + indexing docs into qmd collection '$COLLECTION'"
   [ -d "$KB/.qmd" ] || qmd init >/dev/null 2>&1 || true
+  # qmd binds one collection to a single root path, so aggregate every project's
+  # docs under one staged root ($DOCS_STAGE/<project>/...) and index that — otherwise
+  # only the first project's docs would be searchable.
+  rm -rf "$DOCS_STAGE"; mkdir -p "$DOCS_STAGE"
+  local staged=0
   while IFS='|' read -r name code docs routes calls serves; do
     [ -z "$docs" ] || [ ! -d "$docs" ] && continue
-    # Stage a sanitized .md mirror: qmd 0.3.2's chunker slices on byte offsets and
-    # panics on multibyte UTF-8 at a chunk boundary. Transliterate docs to ASCII into
-    # repos/_docs/<name>/ and index that copy; the project's own docs are never touched.
-    local sdocs="$KB/repos/_docs/$name"
-    rm -rf "$sdocs"; mkdir -p "$sdocs"
-    rsync -a --include '*/' --include '*.md' --exclude '*' "$docs/" "$sdocs/" 2>/dev/null || true
-    "$PY" - "$sdocs" <<'PY'
+    mkdir -p "$DOCS_STAGE/$name"
+    rsync -a --prune-empty-dirs --include='*/' --include='*.md' --exclude='*' \
+      "$docs/" "$DOCS_STAGE/$name/" 2>/dev/null || true
+    # Sanitize the staged copy to ASCII: qmd 0.3.2's chunker slices on byte offsets and
+    # panics on multibyte UTF-8 at a chunk boundary. Only this staged mirror is touched —
+    # the project's own docs are never modified.
+    "$PY" - "$DOCS_STAGE/$name" <<'PY'
 import sys, unicodedata, pathlib
 root = pathlib.Path(sys.argv[1])
 for p in root.rglob("*.md"):
@@ -169,8 +175,16 @@ for p in root.rglob("*.md"):
     if clean != s:
         p.write_text(clean, encoding="utf-8")
 PY
-    qmd collection add "$sdocs" --name "$COLLECTION" 2>/dev/null || true
+    echo "  [$name] staged $(find "$DOCS_STAGE/$name" -name '*.md' | wc -l) docs"
+    staged=1
   done < <(read_projects)
+  [ "$staged" = 1 ] || { echo "  (no docs configured)"; return; }
+  # point the single collection at the aggregated root; re-point only if it changed
+  local cur; cur="$(qmd collection show "$COLLECTION" 2>/dev/null | awk -F': *' '/Path:/{print $2; exit}')"
+  if [ "$cur" != "$DOCS_STAGE" ]; then
+    qmd collection remove "$COLLECTION" >/dev/null 2>&1 || true
+    qmd collection add "$DOCS_STAGE" --name "$COLLECTION" >/dev/null 2>&1 || true
+  fi
   qmd update 2>/dev/null || true
   qmd_embed
   qmd status || true

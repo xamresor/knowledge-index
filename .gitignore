@@ -4,6 +4,9 @@
 # qmd local index (regenerable via bin/kb kb)
 /.qmd/
 
+# Aggregated docs staging for qmd (rsynced from each project; regenerable)
+/.docs/
+
 # Generated route tables (regenerable via php artisan route:list)
 /routes.*.json
 
