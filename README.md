@@ -13,12 +13,12 @@ Built on two existing tools: [**graphify**](https://github.com/) (AST code graph
 These are external dependencies — not vendored. Install them and make sure they're on your `PATH`
 before running a build:
 
-| Tool | Version (tested) | Used for |
-|---|---|---|
-| **graphify** | `>= 0.8.39` | AST code graph (`update`, `merge-graphs`, `cluster-only`, `query`, `path`, `explain`, `affected`). The build and `bin/kb-mcp` shell out to it. |
-| **qmd** | `>= 2.5.3` | On-device markdown vector + BM25 doc search. |
-| **python3** | `>= 3.10` | The enrichment scripts in `bin/` (standard library only — no packages). |
-| **rsync** | any recent | Code-only staging of the indexed projects into `repos/`. |
+| Tool                  | Version (tested) | Used for |
+|-----------------------|---|---|
+| **graphify(https://github.com/safishamsi/graphify)**        | `>= 0.8.39` | AST code graph (`update`, `merge-graphs`, `cluster-only`, `query`, `path`, `explain`, `affected`). The build and `bin/kb-mcp` shell out to it. |
+| **qmd**               | `>= 2.5.3` | On-device markdown vector + BM25 doc search. |
+| **python3**           | `>= 3.10` | The enrichment scripts in `bin/` (standard library only — no packages). |
+| **rsync**             | any recent | Code-only staging of the indexed projects into `repos/`. |
 | **php** + **artisan** | the indexed app's version | Only needed if a project sets `routes` — `bin/kb` runs `php artisan route:list --json` to build cross-repo `http_request` edges. |
 
 Everything runs **on-device with no API keys**. Check what's installed:
