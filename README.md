@@ -53,7 +53,9 @@ The qmd collection name defaults to `kb`; override it by setting `KB_COLLECTION`
 - `graphify-out/graph.json` — merged graph: every node tagged with its `repo`; `http_request`
   edges connect frontend call sites to backend controllers across repos.
 - `graphify-out/kb-graph.html` — the **primary** visualization: typed/domain view (shape = type,
-  color = domain), hierarchical and lazy-loaded. This is what `make open` opens.
+  color = domain), hierarchical and lazy-loaded. This is what `make open` opens. The hierarchical
+  lazy-loading (domain super-nodes expand on demand, edges reroute) is built to stay usable on
+  **large codebases — 5k+ files is fine**; it never renders the whole graph at once.
 - `graphify-out/graph.html` — graphify's full interactive visualization (fallback).
 - `graphify-out/GRAPH_REPORT.md` — human-readable architecture report with communities.
 - qmd `kb` collection (`.qmd/`) — hybrid BM25 + vector search over all docs.
