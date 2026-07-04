@@ -1,0 +1,59 @@
+# Framework / cross-cutting "god node" symbols pruned before clustering + viz.
+# These are external base types, traits, interfaces and global helpers with no domain
+# meaning; each is referenced by dozens of files and collapses the layout into a hairball.
+# One symbol per line. Edit to tune. Method helpers use the ".name()" form.
+
+# Eloquent / models
+Model
+Builder
+Pivot
+SoftDeletes
+HasFactory
+HasUuids
+Authenticatable
+
+# Eloquent relation return types (framework, not domain models)
+HasMany
+HasOne
+BelongsTo
+BelongsToMany
+MorphTo
+MorphMany
+MorphOne
+MorphToMany
+HasManyThrough
+HasOneThrough
+MorphPivot
+
+# HTTP / requests / responses / resources
+Request
+Response
+JsonResponse
+FormRequest
+JsonResource
+Resource
+ResourceCollection
+HasMiddleware
+Controller
+
+# Jobs / queue / events
+Command
+Dispatchable
+Queueable
+ShouldQueue
+InteractsWithQueue
+SerializesModels
+ServiceProvider
+Notifiable
+
+# Runtime / misc framework types
+Collection
+Carbon
+Exception
+Migration
+Seeder
+Middleware
+AnonymousResourceCollection
+
+# Global cross-cutting helpers
+.log()

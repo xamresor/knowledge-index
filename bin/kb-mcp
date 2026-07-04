@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+"""Code Knowledge Base — a zero-dependency MCP server (stdio) exposing the code graph + doc search.
+
+Plug into any agent via .mcp.json:
+    { "mcpServers": { "kb": { "command": "/path/to/kb/bin/kb-mcp" } } }
+
+Tools:
+  graph_query(question)      semantic BFS over the cross-repo code graph
+  graph_path(from, to)       shortest path between two symbols (incl. cross-repo http_request)
+  graph_explain(symbol)      a node, its neighbours and relations
+  graph_affected(symbol)     reverse impact (what depends on X)
+  docs_search(query)         hybrid vector/keyword search over the docs (qmd)
+  docs_get(path)             fetch a full doc by path/id
+
+Wraps the `graphify` and `qmd` CLIs; no Python packages required.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+
+# Resolve the KB root from this script's location so the server is portable
+# across checkouts (no hardcoded install path).
+KB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+GRAPH = f"{KB}/graphify-out/graph.json"
+COLLECTION = os.environ.get("KB_COLLECTION", "kb")
+PROTO = "2024-11-05"
+TIMEOUT_GRAPH = 60      # graph queries are sub-second; this is just a safety net
+TIMEOUT_DOCS = 150      # qmd's first call loads the embedding model (cold start)
+
+TOOLS = [
+    {"name": "graph_query", "description": "Semantic search over the merged cross-repo code graph. "
+     "Returns a scoped subgraph for a question — cheaper/more precise "
+     "than grep. Use for architecture, 'how does X work', 'what connects to Y'.",
+     "inputSchema": {"type": "object", "properties": {"question": {"type": "string"}},
+                     "required": ["question"]}},
+    {"name": "graph_path", "description": "Shortest path between two symbols/files in the code "
+     "graph, traversing real relations incl. cross-repo http_request (frontend↔controller).",
+     "inputSchema": {"type": "object", "properties": {"from": {"type": "string"},
+                     "to": {"type": "string"}}, "required": ["from", "to"]}},
+    {"name": "graph_explain", "description": "Explain a symbol: its node, neighbours and relation "
+     "types (calls, eloquent, fk, sql, http_request, …).",
+     "inputSchema": {"type": "object", "properties": {"symbol": {"type": "string"}},
+                     "required": ["symbol"]}},
+    {"name": "graph_affected", "description": "Reverse impact analysis — what depends on / would be "
+     "affected by a change to the given symbol.",
+     "inputSchema": {"type": "object", "properties": {"symbol": {"type": "string"}},
+                     "required": ["symbol"]}},
+    {"name": "docs_search", "description": "Hybrid vector + keyword search over the indexed project "
+     "docs. Returns matching doc snippets with paths.",
+     "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}},
+                     "required": ["query"]}},
+    {"name": "docs_get", "description": "Fetch a full document by its qmd path or id "
+     "(e.g. from docs_search results).",
+     "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}},
+                     "required": ["path"]}},
+]
+
+
+def run(cmd: list[str], cwd: str | None = None, timeout: int = TIMEOUT_GRAPH) -> str:
+    try:
+        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        out = (p.stdout or "") + (("\n[stderr] " + p.stderr) if p.returncode and p.stderr else "")
+        return out.strip()[:8000] or "(no results)"
+    except subprocess.TimeoutExpired:
+        return "(timed out)"
+    except Exception as e:  # noqa: BLE001
+        return f"(error: {e})"
+
+
+def warm_qmd() -> None:
+    """Fire a throwaway qmd query in the background so the embedding model is loaded
+    before the first real docs_search — turns a >60s cold start into a ~2s warm call."""
+    try:
+        subprocess.Popen(
+            ["qmd", "query", "warmup", "-c", COLLECTION],
+            cwd=KB, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:  # noqa: BLE001
+        pass  # warm-up is best-effort; a cold first query still works, just slower
+
+
+_LABELS: list[tuple[str, str, str, str]] | None = None  # (label, type, repo, source_file)
+
+
+def labels() -> list[tuple[str, str, str, str]]:
+    """Lazy-load + cache node labels from the graph so we can suggest exact labels
+    when graphify reports an ambiguous match."""
+    global _LABELS
+    if _LABELS is None:
+        try:
+            with open(GRAPH) as f:
+                nodes = json.load(f).get("nodes", [])
+            _LABELS = [(n.get("label", ""), n.get("type", ""), n.get("repo", ""),
+                        n.get("source_file", "")) for n in nodes if n.get("label")]
+        except Exception:  # noqa: BLE001
+            _LABELS = []
+    return _LABELS
+
+
+def suggest(term: str, limit: int = 20) -> str:
+    """List exact node labels matching `term` (graphify matches by substring, so an
+    ambiguous term hits many). Exact and word-boundary matches are ranked first."""
+    t = term.strip().lower()
+    if not t:
+        return ""
+    hits = [row for row in labels() if t in row[0].lower()]
+    if not hits:
+        return ""
+
+    def rank(row: tuple[str, str, str, str]) -> tuple[int, int]:
+        label = row[0].lower()
+        if label == t:
+            return (0, len(label))
+        if re.search(rf"\b{re.escape(t)}\b", label):
+            return (1, len(label))
+        return (2, len(label))
+
+    hits.sort(key=rank)
+    seen, uniq = set(), []
+    for row in hits:
+        if row[0] not in seen:
+            seen.add(row[0])
+            uniq.append(row)
+    lines = []
+    for label, typ, repo, src in uniq[:limit]:
+        meta = " ".join(p for p in (typ, repo, src) if p)
+        lines.append(f"  {label}" + (f"  [{meta}]" if meta else ""))
+    more = f"\n(+{len(uniq) - limit} more — refine the term)" if len(uniq) > limit else ""
+    return (f'\n\nAmbiguous: "{term}" matches {len(uniq)} node label(s). '
+            f"Re-run with one of these EXACT labels:\n" + "\n".join(lines) + more)
+
+
+def with_suggestions(out: str, *terms: str) -> str:
+    """If graphify couldn't pin a unique node, append the candidate exact labels."""
+    if "node match" not in out.lower():
+        return out
+    extra = "".join(suggest(t) for t in terms if t)
+    return out + extra if extra else out
+
+
+def call_tool(name: str, args: dict) -> str:
+    g = ["--graph", GRAPH]
+    if name == "graph_query":
+        return run(["graphify", "query", args.get("question", ""), *g, "--budget", "1800"])
+    if name == "graph_path":
+        a, b = args.get("from", ""), args.get("to", "")
+        return with_suggestions(run(["graphify", "path", a, b, *g]), a, b)
+    if name == "graph_explain":
+        s = args.get("symbol", "")
+        return with_suggestions(run(["graphify", "explain", s, *g]), s)
+    if name == "graph_affected":
+        s = args.get("symbol", "")
+        return with_suggestions(run(["graphify", "affected", s, *g]), s)
+    if name == "docs_search":
+        q = args.get("query", "")
+        out = run(["qmd", "query", q, "-c", COLLECTION], cwd=KB, timeout=TIMEOUT_DOCS)
+        if out == "(timed out)":  # cold start exceeded the budget — fall back to instant BM25
+            out = run(["qmd", "search", q, "-c", COLLECTION], cwd=KB, timeout=TIMEOUT_GRAPH)
+            if out not in ("(timed out)", "(no results)"):
+                out = "[semantic search timed out — keyword (BM25) results below]\n\n" + out
+        return out
+    if name == "docs_get":
+        return run(["qmd", "get", args.get("path", "")], cwd=KB, timeout=TIMEOUT_DOCS)
+    return f"(unknown tool: {name})"
+
+
+def send(msg: dict) -> None:
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+
+
+def main() -> None:
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        method, mid = req.get("method"), req.get("id")
+        if method == "initialize":
+            warm_qmd()  # preload the embedding model so the first docs_search isn't a cold start
+            send({"jsonrpc": "2.0", "id": mid, "result": {
+                "protocolVersion": req.get("params", {}).get("protocolVersion", PROTO),
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "kb", "version": "1.0"}}})
+        elif method == "tools/list":
+            send({"jsonrpc": "2.0", "id": mid, "result": {"tools": TOOLS}})
+        elif method == "tools/call":
+            p = req.get("params", {})
+            text = call_tool(p.get("name", ""), p.get("arguments", {}) or {})
+            send({"jsonrpc": "2.0", "id": mid,
+                  "result": {"content": [{"type": "text", "text": text}]}})
+        elif method == "ping":
+            send({"jsonrpc": "2.0", "id": mid, "result": {}})
+        elif mid is not None:  # unknown request -> respond so client isn't left hanging
+            send({"jsonrpc": "2.0", "id": mid,
+                  "error": {"code": -32601, "message": f"method not found: {method}"}})
+        # notifications (no id), incl. notifications/initialized: ignore
+
+
+if __name__ == "__main__":
+    main()
