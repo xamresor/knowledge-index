@@ -197,3 +197,8 @@ The indexed projects are **never modified**. Their code is rsynced (code-only) i
 (git-ignored) for scanning; all outputs live here in this repo.
 
 See `CLAUDE.md` for the agent query workflow.
+## License
+
+[PolyForm Noncommercial License 1.0.0](LICENSE.md) — free for any **noncommercial** use (personal, research, education, hobbies); **commercial use is not permitted**.
+
+Required Notice: Copyright 2026 Romans Sereda (https://romans.sereda.lv)
