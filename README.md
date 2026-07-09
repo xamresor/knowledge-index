@@ -1,3 +1,4 @@
+<img width="1469" height="842" alt="Screenshot from 2026-07-09 22-06-41" src="https://github.com/user-attachments/assets/88c10be3-36cc-4173-b298-07163019cf17" />
 # Code Knowledge Base
 
 A standalone, read-only knowledge layer over a set of related code projects (for example a Laravel
