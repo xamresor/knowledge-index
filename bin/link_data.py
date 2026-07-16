@@ -121,21 +121,28 @@ def main() -> int:
                 continue
             dst = label_node.get(target)
             if dst and dst != src:
+                # INFERRED: `X::class` is exact syntax, but the node is resolved by bare class
+                # label — a name collision across repos would pick the wrong definition.
                 new.append({"source": src, "target": dst, "relation": "eloquent",
-                            "kind": rel, "confidence": "EXTRACTED", "weight": 1.0})
+                            "kind": rel, "confidence": "INFERRED", "confidence_score": 0.9,
+                            "weight": 1.0})
                 eloq += 1
 
     # 2) Foreign keys: db_table -> db_table (from migrations)
     fk = 0
-    def add_fk(cur, refs):
+    def add_fk(cur, refs, cur_from_filename=False):
+        # ->on('t')/constrained('t') names the referenced table exactly, but the OWNING table is
+        # only certain when Schema::create/table named it; a table guessed from the migration
+        # FILENAME (table_from_filename) is honestly AMBIGUOUS.
         nonlocal fk
+        conf = ("AMBIGUOUS", 0.6) if cur_from_filename else ("INFERRED", 0.9)
         for other in refs:
             if not cur or other == cur:
                 continue
             a = ensure_table(cur, table_domain.get(cur, "database"))
             b = ensure_table(other, table_domain.get(other, "database"))
             new.append({"source": a, "target": b, "relation": "fk",
-                        "confidence": "EXTRACTED", "weight": 1.0})
+                        "confidence": conf[0], "confidence_score": conf[1], "weight": 1.0})
             fk += 1
 
     for mdir in project_migration_dirs():
@@ -149,7 +156,8 @@ def main() -> int:
                         add_fk(tm.group(1), set(FK_ON.findall(blk)) | set(FK_CONSTRAINED.findall(blk)))
             else:
                 cur = schema_tables[0] if schema_tables else table_from_filename(os.path.basename(fp))
-                add_fk(cur, set(FK_ON.findall(txt)) | set(FK_CONSTRAINED.findall(txt)))
+                add_fk(cur, set(FK_ON.findall(txt)) | set(FK_CONSTRAINED.findall(txt)),
+                       cur_from_filename=not schema_tables)
 
     # 3) raw SQL / query-builder table refs: class/file -> db_table
     sql = 0
@@ -177,8 +185,10 @@ def main() -> int:
             continue
         for t in tbls:
             tid = ensure_table(t)
+            # INFERRED: the table name is literal, but the attach node comes from a
+            # source_file suffix match (fallback: the file node).
             new.append({"source": attach, "target": tid, "relation": "sql",
-                        "confidence": "EXTRACTED", "weight": 1.0})
+                        "confidence": "INFERRED", "confidence_score": 0.8, "weight": 1.0})
             sql += 1
 
     # dedup

@@ -159,8 +159,10 @@ def main() -> int:
                 table_nodes[tid] = {"id": tid, "label": t, "type": "db_table",
                                     "domain": n["domain"], "repo": "db",
                                     "source_file": "", "community": n.get("community")}
+            # INFERRED: `$table` is parsed exactly, but the model node is matched by bare
+            # class label — collisions across repos would attach the wrong model.
             new_links.append({"source": n["id"], "target": tid, "relation": "defines_table",
-                              "confidence": "EXTRACTED", "weight": 1.0})
+                              "confidence": "INFERRED", "confidence_score": 0.85, "weight": 1.0})
 
     # domain anchor nodes + membership edges (fixes orphans, builds clusters)
     from collections import Counter
@@ -176,6 +178,11 @@ def main() -> int:
                             "repo": "domain", "source_file": "", "community": n.get("community")}
         new_links.append({"source": n["id"], "target": aid, "relation": "in_domain",
                           "confidence": "DERIVED", "weight": 0.3})
+
+    # backfill: anything graphify's AST produced (calls/contains/method/use/import/trait)
+    # is confidence EXTRACTED — straight from syntax, no heuristics involved
+    for e in L:
+        e.setdefault("confidence", "EXTRACTED")
 
     g["nodes"] = N + list(table_nodes.values()) + list(anchors.values())
     g["links"] = L + new_links

@@ -76,8 +76,17 @@ domain services are never pruned. Domain classes (those with their own members) 
 `$table` (`defines_table` edges) and **domain anchor** nodes (`in_domain`). `bin/link_data.py`
 then adds the semantic data layer graphify's AST misses: **`eloquent`** model→model relations
 (belongsTo/hasMany…), **`fk`** table→table (parsed from migration foreign keys), and **`sql`**
-code→table (`DB::table()`/`->from()`). The function-usage graph (method→method `calls`) and
-use/import/trait edges come from graphify directly. `bin/render_viz.py` emits `kb-graph.html`,
-coloring edges by relation (http_request=red, eloquent=purple, fk=orange, sql=teal,
-defines_table=green).
+code→table (`DB::table()`/`->from()`). `bin/link_rationale.py` mines rationale comments
+(`NOTE:`/`WHY:`/`HACK:`/`SECURITY:`/`RATIONALE:` — deliberately not TODO) into **rationale** nodes
+with `explains` edges to the class/file they annotate (capped 8/file). The function-usage graph
+(method→method `calls`) and use/import/trait edges come from graphify directly.
+`bin/render_viz.py` emits `kb-graph.html`, coloring edges by relation (http_request=red,
+eloquent=purple, fk=orange, sql=teal, defines_table=green); AMBIGUOUS edges render dashed.
+
+**Edge confidence** (every edge carries it): `EXTRACTED` — straight from AST/literal syntax
+(graphify edges, backfilled in `enrich.py`; rationale `explains`); `INFERRED` — literal fact +
+heuristic node resolution (http_request 0.9, eloquent 0.9, defines_table 0.85, sql 0.8 — suffix
+or bare-label matching can mis-attach on collisions); `AMBIGUOUS` — guessed key, e.g. an fk whose
+owning table came from the migration *filename* (0.6); `DERIVED` — organizational, not a code
+fact (`in_domain`). Consumers: trust EXTRACTED, verify AMBIGUOUS.
 Tune framework pruning via `kb.hubs.txt`; domain folding threshold is `MIN_DOMAIN` in `enrich.py`.

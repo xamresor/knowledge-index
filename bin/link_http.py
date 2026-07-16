@@ -126,10 +126,12 @@ def main() -> int:
                             continue
                         seen.add(sig)
                         matched += 1
+                        # INFERRED, not EXTRACTED: the route match is exact, but both endpoints
+                        # are resolved by file-suffix heuristics (see api_node_for/fe_node_for).
                         edges.append({
                             "relation": "http_request",
-                            "confidence": "EXTRACTED",
-                            "confidence_score": 1.0,
+                            "confidence": "INFERRED",
+                            "confidence_score": 0.9,
                             "weight": 1.0,
                             "http_method": verb.upper(),
                             "http_uri": norm_path(raw),

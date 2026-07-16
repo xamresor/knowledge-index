@@ -25,13 +25,13 @@ SHAPE = {
     "resource": "box", "request": "box", "model": "database",
     "db_table": "square", "method": "triangle", "function": "triangle",
     "interface": "diamond", "trait": "diamond", "enum": "star", "template": "star",
-    "file": "dot", "symbol": "dot",
+    "file": "dot", "symbol": "dot", "rationale": "text",
 }
 BIG = {"controller", "model", "db_table"}     # types drawn a bit larger
 LEGEND = [("class / file", "dot ●"), ("method / function", "triangle ▲"),
           ("controller", "hexagon ⬡"), ("model", "database"), ("db_table", "square ▭"),
           ("resource / request", "box"), ("service / repository / interface / trait", "diamond ◆"),
-          ("enum / template (.vue)", "star ★")]
+          ("enum / template (.vue)", "star ★"), ("rationale (NOTE/WHY/HACK/SECURITY)", "text")]
 RED, BLUE, GREEN = "#e15759", "#4e79a7", "#59a14f"
 
 
@@ -209,6 +209,8 @@ def main() -> int:
             edge = {"from": s, "to": t,
                     "color": {"color": RED if http else GREEN, "opacity": 0.6 if http else 0.4},
                     "width": 3 if http else 1}
+            if e.get("confidence") == "AMBIGUOUS":
+                edge["dashes"] = True  # heuristic edge — visibly less trustworthy
             if http:
                 edge["arrows"] = "to"
             intra[ds].append(edge)

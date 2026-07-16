@@ -98,6 +98,8 @@ build_graph() {
   "$PY" "$KB/bin/enrich.py" "$OUT/graph.json" "$KB/repos"
   echo "==> Adding data-layer links (eloquent model rels, FK table->table, SQL code->table)"
   "$PY" "$KB/bin/link_data.py" "$OUT/graph.json" "$KB/repos"
+  echo "==> Mining rationale comments (NOTE/WHY/HACK/SECURITY -> rationale nodes)"
+  "$PY" "$KB/bin/link_rationale.py" "$OUT/graph.json" "$KB/repos"
   echo "==> Rendering custom typed/domain visualization"
   "$PY" "$KB/bin/render_viz.py" "$OUT/graph.json" "$OUT/kb-graph.html"
   echo "    graphify graph.html (fallback) + kb-graph.html (typed/domain) -> $OUT"
