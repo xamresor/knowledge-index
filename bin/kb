@@ -71,7 +71,12 @@ build_graph() {
 
   echo "==> Merging into one cross-repo graph"
   mkdir -p "$OUT"
-  graphify merge-graphs "${merge_inputs[@]}" --out "$OUT/graph.json" >/dev/null
+  if [ "${#merge_inputs[@]}" -ge 2 ]; then
+    graphify merge-graphs "${merge_inputs[@]}" --out "$OUT/graph.json" >/dev/null
+  else
+    # a single-project KB is legitimate — merge-graphs needs >=2, so just adopt the one graph
+    cp "${merge_inputs[0]}" "$OUT/graph.json"
+  fi
 
   echo "==> Injecting HTTP edges (frontend -> controllers)"
   # re-walk config for calls/serves with their frontend roots
@@ -162,7 +167,9 @@ build_kb() {
   while IFS='|' read -r name code docs routes calls serves; do
     [ -z "$docs" ] || [ ! -d "$docs" ] && continue
     mkdir -p "$DOCS_STAGE/$name"
-    rsync -a --prune-empty-dirs --include='*/' --include='*.md' --exclude='*' \
+    rsync -a --prune-empty-dirs \
+      --exclude='node_modules/' --exclude='.git/' --exclude='vendor/' \
+      --include='*/' --include='*.md' --exclude='*' \
       "$docs/" "$DOCS_STAGE/$name/" 2>/dev/null || true
     # Sanitize the staged copy to ASCII: qmd 0.3.2's chunker slices on byte offsets and
     # panics on multibyte UTF-8 at a chunk boundary. Only this staged mirror is touched —
