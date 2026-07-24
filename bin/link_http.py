@@ -19,12 +19,16 @@ import re
 import sys
 
 VERBS = ("get", "post", "put", "patch", "delete")
+# Dotted client: api.post('/v1/x') — verb is in the method name.
 CALL_RE = re.compile(r"\bapi\.(" + "|".join(VERBS) + r")\(\s*[`'\"]([^`'\"]+)", re.IGNORECASE)
-# Nuxt/ofetch style: $api('v2/objects', {method: 'POST', ...}) — verb lives in the
-# options object (same line or the next few), GET when absent.
-NUXT_CALL_RE = re.compile(r"\$api\(\s*[`'\"]([^`'\"]+)")
-NUXT_METHOD_RE = re.compile(r"\bmethod\s*:\s*['\"](" + "|".join(VERBS) + r")['\"]", re.IGNORECASE)
-NUXT_METHOD_WINDOW = 3  # lines after the call to look for `method:`
+# Options-object style: the verb lives in an options object (same line or the next few),
+# GET when absent. Covers ofetch/fetch wrappers across frameworks:
+#   $api('v2/objects', {method:'POST'})           (Nuxt/ofetch)
+#   apiFetch('/auth/x', {method:'DELETE'})        (Next/React wrapper, incl. apiUpload/apiDownload)
+#   fetch(`${API_BASE}/categories`, {...})        (raw fetch to a base-URL template literal)
+WRAPPER_RE = re.compile(r"(?<![\w.])(\$api|apiFetch|apiUpload|apiDownload|fetch)\(\s*[`'\"]([^`'\"]+)")
+METHOD_RE = re.compile(r"\bmethod\s*:\s*['\"](" + "|".join(VERBS) + r")['\"]", re.IGNORECASE)
+METHOD_WINDOW = 3  # lines after the call to look for `method:`
 
 
 def iter_calls(lines: list[str]):
@@ -32,15 +36,22 @@ def iter_calls(lines: list[str]):
     for i, line in enumerate(lines, 1):
         for verb, raw in CALL_RE.findall(line):
             yield i, verb.lower(), raw
-        for m in NUXT_CALL_RE.finditer(line):
-            window = line[m.end():] + "\n" + "\n".join(lines[i:i + NUXT_METHOD_WINDOW])
-            vm = NUXT_METHOD_RE.search(window)
-            yield i, (vm.group(1).lower() if vm else "get"), m.group(1)
+        for m in WRAPPER_RE.finditer(line):
+            name, raw = m.group(1), m.group(2)
+            # Bare fetch() counts only when the URL is a base-URL template (`${...}/…`);
+            # a plain fetch('/static/x') or fetch(url) is not a backend API call.
+            if name == "fetch" and not raw.startswith("${"):
+                continue
+            window = line[m.end():] + "\n" + "\n".join(lines[i:i + METHOD_WINDOW])
+            vm = METHOD_RE.search(window)
+            yield i, (vm.group(1).lower() if vm else "get"), raw
 
 
 def norm_path(p: str) -> str:
-    p = p.split("?", 1)[0].strip().strip("/")
-    p = re.sub(r"\$\{[^}]*\}", "{}", p)   # `${id}` -> {}
+    p = p.split("?", 1)[0].strip()
+    p = re.sub(r"^\$\{[^}]*\}", "", p)    # drop leading base-URL var: `${API_BASE}/x` -> `/x`
+    p = p.strip().strip("/")
+    p = re.sub(r"\$\{[^}]*\}", "{}", p)   # remaining `${id}` -> {}
     p = re.sub(r"\{[^}?]*\??\}", "{}", p)  # `{id}` / `{id?}` -> {}
     p = re.sub(r":\w+", "{}", p)           # `:id` -> {}
     p = re.sub(r"//+", "/", p)
@@ -72,6 +83,19 @@ def load_routes(path: str) -> dict[tuple[str, str], tuple[str, str | None]]:
     return routes
 
 
+def match_route(routes, verb: str, path: str):
+    """Exact (verb, path); else a route whose uri ends with `/<path>` for the same verb —
+    the frontend omits a base prefix the base-URL supplies (Laravel `api/`, an API version, …).
+    Pick the shortest such uri (fewest extra prefix segments) for a deterministic choice."""
+    hit = routes.get((verb, path))
+    if hit:
+        return hit
+    if not path:
+        return None
+    cands = sorted((u for (v, u) in routes if v == verb and u.endswith("/" + path)), key=len)
+    return routes[(verb, cands[0])] if cands else None
+
+
 def main() -> int:
     graph_path, routes_path, target_repo = sys.argv[1], sys.argv[2], sys.argv[3]
     fe_roots = sys.argv[4:]
@@ -82,7 +106,7 @@ def main() -> int:
     api_nodes = [n for n in graph["nodes"]
                  if n.get("repo") == target_repo and "." not in n["label"] and n.get("source_file")]
     fe_nodes = [n for n in graph["nodes"]
-                if n.get("repo") != target_repo and n["label"].endswith((".js", ".ts", ".vue"))
+                if n.get("repo") != target_repo and n["label"].endswith((".js", ".ts", ".tsx", ".vue"))
                 and n.get("source_file")]
 
     # method nodes (label like ".toggleMic()") in the target repo, by source_file
@@ -116,9 +140,12 @@ def main() -> int:
     edges, matched, unmatched, seen = [], 0, 0, set()
     for root in fe_roots:
         repo_root = os.path.dirname(root.rstrip("/"))
-        for dp, _, files in os.walk(root):
+        for dp, dirs, files in os.walk(root):
+            # don't scan dependency / build output — not our source, and slow
+            dirs[:] = [d for d in dirs
+                       if d not in {"node_modules", ".next", ".nuxt", "dist", "build", "vendor"}]
             for fn in files:
-                if not fn.endswith((".js", ".ts", ".vue")):
+                if not fn.endswith((".js", ".ts", ".tsx", ".vue")):
                     continue
                 fp = os.path.join(dp, fn)
                 rel = os.path.relpath(fp, repo_root)
@@ -128,7 +155,7 @@ def main() -> int:
                     continue
                 src_node = fe_node_for(rel)
                 for i, verb, raw in iter_calls(lines):
-                    ap = routes.get((verb, norm_path(raw)))
+                    ap = match_route(routes, verb, norm_path(raw))
                     if not ap:
                         unmatched += 1
                         continue

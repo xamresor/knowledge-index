@@ -188,9 +188,12 @@ settings file existed there at session start.
 
 ## How the projects connect
 
-`bin/link_http.py` reads each Laravel app's `php artisan route:list --json` and matches
-`api.<verb>('<path>')` calls in the frontends against it, injecting `http_request` edges. This is
-what makes `graphify path` traverse from a Vue file to the controller that serves its request.
+`bin/link_http.py` reads each Laravel app's `php artisan route:list --json` and matches the
+frontend's API call sites against it, injecting `http_request` edges. It recognizes the common
+shapes — dotted clients (`api.<verb>('<path>')`), ofetch/fetch wrappers where the verb sits in an
+options object (`$api(...)`, `apiFetch(...)`, and a raw `fetch(\`${API_BASE}/…\`)`) — and tolerates
+the frontend omitting a base prefix that the base URL supplies (e.g. Laravel's `api/`). This is
+what makes `graphify path` traverse from a Vue/React file to the controller that serves its request.
 
 ## Footprint
 
