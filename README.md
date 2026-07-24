@@ -8,7 +8,7 @@ index** over the projects' docs. By default everything runs **on-device with no 
 `none` and `llama` embedding backends); only the optional `other` backend can reach an external
 service.
 
-Built on two existing tools: [**graphify**](https://github.com/safishamsi/graphify) (AST code graph)
+Built on two existing tools: [**graphify**](https://github.com/Graphify-Labs/graphify) (AST code graph)
 and [**qmd**](https://github.com/tobi/qmd) (on-device markdown vector search).
 
 ## Requirements
@@ -18,7 +18,7 @@ before running a build:
 
 | Tool                  | Version (tested) | Used for |
 |-----------------------|---|---|
-| [**graphify**](https://github.com/safishamsi/graphify) | `>= 0.8.39` | AST code graph (`update`, `merge-graphs`, `cluster-only`, `query`, `path`, `explain`, `affected`). The build and `bin/kb-mcp` shell out to it. |
+| [**graphify**](https://github.com/Graphify-Labs/graphify) | `>= 0.9.25` | AST code graph (`update`, `merge-graphs`, `cluster-only`, `query`, `path`, `explain`, `affected`). The build and `bin/kb-mcp` shell out to it. |
 | **qmd**               | `>= 2.5.3` (the `query`/`search`/`vsearch` CLI) | On-device markdown vector + BM25 doc search. **Must be the modern lineage**: `bin/kb-mcp` and the docs use `qmd query`. The older `qsearch` lineage (e.g. 0.3.x) has an incompatible command set and will break doc search — see the note below. |
 | **python3**           | `>= 3.10` | The enrichment scripts in `bin/` (standard library only — no packages). |
 | **rsync**             | any recent | Code-only staging of the indexed projects into `repos/`. |
