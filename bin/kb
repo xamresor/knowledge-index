@@ -53,7 +53,7 @@ stage_and_build() {
       --exclude tests --exclude '*.png' --exclude '*.svg' --exclude '*.jpg' --exclude '*.jpeg' \
       --exclude '*.gif' --exclude '*.ico' --exclude '*.webp' "$d" "$dest/" 2>/dev/null || true
   done
-  echo "  [$name] staged $(find "$dest" -type f \( -name '*.php' -o -name '*.js' -o -name '*.vue' -o -name '*.ts' \) | wc -l) source files"
+  echo "  [$name] staged $(find "$dest" -type f \( -name '*.php' -o -name '*.js' -o -name '*.vue' -o -name '*.ts' -o -name '*.tsx' -o -name '*.py' \) | wc -l) source files"
   graphify update "$dest" >/dev/null 2>&1 || true
 }
 
@@ -63,6 +63,10 @@ build_graph() {
   local merge_inputs=() routes_specs=()
   while IFS='|' read -r name code docs routes calls serves; do
     [ -z "$name" ] && continue
+    if [ -z "$code" ]; then
+      echo "  [$name] docs-only — skipped from graph"
+      continue
+    fi
     stage_and_build "$name" "$code"
     merge_inputs+=("$KB/repos/$name/graphify-out/graph.json")
     [ -n "$routes" ] && env -C "$routes" php artisan route:list --json >"$KB/routes.$name.json" 2>/dev/null || true
