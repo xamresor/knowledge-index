@@ -195,6 +195,15 @@ options object (`$api(...)`, `apiFetch(...)`, and a raw `fetch(\`${API_BASE}/…
 the frontend omitting a base prefix that the base URL supplies (e.g. Laravel's `api/`). This is
 what makes `graphify path` traverse from a Vue/React file to the controller that serves its request.
 
+## Roadmap
+
+- [ ] **Mutation testing for `bin/link_http.py`.** The matcher has unit tests
+  (`make test`), but tests can pass while being blind to real regressions. Add a
+  mutation pass — flip a regex, swap the GET default to POST, invert an
+  `endswith`, drop the shortest-suffix sort — and confirm the suite *fails* on
+  each (every mutant killed). Keep it dependency-light (a small stdlib harness +
+  `make mutation`) or wire up `mutmut` in a venv.
+
 ## Footprint
 
 The indexed projects are **never modified**. Their code is rsynced (code-only) into `repos/`
