@@ -20,6 +20,22 @@ import sys
 
 VERBS = ("get", "post", "put", "patch", "delete")
 CALL_RE = re.compile(r"\bapi\.(" + "|".join(VERBS) + r")\(\s*[`'\"]([^`'\"]+)", re.IGNORECASE)
+# Nuxt/ofetch style: $api('v2/objects', {method: 'POST', ...}) — verb lives in the
+# options object (same line or the next few), GET when absent.
+NUXT_CALL_RE = re.compile(r"\$api\(\s*[`'\"]([^`'\"]+)")
+NUXT_METHOD_RE = re.compile(r"\bmethod\s*:\s*['\"](" + "|".join(VERBS) + r")['\"]", re.IGNORECASE)
+NUXT_METHOD_WINDOW = 3  # lines after the call to look for `method:`
+
+
+def iter_calls(lines: list[str]):
+    """Yield (lineno, verb, raw_path) for every recognized API call site."""
+    for i, line in enumerate(lines, 1):
+        for verb, raw in CALL_RE.findall(line):
+            yield i, verb.lower(), raw
+        for m in NUXT_CALL_RE.finditer(line):
+            window = line[m.end():] + "\n" + "\n".join(lines[i:i + NUXT_METHOD_WINDOW])
+            vm = NUXT_METHOD_RE.search(window)
+            yield i, (vm.group(1).lower() if vm else "get"), m.group(1)
 
 
 def norm_path(p: str) -> str:
@@ -111,35 +127,34 @@ def main() -> int:
                 except OSError:
                     continue
                 src_node = fe_node_for(rel)
-                for i, line in enumerate(lines, 1):
-                    for verb, raw in CALL_RE.findall(line):
-                        ap = routes.get((verb.lower(), norm_path(raw)))
-                        if not ap:
-                            unmatched += 1
-                            continue
-                        tgt = api_node_for(ap[0], ap[1])
-                        if not (src_node and tgt):
-                            unmatched += 1
-                            continue
-                        sig = (src_node, tgt, verb.lower(), norm_path(raw))
-                        if sig in seen:
-                            continue
-                        seen.add(sig)
-                        matched += 1
-                        # INFERRED, not EXTRACTED: the route match is exact, but both endpoints
-                        # are resolved by file-suffix heuristics (see api_node_for/fe_node_for).
-                        edges.append({
-                            "relation": "http_request",
-                            "confidence": "INFERRED",
-                            "confidence_score": 0.9,
-                            "weight": 1.0,
-                            "http_method": verb.upper(),
-                            "http_uri": norm_path(raw),
-                            "source_file": rel,
-                            "source_location": f"L{i}",
-                            "source": src_node,
-                            "target": tgt,
-                        })
+                for i, verb, raw in iter_calls(lines):
+                    ap = routes.get((verb, norm_path(raw)))
+                    if not ap:
+                        unmatched += 1
+                        continue
+                    tgt = api_node_for(ap[0], ap[1])
+                    if not (src_node and tgt):
+                        unmatched += 1
+                        continue
+                    sig = (src_node, tgt, verb, norm_path(raw))
+                    if sig in seen:
+                        continue
+                    seen.add(sig)
+                    matched += 1
+                    # INFERRED, not EXTRACTED: the route match is exact, but both endpoints
+                    # are resolved by file-suffix heuristics (see api_node_for/fe_node_for).
+                    edges.append({
+                        "relation": "http_request",
+                        "confidence": "INFERRED",
+                        "confidence_score": 0.9,
+                        "weight": 1.0,
+                        "http_method": verb.upper(),
+                        "http_uri": norm_path(raw),
+                        "source_file": rel,
+                        "source_location": f"L{i}",
+                        "source": src_node,
+                        "target": tgt,
+                    })
 
     graph["links"].extend(edges)
     json.dump(graph, open(graph_path, "w"))
