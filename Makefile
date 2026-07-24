@@ -1,4 +1,4 @@
-.PHONY: build graph kb update label status open qmd-backend help
+.PHONY: build graph kb update label status open qmd-backend test help
 .DEFAULT_GOAL := help
 
 build:  ## Full build: cross-repo graph + qmd KB
@@ -24,6 +24,9 @@ open:   ## Open the full graph visualization in a browser
 
 qmd-backend: ## Re-pick the qmd embedding backend (none|llama|other)
 	@bin/kb qmd-backend
+
+test:   ## Run the unit tests (stdlib unittest, no deps)
+	@python3 -m unittest discover -s tests
 
 help:
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:.*## /\t/' | sort

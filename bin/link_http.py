@@ -48,12 +48,15 @@ def iter_calls(lines: list[str]):
 
 
 def norm_path(p: str) -> str:
-    p = p.split("?", 1)[0].strip()
+    p = p.strip()
     p = re.sub(r"^\$\{[^}]*\}", "", p)    # drop leading base-URL var: `${API_BASE}/x` -> `/x`
-    p = p.strip().strip("/")
     p = re.sub(r"\$\{[^}]*\}", "{}", p)   # remaining `${id}` -> {}
-    p = re.sub(r"\{[^}?]*\??\}", "{}", p)  # `{id}` / `{id?}` -> {}
-    p = re.sub(r":\w+", "{}", p)           # `:id` -> {}
+    # collapse path params BEFORE stripping the query, so an optional Laravel
+    # param `{id?}` isn't cut in half by the `?` split below.
+    p = re.sub(r"\{[^}]*\}", "{}", p)     # `{id}` / `{id?}` -> {}
+    p = re.sub(r":\w+", "{}", p)          # `:id` -> {}
+    p = p.split("?", 1)[0]                # strip query string
+    p = p.strip().strip("/")
     p = re.sub(r"//+", "/", p)
     return p.lower()
 
