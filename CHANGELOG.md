@@ -30,10 +30,13 @@ The single source of truth for the current version is the `VERSION` file. It is 
   - **Non-search graph operations stay separate** (`/graph/path`, `/graph/explain`,
     `/graph/affected`): they are traversals, not queries, and squeezing them into `/search` would
     make one endpoint mean four things.
-  - **Write path lands here, not earlier.** `PUT /doc` + MCP `docs_put`, taking a fragment with a
-    target anchor; **provenance is auto-filled** and a document without it is rejected. Caller
-    identity is the *adapter's* job (HTTP: token → agent name; MCP: `clientInfo` from `initialize`),
-    provenance assembly is the *core's*.
+  - **No write path — read-only by design** (decided 2026-07-25, correcting an earlier plan to put
+    `docs_put` here). This project owns an **index**, not a corpus: it has nowhere of its own to store
+    a document. Accepting writes would mean either writing into someone else's repository, or keeping
+    a second copy of the text — and the second copy would quietly become a competing source of truth,
+    which is exactly what the "files are the source of truth, the index is a rebuildable projection"
+    rule exists to prevent. Writes belong to whoever owns the corpus; this project reads it and can be
+    thrown away and rebuilt at any time.
   - **Scopes** become a first-class parameter of the unified surface (one collection per ownership
     boundary), rather than an implicit collection name in the environment.
   - **`GET /version`** returns `{repo, api_contract}` — the repo semver and the surface's own
@@ -46,6 +49,8 @@ The single source of truth for the current version is the `VERSION` file. It is 
     design (SSH), not by binding wide.
   - **Zero-dependency constraint kept:** request validation reads the same schema dicts (types +
     required), no `jsonschema` dependency added.
+  - Consequence of dropping the write path: nothing here depends on a block-anchor format any more,
+    so `0.4.0` is unblocked — anchors are a corpus-side question for whoever implements the writer.
 - **0.5.0** — rest of the query layer: stopword handling before the lexical leg, and routing between
   the lexical and vector legs by question shape (measured: the lexical leg wins on pinpoint questions,
   the hybrid on multi-page ones).
