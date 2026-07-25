@@ -23,6 +23,9 @@ import pathlib
 import subprocess
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from alias_expand import expand as expand_aliases, load_aliases  # noqa: E402
+
 # Resolve the KB root from this script's location so the server is portable
 # across checkouts (no hardcoded install path).
 KB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -40,6 +43,10 @@ def _read_version() -> str:
 
 
 VERSION = _read_version()
+
+# Alias table is deployment data (gitignored aliases.toml); absent file = feature off.
+# Loaded once at startup: the table is small and hand-curated, not hot data.
+ALIASES = load_aliases()
 TIMEOUT_GRAPH = 60      # graph queries are sub-second; this is just a safety net
 TIMEOUT_DOCS = 150      # qmd's first call loads the embedding model (cold start)
 
@@ -170,12 +177,20 @@ def call_tool(name: str, args: dict) -> str:
         return with_suggestions(run(["graphify", "affected", s, *g]), s)
     if name == "docs_search":
         q = args.get("query", "")
+        # Directional alias expansion (old name -> canonical) before the query reaches qmd, i.e.
+        # before stemming. Renames are the one recall failure the corpus cannot fix by itself:
+        # the page that owns a subject only knows its current name. See bin/alias_expand.py.
+        expanded = expand_aliases(q, ALIASES)
+        note = ""
+        if expanded != q:
+            note = f"[alias expansion: {q!r} -> {expanded!r}]\n\n"
+        q = expanded
         out = run(["qmd", "query", q, "-c", COLLECTION], cwd=KB, timeout=TIMEOUT_DOCS)
         if out == "(timed out)":  # cold start exceeded the budget — fall back to instant BM25
             out = run(["qmd", "search", q, "-c", COLLECTION], cwd=KB, timeout=TIMEOUT_GRAPH)
             if out not in ("(timed out)", "(no results)"):
                 out = "[semantic search timed out — keyword (BM25) results below]\n\n" + out
-        return out
+        return note + out
     if name == "docs_get":
         return run(["qmd", "get", args.get("path", "")], cwd=KB, timeout=TIMEOUT_DOCS)
     return f"(unknown tool: {name})"

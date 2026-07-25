@@ -1,0 +1,32 @@
+# Alias table — deployment data, NOT code. Copy to `aliases.toml` (gitignored) and fill in with the
+# renames your corpus actually went through.
+#
+#   cp aliases.toml.example aliases.toml
+#
+# Rules (both learned from measurement, see bin/alias_expand.py):
+#   * DIRECTIONAL: `from` = the old/wrong name a human still types, `to` = the canonical term(s)
+#     appended to the query. Never list every spelling of a thing on both sides — pages that discuss
+#     renames (changelogs, logs, planning notes) contain all spellings at once and would win rank 1.
+#   * Matching happens on the RAW query text, before the index's stemmer, so a brand that the stemmer
+#     collapses into an ordinary word still behaves like a brand.
+#
+# Keep it small and true: an alias that is not a real rename is noise.
+
+[[alias]]
+from = "old-product-name"
+to = "new-product-name"
+
+[[alias]]
+# Repo renames: the old name lingers in a human's memory and in old paths.
+from = "old-repo-name"
+to = "new-repo-name"
+
+[[alias]]
+# A person you first recorded under the wrong name (it happens, and search pays for it).
+from = "wrong-person-name"
+to = "correct-person-name"
+
+[[alias]]
+# Old filesystem path → the canonical directory name. The path segment matches as a whole token.
+from = "old-dir-name"
+to = "new-dir-name"

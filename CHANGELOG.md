@@ -14,15 +14,48 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
-Planned, in the order decided 2026-07-25:
-
-- **0.3.0** — write path: `docs_put` / `POST` accepting a fragment with a target anchor and
+- **0.4.0** — write path: `docs_put` / `POST` accepting a fragment with a target anchor and
   **auto-filled provenance** (rejects documents without it); scopes as one collection per ownership
   boundary.
-- **0.4.0** — query layer: stopword handling, alias dictionary (query-time synonym expansion),
-  routing between the lexical and vector legs by question shape.
+- **0.5.0** — rest of the query layer: stopword handling before the lexical leg, and routing between
+  the lexical and vector legs by question shape (measured: the lexical leg wins on pinpoint questions,
+  the hybrid on multi-page ones).
+- **Backlog — entity registry with an owner flag.** The alias table shipped in 0.3.0 restores
+  *presence* but not *rank*: a page can now be found by its old name yet still sit at position 6–10,
+  because nothing distinguishes "this page owns the subject" from "this page mentions it in passing"
+  (including incidental hits inside paths). The form that fixes it is
+  `entities(id, prefLabel, altLabels[])` + `mentions(entity_id, doc, role)` with
+  `role ∈ {owner, mention, incidental}`, built at ingest. Worth it when client corpora arrive, not for
+  the few points it would add here.
+- Auto-discovery of alias candidates (git renames via `--diff-filter=R`, edited wikilinks, fuzzy name
+  similarity) — **review-gated**, never automatic, or determinism is gone.
 - **0.5.0** — remote canon: the index lives on a server, local agents reach it over MCP/SSH.
 - **1.0.0** — when the MCP tool contract stops changing *and* a second independent consumer exists.
+
+## [0.3.0] — 2026-07-25
+
+### Added
+- **Alias library — directional query expansion** (`bin/alias_expand.py`, wired into the MCP
+  `docs_search`). When a query contains an old name, the canonical term is appended before the query
+  reaches the index; the original wording is preserved, and the expansion is echoed in the result so
+  it is never silent.
+  - **Deployment data, not code:** the table lives in a gitignored `aliases.toml`
+    (`aliases.toml.example` is committed), exactly like `kb.projects.toml` — it names private
+    projects, products and people. A missing file means the feature is simply off.
+  - **Directional on purpose (old → canonical).** A symmetric expansion that dumps every spelling
+    into the query pulls the *meta* layer to rank 1 — changelogs, planning notes and logs are the
+    documents that contain all spellings at once. Measured and rejected.
+  - **Matching happens on raw query text, before stemming.** FTS5's `porter unicode61` can collapse a
+    brand into an ordinary word (a product named `Bookinger` stems to `booking`), which turns an alias query into a stopword
+    query; matching the raw string keeps the alias an alias. Whole-token match, tolerant of path
+    separators, so an old path segment (`/srv/oldname`) triggers too.
+  - **Measured on a 27-question golden set** (lexical leg): alias-type recall **0.50 → 0.70**, overall
+    recall **0.735 → 0.772**, MRR **0.526 → 0.536** — i.e. no rank regression, which was the risk.
+    Honest limit: the two questions it rescues land at rank 6–10 (presence restored, rank not), and
+    three of five alias questions already worked without it.
+
+### Changed
+- Roadmap reordered: the alias library became `0.3.0`; the write path moves to `0.4.0`.
 
 ## [0.2.0] — 2026-07-25
 

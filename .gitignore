@@ -28,3 +28,6 @@ __pycache__/
 /.idea/
 /.claude/settings.local.json
 
+
+# Deployment data: the alias table names private projects/products/people (see aliases.toml.example)
+aliases.toml
