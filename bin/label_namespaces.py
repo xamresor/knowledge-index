@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import re
 import sys
+
+import graph
 from collections import Counter, defaultdict
 
 
@@ -43,11 +45,11 @@ def domain(node: dict) -> str | None:
 
 def main() -> int:
     graph_path, labels_path = sys.argv[1], sys.argv[2]
-    graph = json.load(open(graph_path))
+    g = graph.load(graph_path)
 
     by_comm: dict[int, Counter] = defaultdict(Counter)
     repos_by_comm: dict[int, Counter] = defaultdict(Counter)
-    for n in graph["nodes"]:
+    for n in graph.nodes(g):
         c = n.get("community")
         if c is None:
             continue
@@ -68,7 +70,7 @@ def main() -> int:
             name = f"{name} + {top[1][0]}"
         labels[str(c)] = f"{repo} · {name}"
 
-    json.dump(labels, open(labels_path, "w"), indent=0)
+    graph.write_json(labels, labels_path, indent=0)
     print(f"labeled {len(labels)} communities by namespace/domain")
     for c, l in sorted(labels.items(), key=lambda kv: int(kv[0]))[:12]:
         print(f"  {c}: {l}")

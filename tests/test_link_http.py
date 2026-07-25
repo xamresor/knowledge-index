@@ -6,15 +6,11 @@ base-URL `fetch()`, leading base-URL interpolation, omitted `api/` prefix).
 
 Stdlib only — run with `python3 -m unittest discover tests` (no pytest needed).
 """
-import importlib.util
-import os
 import unittest
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_SPEC = importlib.util.spec_from_file_location(
-    "link_http", os.path.join(_HERE, "..", "bin", "link_http.py"))
-lh = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(lh)
+from _kbtest import load_script
+
+lh = load_script("link_http.py")
 
 
 def calls(src: str):

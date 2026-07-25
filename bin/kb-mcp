@@ -23,8 +23,9 @@ import pathlib
 import subprocess
 import sys
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from alias_expand import expand as expand_aliases, load_aliases  # noqa: E402
+# `bin/` is already sys.path[0] for a directly executed script, so the sibling module imports
+# without any path surgery.
+from alias_expand import expand as expand_aliases, load_aliases
 
 # Resolve the KB root from this script's location so the server is portable
 # across checkouts (no hardcoded install path).

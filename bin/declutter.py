@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 import re
 import sys
+
+import graph
 from collections import Counter
 
 BARE_CLASS = re.compile(r"^[A-Z][A-Za-z0-9]*$")  # "Model", "FormRequest" — not a file or method
@@ -28,8 +30,8 @@ def main() -> int:
     if "--cap" in sys.argv:
         cap = int(sys.argv[sys.argv.index("--cap") + 1])
 
-    graph = json.load(open(graph_path))
-    N, L = graph["nodes"], graph["links"]
+    g = graph.load(graph_path)
+    N, L = graph.nodes(g), graph.links(g)
 
     curated = set()
     for line in open(hubs_path):
@@ -54,13 +56,13 @@ def main() -> int:
             prune_ids.add(n["id"])
 
     before_n, before_e = len(N), len(L)
-    graph["nodes"] = [n for n in N if n["id"] not in prune_ids]
-    graph["links"] = [e for e in L if e["source"] not in prune_ids and e["target"] not in prune_ids]
-    json.dump(graph, open(graph_path, "w"))
+    g["nodes"] = [n for n in N if n["id"] not in prune_ids]
+    g["links"] = [e for e in L if e["source"] not in prune_ids and e["target"] not in prune_ids]
+    graph.save(g, graph_path)
 
-    print(f"decluttered: -{before_n - len(graph['nodes'])} nodes "
-          f"({len(prune_ids)} hubs), -{before_e - len(graph['links'])} edges "
-          f"({(before_e - len(graph['links']))/before_e*100:.0f}%)")
+    print(f"decluttered: -{before_n - len(g['nodes'])} nodes "
+          f"({len(prune_ids)} hubs), -{before_e - len(g['links'])} edges "
+          f"({(before_e - len(g['links']))/before_e*100:.0f}%)")
     if auto:
         print("  auto-detected hubs (degree>=%d):" % cap,
               ", ".join(f"{l}({d})" for l, d in sorted(auto, key=lambda x: -x[1])[:15]))

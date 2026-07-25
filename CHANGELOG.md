@@ -66,6 +66,43 @@ The single source of truth for the current version is the `VERSION` file. It is 
 - **0.5.0** — remote canon: the index lives on a server, local agents reach it over MCP/SSH.
 - **1.0.0** — when the MCP tool contract stops changing *and* a second independent consumer exists.
 
+## [0.3.1] — 2026-07-26
+
+Refactor and tests, no behaviour change. Cleanup **before** the 0.4.0 core extraction, because the
+weaknesses below would have been copied into the new layer.
+
+### Added
+- **`bin/graph.py` — the artefact contract in one module:** atomic load/save, the node-id format
+  (`repo::path::symbol`) with parse/build, and `Relation` / `Confidence` vocabularies as constants.
+  Previously eight scripts re-derived all of this by hand, so a graphify format change broke eight
+  files silently and a relation typo produced a silently wrong edge instead of an error.
+- **Atomic writes.** `graph.save()` writes a temp file in the same directory, `fsync`s and
+  `os.replace()`s it; a failed serialization leaves the previous complete graph and no debris. The
+  pipeline rewrites one shared artefact in place and has no recovery step, so a truncated
+  `graph.json` was a real failure mode, not a theoretical one. `load`/`save` also refuse a value that
+  is not a graph.
+- **Tests where the risk is** — 26 → **62**. New: `dedupe` (merge into the single definition, collapse
+  when there is none, **leave ambiguous labels untouched**, drop self-loops and duplicate edges, keep
+  repos isolated), `declutter` (curated hubs only; a real service with the same degree survives;
+  exact label match, so `Model` never eats `ModelFactory`), `graph` (atomicity, shape guards, id
+  round-trip incl. namespaced symbols), `alias_expand` (directional, whole-token, path segments,
+  partial table degrades instead of breaking). Previously only the pure parser was covered.
+- **`tests/_kbtest.py`** — one bootstrap for importing `bin/` scripts, replacing per-file importlib
+  boilerplate.
+- **README §"Design rules that hold this together"** — the properties the code already has, written
+  down so a future change does not trade them away silently.
+
+### Changed
+- The eight enrichers now use `graph.load` / `graph.save` / `graph.read_json` / `graph.write_json`
+  instead of `json.dump(g, open(path, "w"))`; local variables no longer shadow the module.
+- **Silent failure removed from the build:** a failing `php artisan route:list` now warns loudly and
+  removes the stale route file, instead of `|| true` quietly dropping the cross-repo half of the graph.
+- The clustering ↔ labeling double pass is documented as what it is — a **fixpoint through files**
+  (`cluster-only` can renumber community ids, the labels file is keyed by them) — rather than looking
+  like a redundant call.
+- `bin/kb-mcp` imports its sibling module directly; the `sys.path` insert was unnecessary (a directly
+  executed script already has its own directory on `sys.path[0]`).
+
 ## [0.3.0] — 2026-07-25
 
 ### Added

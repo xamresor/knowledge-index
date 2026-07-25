@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 import sys
+
+import graph
 from collections import defaultdict
 
 
@@ -27,7 +29,7 @@ def is_classlike(label: str) -> bool:
 
 def main() -> int:
     path = sys.argv[1]
-    g = json.load(open(path))
+    g = graph.load(path)
     N, L = g["nodes"], g["links"]
 
     defined = {e["source"] for e in L if e.get("relation") in ("method", "contains")}
@@ -67,7 +69,7 @@ def main() -> int:
 
     g["nodes"] = [n for n in N if n["id"] not in remap]
     g["links"] = new_links
-    json.dump(g, open(path, "w"))
+    graph.save(g, path)
     print(f"deduped: merged {merged} reference nodes into {len(set(remap.values()))} canonical "
           f"symbols; nodes {len(N)}->{len(g['nodes'])}, edges {len(L)}->{len(new_links)}")
     return 0

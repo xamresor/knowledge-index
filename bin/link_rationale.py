@@ -16,6 +16,8 @@ import os
 import re
 import sys
 
+import graph
+
 MARKERS = ("NOTE", "WHY", "HACK", "SECURITY", "RATIONALE")
 # `// WHY: ...`, `# NOTE - ...`, `* SECURITY: ...` — a marker word at a comment start
 COMMENT_RE = re.compile(
@@ -27,7 +29,7 @@ MAX_PER_FILE = 8  # a file drowning in markers is noise, not knowledge
 
 def main() -> int:
     graph_path, repos_dir = sys.argv[1], sys.argv[2]
-    g = json.load(open(graph_path))
+    g = graph.load(graph_path)
     N, L = g["nodes"], g["links"]
 
     defined = {e["source"] for e in L if e.get("relation") in ("method", "contains")}
@@ -97,7 +99,7 @@ def main() -> int:
 
     g["nodes"] = N + nodes
     g["links"] = L + edges
-    json.dump(g, open(graph_path, "w"))
+    graph.save(g, graph_path)
     from collections import Counter
     by_marker = Counter(n["marker"] for n in nodes)
     print(f"rationale: +{len(nodes)} nodes (explains edges), {skipped} skipped "

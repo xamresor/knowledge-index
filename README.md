@@ -195,8 +195,54 @@ options object (`$api(...)`, `apiFetch(...)`, and a raw `fetch(\`${API_BASE}/…
 the frontend omitting a base prefix that the base URL supplies (e.g. Laravel's `api/`). This is
 what makes `graphify path` traverse from a Vue/React file to the controller that serves its request.
 
+## Design rules that hold this together
+
+Not aspirations — these are the properties the code already has, kept explicit so a future change
+(or a future agent) does not quietly trade them away.
+
+- **The corpus is never touched; the index is disposable.** Indexed projects are read-only, every
+  artefact under `graphify-out/`, `repos/`, `.docs/` is generated and git-ignored. Delete the whole
+  output and `make build` reconstructs it. Nothing here is a source of truth, which is also why this
+  project has **no write path** — see the changelog entry for 0.4.0.
+- **One artefact, a pipeline of small filters.** Each `bin/*.py` does one transform:
+  read `graph.json` → change one thing → write it back → print a single summary line. `bin/kb`
+  composes them. Every script has the same shape (`main()`, `argv`, docstring first,
+  `raise SystemExit(main())`), so opening an unfamiliar one costs nothing.
+- **The artefact contract lives in exactly one module.** `bin/graph.py` owns loading, saving, the
+  node-id format (`repo::path::symbol`) and the relation/confidence vocabularies. A relation typo is
+  an `AttributeError`, not a silently wrong edge; a format change has one place to update instead of
+  eight.
+- **Writes are atomic.** `graph.save()` writes a temp file in the same directory and `os.replace()`s
+  it, so a crash or Ctrl-C leaves the previous complete graph rather than a truncated one — the
+  pipeline has no recovery step, so it must not need one. Save also refuses a value that is not a
+  graph.
+- **Uncertainty is data, not a vibe.** Every edge carries `confidence`
+  (`EXTRACTED | INFERRED | AMBIGUOUS | DERIVED`): AST facts and regex guesses are visibly different,
+  and the visualisation draws inferred edges dotted. A heuristic may be wrong; it may not *pretend*.
+- **Restraint over cleverness in destructive steps.** `dedupe.py` refuses to merge when a label has
+  two real definitions (merging would invent a fact); `declutter.py` prunes only the curated hubs in
+  `kb.hubs.txt`, with no degree-based auto-detection, because a high-degree definition-less node is
+  usually a real service whose definition was never captured. Both restraints are pinned by tests.
+- **Tests sit where the risk is.** The destructive transforms (`dedupe`, `declutter`) and the artefact
+  contract (`graph`) are covered, not just the easy pure parser. Stdlib `unittest`, no test deps:
+  `make test`.
+- **Zero runtime dependencies.** Stdlib Python and bash only — the MCP server speaks JSON-RPC by
+  hand, config is `tomllib`. This is a deliberate constraint: the tool has to run on a machine where
+  installing packages is not an option.
+- **Deployment data is not code.** `kb.projects.toml` and `aliases.toml` are git-ignored with
+  committed `.example` twins: the repository is public, the corpus map and the alias table are not.
+- **Failures are loud.** A missing route table warns instead of silently dropping the cross-repo half
+  of the graph; steps that must run twice (clustering ↔ labeling is a fixpoint through files) say why
+  in a comment rather than looking like a copy-paste slip.
+- **Documentation explains *why*, at the top of the file it belongs to.** Each script opens with the
+  upstream behaviour that makes it necessary — e.g. `dedupe.py` starts from *how* graphify emits
+  reference nodes. Docstrings age better than commit messages.
+
 ## Roadmap
 
+- [ ] **Extract the read core** (`bin/kb_core.py`) so the stdio MCP adapter and a future HTTP
+  adapter dispatch through one function and advertise one schema — identity by construction. Details
+  and the generic `/search` shape are in `CHANGELOG.md` under 0.4.0.
 - [ ] **Mutation testing for `bin/link_http.py`.** The matcher has unit tests
   (`make test`), but tests can pass while being blind to real regressions. Add a
   mutation pass — flip a regex, swap the GET default to POST, invert an

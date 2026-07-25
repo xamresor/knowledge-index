@@ -72,7 +72,14 @@ build_graph() {
     fi
     stage_and_build "$name" "$code"
     merge_inputs+=("$KB/repos/$name/graphify-out/graph.json")
-    [ -n "$routes" ] && env -C "$routes" php artisan route:list --json >"$KB/routes.$name.json" 2>/dev/null || true
+    if [ -n "$routes" ]; then
+      # Route table feeds the frontend->controller edges. A silent failure here means the graph
+      # quietly loses its cross-repo half, so say so instead of swallowing it.
+      if ! env -C "$routes" php artisan route:list --json >"$KB/routes.$name.json" 2>/dev/null; then
+        echo "  [$name] WARNING: 'php artisan route:list' failed — HTTP edges for this repo will be missing" >&2
+        rm -f "$KB/routes.$name.json"
+      fi
+    fi
     [ -n "$calls" ] && [ -n "$serves" ] && routes_specs+=("$serves|$calls")
   done < <(read_projects)
 
@@ -102,8 +109,11 @@ build_graph() {
   echo "==> Labeling communities by namespace/domain"
   "$PY" "$KB/bin/label_namespaces.py" "$OUT/graph.json" "$OUT/.graphify_labels.json" | head -1
   echo "==> Re-rendering report + full visualization with labels"
+  # Clustering and labeling are mutually dependent THROUGH FILES: `cluster-only` can renumber
+  # community ids, while the labels file is keyed by those ids. So this is a two-step fixpoint, not a
+  # redundant call: label (ids from pass 1) -> re-render with labels (ids may shift) -> label again.
+  # Keep both passes; if a third were ever needed the dependency should be expressed instead.
   graphify cluster-only "$KB" --no-label >/dev/null
-  # final pass: ensure the labels file covers every community id in the rendered graph
   "$PY" "$KB/bin/label_namespaces.py" "$OUT/graph.json" "$OUT/.graphify_labels.json" >/dev/null
 
   echo "==> Enriching with node types, domains, db_table nodes + domain anchors"

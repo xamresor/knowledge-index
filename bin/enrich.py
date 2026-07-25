@@ -20,6 +20,8 @@ import os
 import re
 import sys
 
+import graph
+
 LAYER_SUFFIX = re.compile(
     r"(Controller|Resource|Request|Service|Repository|Policy|Observer|Factory|Seeder|"
     r"Cast|Enum|Type|Job|Listener|Event|Command|Middleware|Exception|Provider|Mixin|"
@@ -117,7 +119,7 @@ def find_tables(repos_dir: str) -> dict[str, str]:
 
 def main() -> int:
     graph_path, repos_dir = sys.argv[1], sys.argv[2]
-    g = json.load(open(graph_path))
+    g = graph.load(graph_path)
     N, L = g["nodes"], g["links"]
     by_id = {n["id"]: n for n in N}
 
@@ -186,7 +188,7 @@ def main() -> int:
 
     g["nodes"] = N + list(table_nodes.values()) + list(anchors.values())
     g["links"] = L + new_links
-    json.dump(g, open(graph_path, "w"))
+    graph.save(g, graph_path)
 
     from collections import Counter as C
     print(f"enriched: +{len(table_nodes)} db_table nodes, +{len(anchors)} domain anchors, "

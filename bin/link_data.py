@@ -19,6 +19,8 @@ import os
 import re
 import sys
 
+import graph
+
 KB = None  # set in main
 
 ELOQUENT = re.compile(
@@ -66,7 +68,7 @@ def main() -> int:
     global KB
     graph_path, repos_dir = sys.argv[1], sys.argv[2]
     KB = os.path.dirname(os.path.abspath(repos_dir))
-    g = json.load(open(graph_path))
+    g = graph.load(graph_path)
     N, L = g["nodes"], g["links"]
 
     defined = {e["source"] for e in L if e.get("relation") in ("method", "contains")}
@@ -200,7 +202,7 @@ def main() -> int:
         seen.add(k)
         out.append(e)
     g["links"] = L + out
-    json.dump(g, open(graph_path, "w"))
+    graph.save(g, graph_path)
     print(f"data links: +{eloq} eloquent(model->model), +{fk} fk(table->table), "
           f"+{sql} sql(code->table); {len(out)} unique edges")
     return 0

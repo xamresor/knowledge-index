@@ -18,6 +18,8 @@ import os
 import re
 import sys
 
+import graph
+
 VERBS = ("get", "post", "put", "patch", "delete")
 # Dotted client: api.post('/v1/x') — verb is in the method name.
 CALL_RE = re.compile(r"\bapi\.(" + "|".join(VERBS) + r")\(\s*[`'\"]([^`'\"]+)", re.IGNORECASE)
@@ -75,7 +77,7 @@ def action_parts(action: str) -> tuple[str, str | None] | None:
 
 def load_routes(path: str) -> dict[tuple[str, str], tuple[str, str | None]]:
     routes: dict[tuple[str, str], tuple[str, str | None]] = {}
-    for r in json.load(open(path)):
+    for r in graph.load(path):
         ap = action_parts(r.get("action") or "")
         if not ap:
             continue
@@ -102,18 +104,18 @@ def match_route(routes, verb: str, path: str):
 def main() -> int:
     graph_path, routes_path, target_repo = sys.argv[1], sys.argv[2], sys.argv[3]
     fe_roots = sys.argv[4:]
-    graph = json.load(open(graph_path))
+    g = graph.load(graph_path)
     routes = load_routes(routes_path)
 
     # class nodes in the target repo, keyed for suffix match; frontend file nodes by suffix
-    api_nodes = [n for n in graph["nodes"]
+    api_nodes = [n for n in graph.nodes(g)
                  if n.get("repo") == target_repo and "." not in n["label"] and n.get("source_file")]
-    fe_nodes = [n for n in graph["nodes"]
+    fe_nodes = [n for n in graph.nodes(g)
                 if n.get("repo") != target_repo and n["label"].endswith((".js", ".ts", ".tsx", ".vue"))
                 and n.get("source_file")]
 
     # method nodes (label like ".toggleMic()") in the target repo, by source_file
-    method_nodes = [n for n in graph["nodes"]
+    method_nodes = [n for n in graph.nodes(g)
                     if n.get("repo") == target_repo and n.get("source_file")
                     and n["label"].startswith(".") and n["label"].endswith("()")]
 
@@ -186,8 +188,8 @@ def main() -> int:
                         "target": tgt,
                     })
 
-    graph["links"].extend(edges)
-    json.dump(graph, open(graph_path, "w"))
+    graph.links(g).extend(edges)
+    graph.save(g, graph_path)
     pairs = {(e["source"].split("::")[0], e["target"].split("::")[0]) for e in edges}
     print(f"[{target_repo}] http edges: {len(edges)} matched, {unmatched} unmatched; pairs={pairs}")
     return 0
