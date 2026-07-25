@@ -14,9 +14,38 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
-- **0.4.0** — write path: `docs_put` / `POST` accepting a fragment with a target anchor and
-  **auto-filled provenance** (rejects documents without it); scopes as one collection per ownership
-  boundary.
+- **0.4.0 — one contract, two transports** (design fixed 2026-07-25). Not "add a write tool to MCP":
+  the HTTP API must be **identical to the MCP surface**, with a single generic search entry point.
+  - **Extract the core.** `call_tool(name, args)` and the `TOOLS` schema list already are the core;
+    `main()`/`send()` are just stdio JSON-RPC. Move the core to `bin/kb_core.py`; `bin/kb-mcp`
+    becomes the stdio adapter and `bin/kb-api` the HTTP one. Identity of the two surfaces is then
+    **structural** — both dispatch through the same function and advertise the same schemas —
+    rather than a promise to keep them in sync by hand.
+  - **One generic search.** `POST /search` with a body, and an MCP tool `search` generated from the
+    same JSON Schema:
+    `{q, domain: "docs"|"code"|"both", scope?, mode?: "auto"|"lex"|"vec"|"hybrid", limit?,
+    min_score?, expand_aliases?: true, explain?: false}`. The core routes by `domain` (qmd for docs,
+    graphify for code). `docs_search` / `graph_query` stay as thin deprecated aliases — same shim
+    pattern used elsewhere, so existing callers do not break.
+  - **Non-search graph operations stay separate** (`/graph/path`, `/graph/explain`,
+    `/graph/affected`): they are traversals, not queries, and squeezing them into `/search` would
+    make one endpoint mean four things.
+  - **Write path lands here, not earlier.** `PUT /doc` + MCP `docs_put`, taking a fragment with a
+    target anchor; **provenance is auto-filled** and a document without it is rejected. Caller
+    identity is the *adapter's* job (HTTP: token → agent name; MCP: `clientInfo` from `initialize`),
+    provenance assembly is the *core's*.
+  - **Scopes** become a first-class parameter of the unified surface (one collection per ownership
+    boundary), rather than an implicit collection name in the environment.
+  - **`GET /version`** returns `{repo, api_contract}` — the repo semver and the surface's own
+    contract number, kept separate on purpose (the same "don't merge version axes" lesson learned in
+    the sibling project).
+  - ⚠️ **Security decision that comes with opening a port:** default bind is `127.0.0.1`, a token is
+    **required** for any non-loopback bind, and the server refuses to start on `0.0.0.0` without
+    one. A knowledge index whose whole value proposition is "nothing leaves the box" must not become
+    the thing that leaves the box. Remote access, if wanted, goes through the `0.6.0` remote-canon
+    design (SSH), not by binding wide.
+  - **Zero-dependency constraint kept:** request validation reads the same schema dicts (types +
+    required), no `jsonschema` dependency added.
 - **0.5.0** — rest of the query layer: stopword handling before the lexical leg, and routing between
   the lexical and vector legs by question shape (measured: the lexical leg wins on pinpoint questions,
   the hybrid on multi-page ones).
