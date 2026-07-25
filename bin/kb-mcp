@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import pathlib
 import subprocess
 import sys
 
@@ -28,6 +29,17 @@ KB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GRAPH = f"{KB}/graphify-out/graph.json"
 COLLECTION = os.environ.get("KB_COLLECTION", "kb")
 PROTO = "2024-11-05"
+
+def _read_version() -> str:
+    """Repo version from the VERSION file (single source of truth); see CHANGELOG.md.
+    Distinct from a cell manifest's contract_version — different axes."""
+    try:
+        return (pathlib.Path(KB) / "VERSION").read_text(encoding="utf-8").strip() or "0+unknown"
+    except OSError:
+        return "0+unknown"
+
+
+VERSION = _read_version()
 TIMEOUT_GRAPH = 60      # graph queries are sub-second; this is just a safety net
 TIMEOUT_DOCS = 150      # qmd's first call loads the embedding model (cold start)
 
@@ -189,7 +201,7 @@ def main() -> None:
             send({"jsonrpc": "2.0", "id": mid, "result": {
                 "protocolVersion": req.get("params", {}).get("protocolVersion", PROTO),
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "kb", "version": "1.0"}}})
+                "serverInfo": {"name": "kb", "version": VERSION}}})
         elif method == "tools/list":
             send({"jsonrpc": "2.0", "id": mid, "result": {"tools": TOOLS}})
         elif method == "tools/call":

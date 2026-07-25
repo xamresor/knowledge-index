@@ -4,13 +4,15 @@
 # merges them into one cross-repo graph, injects HTTP edges (frontend -> controllers),
 # clusters + renders the full graph.html, and (re)indexes docs into qmd.
 #
-# Usage: bin/kb build | update | graph | kb | label | status | qmd-backend
+# Usage: bin/kb build | update | graph | kb | label | status | qmd-backend | --version
 set -euo pipefail
 
 KB="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$KB"
 PY=python3
 CFG="$KB/kb.projects.toml"
+# Repo version: single source of truth is the VERSION file (see CHANGELOG.md).
+KB_VERSION="$(cat "$KB/VERSION" 2>/dev/null || echo '0+unknown')"
 OUT="$KB/graphify-out"
 DOCS_STAGE="$KB/.docs"      # aggregated docs root for qmd (one collection = one path); gitignored
 COLLECTION="${KB_COLLECTION:-kb}"
@@ -205,6 +207,11 @@ PY
 }
 
 case "${1:-build}" in
+  --version|-V|version)
+          echo "knowledge-index $KB_VERSION"
+          echo "  graphify: $(graphify --version 2>/dev/null || echo 'not found')"
+          echo "  qmd:      $(qmd --version 2>/dev/null || echo 'not found')"
+          ;;
   build)  build_graph; build_kb ;;
   graph)  build_graph ;;
   kb)     build_kb ;;
@@ -213,5 +220,5 @@ case "${1:-build}" in
   label)  "$PY" "$KB/bin/label_namespaces.py" "$OUT/graph.json" "$OUT/.graphify_labels.json"
           graphify cluster-only "$KB" --no-label >/dev/null; echo "relabeled + report regenerated" ;;
   status) graphify diagnose multigraph --graph "$OUT/graph.json" | head -8; echo; qmd status ;;
-  *) echo "usage: bin/kb {build|graph|kb|update|label|status|qmd-backend}"; exit 1 ;;
+  *) echo "usage: bin/kb {build|graph|kb|update|label|status|qmd-backend|--version}"; exit 1 ;;
 esac
