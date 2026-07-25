@@ -82,6 +82,11 @@ The single source of truth for the current version is the `VERSION` file. It is 
     it was taken** — a stale number that admits its age is honest; one that pretends to be live is not.
   - Requirement carried over from the sibling project's read-only views: values reach the DOM through
     `textContent`, never `innerHTML`. This page renders content from other people's repositories.
+  - **The front end is English-only.** It ships with a public repository and is read by people who did
+    not write the corpus, so the interface is in the language the project is published in. No
+    localisation layer: one language in the source means UI strings cannot drift out of sync, and it
+    keeps the zero-dependency rule (no i18n framework, no message catalogues). Indexed **content**
+    keeps whatever language it is written in — the interface is not the corpus.
 - **0.6.0** — rest of the query layer: stopword handling before the lexical leg, and routing between
   the lexical and vector legs by question shape (measured: the lexical leg wins on pinpoint questions,
   the hybrid on multi-page ones).

@@ -234,6 +234,10 @@ Not aspirations — these are the properties the code already has, kept explicit
 - **Failures are loud.** A missing route table warns instead of silently dropping the cross-repo half
   of the graph; steps that must run twice (clustering ↔ labeling is a fixpoint through files) say why
   in a comment rather than looking like a copy-paste slip.
+- **The interface is English.** Code, comments, commit messages and the web surface are in English —
+  it is a public project read by people who did not write the corpus. The indexed content keeps its
+  own language; the interface is not the corpus. No i18n layer (it would break the
+  zero-dependency rule and let UI strings drift).
 - **Documentation explains *why*, at the top of the file it belongs to.** Each script opens with the
   upstream behaviour that makes it necessary — e.g. `dedupe.py` starts from *how* graphify emits
   reference nodes. Docstrings age better than commit messages.
