@@ -14,8 +14,23 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
-- **0.4.0 — one contract, two transports** (design fixed 2026-07-25). Not "add a write tool to MCP":
-  the HTTP API must be **identical to the MCP surface**, with a single generic search entry point.
+- **Three surfaces, split by consumer** (framing fixed by Romans 2026-07-26 — the reason each exists,
+  which decides what each may require):
+
+  | Surface | Consumer | Job | Requires |
+  |---|---|---|---|
+  | **MCP** (stdio) | agents | search + traverse inside a session | the core; no port, no auth |
+  | **HTTP API** | scripts, CI, cron | the same search, callable from bash/python | the core + a port + a token |
+  | **web** | a human | *look at status*: the graph, index health, counts | generated data only — **no running process** |
+
+  The consequence that corrects an earlier plan: **the web page is not a third client of the search
+  API.** Its job is status, so it must open from `file://` with nothing running. Making it depend on
+  the API would break the one property that makes it useful — that it works when nothing works. If
+  the API happens to be up, the page may light up extra panels (progressive enhancement), never as a
+  requirement.
+
+- **0.4.0 — one core, two machine transports** (design fixed 2026-07-25, scoped 2026-07-26). MCP and
+  the HTTP API are the same contract for machines; the web surface is deliberately out of it.
   - **Extract the core.** `call_tool(name, args)` and the `TOOLS` schema list already are the core;
     `main()`/`send()` are just stdio JSON-RPC. Move the core to `bin/kb_core.py`; `bin/kb-mcp`
     becomes the stdio adapter and `bin/kb-api` the HTTP one. Identity of the two surfaces is then
@@ -51,7 +66,23 @@ The single source of truth for the current version is the `VERSION` file. It is 
     required), no `jsonschema` dependency added.
   - Consequence of dropping the write path: nothing here depends on a block-anchor format any more,
     so `0.4.0` is unblocked — anchors are a corpus-side question for whoever implements the writer.
-- **0.5.0** — rest of the query layer: stopword handling before the lexical leg, and routing between
+
+- **0.5.0 — the web surface moves out of the generated directory.** Today the whole UI is a
+  `TEMPLATE` string inside `bin/render_viz.py`, rendered into gitignored `graphify-out/kb-graph.html`:
+  an interface that cannot be diffed, linted or tested. Extract it to a versioned `web/`
+  (`index.html` + `app.js` + `style.css`, no build step, zero dependencies) and replace the four
+  string placeholders with **one generated `manifest.js`** (`kbManifest({domains, fileMap, counts,
+  legend, generated_at, versions})`).
+  - **The data split already exists and stays:** `render_viz.py` writes 210 per-domain `.js` files
+    (~5 MB) that call `kbRecv(domain, {nodes, edges})`, loaded on demand. `.js` rather than JSON+fetch
+    is deliberate: a page opened from `file://` cannot fetch a sibling file but can load a sibling
+    `<script>`.
+  - Panels, all fed by build-time snapshots: the graph, index health (graph diagnostics + `qmd
+    status`), the alias table, search-quality numbers from the golden set. Each snapshot shows **when
+    it was taken** — a stale number that admits its age is honest; one that pretends to be live is not.
+  - Requirement carried over from the sibling project's read-only views: values reach the DOM through
+    `textContent`, never `innerHTML`. This page renders content from other people's repositories.
+- **0.6.0** — rest of the query layer: stopword handling before the lexical leg, and routing between
   the lexical and vector legs by question shape (measured: the lexical leg wins on pinpoint questions,
   the hybrid on multi-page ones).
 - **Backlog — entity registry with an owner flag.** The alias table shipped in 0.3.0 restores
@@ -63,7 +94,7 @@ The single source of truth for the current version is the `VERSION` file. It is 
   the few points it would add here.
 - Auto-discovery of alias candidates (git renames via `--diff-filter=R`, edited wikilinks, fuzzy name
   similarity) — **review-gated**, never automatic, or determinism is gone.
-- **0.5.0** — remote canon: the index lives on a server, local agents reach it over MCP/SSH.
+- **0.7.0** — remote canon: the index lives on a server, local agents reach it over MCP/SSH.
 - **1.0.0** — when the MCP tool contract stops changing *and* a second independent consumer exists.
 
 ## [0.3.1] — 2026-07-26
