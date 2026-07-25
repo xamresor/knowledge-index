@@ -1,4 +1,4 @@
-.PHONY: build graph kb update label status open qmd-backend test help
+.PHONY: build graph kb update label status open qmd-backend serve test help
 .DEFAULT_GOAL := help
 
 build:  ## Full build: cross-repo graph + qmd KB
@@ -24,6 +24,9 @@ open:   ## Open the full graph visualization in a browser
 
 qmd-backend: ## Re-pick the qmd embedding backend (none|llama|other)
 	@bin/kb qmd-backend
+
+serve:  ## HTTP API on 127.0.0.1:8899 (same core as MCP; PORT=… TOKEN=… to override)
+	@bin/kb-api --port $${PORT:-8899} $${TOKEN:+--token $$TOKEN}
 
 test:   ## Run the unit tests (stdlib unittest, no deps)
 	@python3 -m unittest discover -s tests

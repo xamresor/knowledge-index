@@ -1,0 +1,8 @@
+#!/usr/bin/env python3
+"""Executable wrapper: the logic lives in kb_api.py so it can be imported by tests."""
+import sys
+
+import kb_api
+
+if __name__ == "__main__":
+    raise SystemExit(kb_api.main(sys.argv[1:]))

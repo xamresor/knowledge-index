@@ -186,6 +186,44 @@ Then **restart the agent session** (or open `/hooks` once) so it loads the new `
 the skill, and the freshly-created `settings.json` — the settings watcher only tracks `.claude/` if a
 settings file existed there at session start.
 
+## Three surfaces, three consumers
+
+Each surface exists for a different reader, and that decides what it may require:
+
+| Surface | For | Job | Requires |
+|---|---|---|---|
+| **MCP** (`bin/kb-mcp`, stdio) | agents | search + traverse inside a session | nothing — no port, no auth |
+| **HTTP API** (`bin/kb-api`) | scripts, CI, cron | the same search from bash/python | a port; a token off loopback |
+| **web** (`graphify-out/kb-graph.html`) | a human | look at status: the graph, index health | nothing running — opens from `file://` |
+
+MCP and the API are the **same contract**: both dispatch through `kb_core.call_tool()` and publish
+`kb_core.TOOLS`, so they cannot drift apart without deleting code. The web surface is not a client of
+that contract — it must work when nothing is running, which is precisely when you want to look at it.
+
+```bash
+make serve                      # 127.0.0.1:8899, no token needed on loopback
+PORT=9000 TOKEN=secret make serve
+```
+
+```bash
+curl -s localhost:8899/version
+curl -s localhost:8899/tools                            # the list MCP publishes
+curl -s -X POST localhost:8899/search \
+     -d '{"q":"how does auth work","domain":"both"}'
+curl -s -X POST localhost:8899/graph/affected -d '{"symbol":"BookingService"}'
+curl -s "localhost:8899/doc?path=docs/AUTH.md"
+curl -s -X POST localhost:8899/call \
+     -d '{"name":"search","arguments":{"q":"deposit","domain":"docs","mode":"lex","limit":5}}'
+```
+
+`search` takes `{q, domain: docs|code|both, scope, mode: auto|lex|vec|hybrid, limit, min_score,
+expand_aliases, explain}`. `docs_search` and `graph_query` still work and are marked deprecated —
+they translate to `search`, so there is one implementation rather than two.
+
+**Binding off loopback requires a token, and the server refuses to start without one.** The point of
+this project is that the corpus never leaves the machine; an index published to the network without
+auth would be the leak it exists to prevent. For remote use, bind loopback and tunnel over SSH.
+
 ## How the projects connect
 
 `bin/link_http.py` reads each Laravel app's `php artisan route:list --json` and matches the

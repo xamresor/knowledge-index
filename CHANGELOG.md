@@ -29,44 +29,6 @@ The single source of truth for the current version is the `VERSION` file. It is 
   the API happens to be up, the page may light up extra panels (progressive enhancement), never as a
   requirement.
 
-- **0.4.0 — one core, two machine transports** (design fixed 2026-07-25, scoped 2026-07-26). MCP and
-  the HTTP API are the same contract for machines; the web surface is deliberately out of it.
-  - **Extract the core.** `call_tool(name, args)` and the `TOOLS` schema list already are the core;
-    `main()`/`send()` are just stdio JSON-RPC. Move the core to `bin/kb_core.py`; `bin/kb-mcp`
-    becomes the stdio adapter and `bin/kb-api` the HTTP one. Identity of the two surfaces is then
-    **structural** — both dispatch through the same function and advertise the same schemas —
-    rather than a promise to keep them in sync by hand.
-  - **One generic search.** `POST /search` with a body, and an MCP tool `search` generated from the
-    same JSON Schema:
-    `{q, domain: "docs"|"code"|"both", scope?, mode?: "auto"|"lex"|"vec"|"hybrid", limit?,
-    min_score?, expand_aliases?: true, explain?: false}`. The core routes by `domain` (qmd for docs,
-    graphify for code). `docs_search` / `graph_query` stay as thin deprecated aliases — same shim
-    pattern used elsewhere, so existing callers do not break.
-  - **Non-search graph operations stay separate** (`/graph/path`, `/graph/explain`,
-    `/graph/affected`): they are traversals, not queries, and squeezing them into `/search` would
-    make one endpoint mean four things.
-  - **No write path — read-only by design** (decided 2026-07-25, correcting an earlier plan to put
-    `docs_put` here). This project owns an **index**, not a corpus: it has nowhere of its own to store
-    a document. Accepting writes would mean either writing into someone else's repository, or keeping
-    a second copy of the text — and the second copy would quietly become a competing source of truth,
-    which is exactly what the "files are the source of truth, the index is a rebuildable projection"
-    rule exists to prevent. Writes belong to whoever owns the corpus; this project reads it and can be
-    thrown away and rebuilt at any time.
-  - **Scopes** become a first-class parameter of the unified surface (one collection per ownership
-    boundary), rather than an implicit collection name in the environment.
-  - **`GET /version`** returns `{repo, api_contract}` — the repo semver and the surface's own
-    contract number, kept separate on purpose (the same "don't merge version axes" lesson learned in
-    the sibling project).
-  - ⚠️ **Security decision that comes with opening a port:** default bind is `127.0.0.1`, a token is
-    **required** for any non-loopback bind, and the server refuses to start on `0.0.0.0` without
-    one. A knowledge index whose whole value proposition is "nothing leaves the box" must not become
-    the thing that leaves the box. Remote access, if wanted, goes through the `0.6.0` remote-canon
-    design (SSH), not by binding wide.
-  - **Zero-dependency constraint kept:** request validation reads the same schema dicts (types +
-    required), no `jsonschema` dependency added.
-  - Consequence of dropping the write path: nothing here depends on a block-anchor format any more,
-    so `0.4.0` is unblocked — anchors are a corpus-side question for whoever implements the writer.
-
 - **0.5.0 — the web surface moves out of the generated directory.** Today the whole UI is a
   `TEMPLATE` string inside `bin/render_viz.py`, rendered into gitignored `graphify-out/kb-graph.html`:
   an interface that cannot be diffed, linted or tested. Extract it to a versioned `web/`
@@ -101,6 +63,45 @@ The single source of truth for the current version is the `VERSION` file. It is 
   similarity) — **review-gated**, never automatic, or determinism is gone.
 - **0.7.0** — remote canon: the index lives on a server, local agents reach it over MCP/SSH.
 - **1.0.0** — when the MCP tool contract stops changing *and* a second independent consumer exists.
+
+## [0.4.0] — 2026-07-26
+
+**One core, two machine transports.** The MCP server and a new HTTP API are the same contract:
+both dispatch through `kb_core.call_tool()` and publish `kb_core.TOOLS`, so drift between them would
+require deleting code rather than forgetting to copy it. The web surface is deliberately **not** part
+of this contract — see 0.5.0 in Unreleased.
+
+### Added
+- **`bin/kb_core.py` — every operation, once, transport-free.** Schemas, shallow validation, process
+  plumbing, label suggestions and dispatch moved out of the MCP server.
+- **A generic `search`** replacing two narrow tools:
+  `{q, domain: docs|code|both, scope, mode: auto|lex|vec|hybrid, limit, min_score, expand_aliases,
+  explain}`. `domain` routes to qmd, to graphify, or to both with labelled sections; `mode` maps onto
+  qmd's three entry points; `scope` picks a collection other than the default.
+- **`bin/kb-api` + `bin/kb_api.py` — the HTTP adapter for scripts.** `GET /health`, `GET /version`,
+  `GET /tools`, `POST /call {name, arguments}` (the MCP shape verbatim), plus ergonomic
+  `POST /search`, `POST /graph/{path,explain,affected}`, `GET /doc?path=`. Routing is a **pure
+  function** (`dispatch`), so the surface is tested without opening a socket. `make serve` runs it.
+- **Security policy, enforced at startup:** default bind `127.0.0.1`; a token
+  (`--token` / `KB_API_TOKEN`) is **required** for any non-loopback bind and the server **refuses to
+  start** without one — verified live and pinned by tests. Requests off loopback are rejected even if
+  that check were bypassed. Remote use means loopback + an SSH tunnel, not a wider bind.
+- **`version` operation / `GET /version`** returning `{repo, api_contract, collection, aliases}`:
+  the repo release and the surface's contract number are separate axes and are never merged.
+- **Validation without a dependency:** required keys, primitive types (a `bool` is not an `integer`
+  on the wire), enum membership — read from the same schema dicts the surfaces publish. An unknown
+  argument is an error, because a silently ignored `mod=lex` looks like the mode did nothing.
+- Tests 62 → **104**: schema/validation, `search` routing by domain, deprecated shims delegating
+  rather than duplicating, alias expansion on/off per call, the timeout fallback firing only in
+  `auto` mode, and the whole bind/token policy.
+
+### Changed
+- `bin/kb-mcp` is now transport only (~60 lines): JSON-RPC framing, `initialize` (now also reporting
+  `apiContract`), `tools/list`, `tools/call`. A bad call comes back as tool text an agent can read and
+  retry, instead of a protocol error it cannot see.
+- **`docs_search` and `graph_query` are deprecated but working** — they translate to `search`, so
+  there is one implementation. Callers written against 0.3.x keep working unchanged.
+- README gained "Three surfaces, three consumers" with the API reference and the token rule.
 
 ## [0.3.1] — 2026-07-26
 
