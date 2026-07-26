@@ -7,13 +7,13 @@ backend can reach an external service):
 | Layer | Tool | Artifact |
 |---|---|---|
 | **Code connection graph** (incl. cross-repo API routes) | **graphify** | `graphify-out/graph.json` + `graph.html` + `GRAPH_REPORT.md` |
-| **Typed / domain visualization** | custom (`bin/render_viz.py`) | `graphify-out/kb-graph.html` |
+| **Dashboard (graph + status)** | shell `web/` + data from `bin/render_viz.py` | `web/index.html` |
 | **Vectorized doc search** | **qmd** (MCP: `qmd`) | collection `kb` in `.qmd/` |
 
-**`kb-graph.html`** is the primary visual: node **shape = type** (class=●, method=▲, db_table=■,
+**`web/index.html`** is the primary visual: node **shape = type** (class=●, method=▲, db_table=■,
 template=★, controller=⬡, model=cylinder, interface/trait=◆, enum=▽) and node **color = domain**
 (e.g. `Order`, `Customer`, `Product`, `Invoice`, …). Domains group code across layers (a domain holds
-its controllers + models + tables + services + frontend callers). It is **hierarchical + lazy-loaded with edge rerouting**: the shell (`kb-graph.html`, ~120 KB)
+its controllers + models + tables + services + frontend callers). It is **hierarchical + lazy-loaded with edge rerouting**: the shell (`web/index.html` + `app.js`)
 shows only the **domain super-nodes**; each domain's members (typed shapes) live in
 `kb-graph-data/<domain>.js` and load **on demand**. **Double-click a domain** to expand — its
 super-node is **removed** and every cross-domain edge **reroutes to the real member nodes** (a
@@ -80,7 +80,7 @@ code→table (`DB::table()`/`->from()`). `bin/link_rationale.py` mines rationale
 (`NOTE:`/`WHY:`/`HACK:`/`SECURITY:`/`RATIONALE:` — deliberately not TODO) into **rationale** nodes
 with `explains` edges to the class/file they annotate (capped 8/file). The function-usage graph
 (method→method `calls`) and use/import/trait edges come from graphify directly.
-`bin/render_viz.py` emits `kb-graph.html`, coloring edges by relation (http_request=red,
+`bin/render_viz.py` emits the viz **data** (`kb-manifest.js`, `kb-status.js`, per-domain files) for the shell in `web/`, coloring edges by relation (http_request=red,
 eloquent=purple, fk=orange, sql=teal, defines_table=green); AMBIGUOUS edges render dashed.
 
 **Edge confidence** (every edge carries it): `EXTRACTED` — straight from AST/literal syntax

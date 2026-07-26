@@ -31,3 +31,6 @@ __pycache__/
 
 # Deployment data: the alias table names private projects/products/people (see aliases.toml.example)
 aliases.toml
+
+# Vendored renderer: fetched by `make vendor`, not part of the source
+web/vendor/

@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Code Knowledge Base</title>
+<link rel="stylesheet" href="style.css">
+<!-- Renderer: a local copy is preferred so the page works offline and nothing is fetched from a
+     third party. `make vendor` downloads it once into web/vendor/ (git-ignored). If it is absent the
+     page falls back to a CDN and says so out loud in the banner — a knowledge index whose promise is
+     "the corpus never leaves the machine" should not quietly phone home. -->
+<script src="vendor/vis-network.min.js" onerror="window.__kbVendorMissing = true"></script>
+</head>
+<body>
+<aside id="side">
+  <h1>Code Knowledge Base</h1>
+  <div id="banner" class="banner" hidden></div>
+
+  <nav id="tabs">
+    <button data-panel="graph" class="active">Graph</button>
+    <button data-panel="status">Status</button>
+  </nav>
+
+  <section id="panel-graph">
+    <p id="summary" class="muted">loading…</p>
+    <input id="q" placeholder="search a class / method / table…" autocomplete="off" spellcheck="false">
+    <div id="qres"></div>
+    <button id="expand-all">Expand all domains</button>
+    <button id="collapse-all">Collapse all</button>
+    <p class="muted">Double-click a domain to expand · double-click a member to collapse</p>
+
+    <h2>Shape = type</h2>
+    <div id="legend"></div>
+
+    <h2>Edge colour = scope</h2>
+    <div class="edge-legend">
+      <div><span class="swatch route"></span> route (http_request)</div>
+      <div><span class="swatch cross"></span> cross-domain link</div>
+      <div><span class="swatch internal"></span> domain-internal link</div>
+      <div class="muted">dashed = AMBIGUOUS confidence (a heuristic edge)</div>
+    </div>
+
+    <h2>Colour = domain</h2>
+    <div id="domains"></div>
+  </section>
+
+  <section id="panel-status" hidden>
+    <p class="muted">Snapshots taken when the index was last built — never live. Each block says when.</p>
+
+    <h2>Index</h2>
+    <dl id="index-health"></dl>
+
+    <h2>Docs collection</h2>
+    <dl id="docs-health"></dl>
+
+    <h2>Aliases</h2>
+    <p class="muted">Old name → canonical, applied to queries before the index stems them.</p>
+    <table id="aliases"><tbody></tbody></table>
+
+    <h2>Search quality</h2>
+    <p class="muted">From the golden set, if a benchmark result was present at build time.</p>
+    <dl id="quality"></dl>
+
+    <h2>Versions</h2>
+    <dl id="versions"></dl>
+  </section>
+</aside>
+
+<main id="net"></main>
+
+<!-- Generated data. The manifest is written by `bin/render_viz.py` next to the graph, so this shell
+     stays a plain versioned file with no build step and no placeholders to substitute. -->
+<script src="../graphify-out/kb-manifest.js" onerror="window.__kbManifestMissing = true"></script>
+<script src="../graphify-out/kb-status.js" onerror="window.__kbStatusMissing = true"></script>
+<script src="app.js"></script>
+</body>
+</html>

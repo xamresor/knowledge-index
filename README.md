@@ -42,7 +42,8 @@ qmd query --help >/dev/null 2>&1 && echo "qmd: query CLI ok" || echo "qmd: WRONG
 
 ```bash
 make build      # build the merged graph + qmd doc index
-make open       # open the typed/domain visualization (kb-graph.html)
+make vendor     # once: fetch the renderer for offline use (web/vendor/)
+make open       # open the dashboard: graph + status (web/index.html)
 qmd query "how does auth work" -c kb
 graphify path "useAuthFlow.js" "AuthMethodsController" --graph graphify-out/graph.json
 ```
@@ -53,7 +54,10 @@ The qmd collection name defaults to `kb`; override it by setting `KB_COLLECTION`
 
 - `graphify-out/graph.json` — merged graph: every node tagged with its `repo`; `http_request`
   edges connect frontend call sites to backend controllers across repos.
-- `graphify-out/kb-graph.html` — the **primary** visualization: typed/domain view (shape = type,
+- `web/index.html` — the **dashboard**: the typed/domain graph plus a Status panel (index health, the
+  alias table, search-quality numbers). A versioned, dependency-free shell; the graph data is
+  generated next to the index. Old note, kept for orientation: this used to be a generated
+  `graphify-out/kb-graph.html`. (shape = type,
   color = domain), hierarchical and lazy-loaded. This is what `make open` opens. The hierarchical
   lazy-loading (domain super-nodes expand on demand, edges reroute) is built to stay usable on
   **large codebases — 5k+ files is fine**; it never renders the whole graph at once.
@@ -194,7 +198,7 @@ Each surface exists for a different reader, and that decides what it may require
 |---|---|---|---|
 | **MCP** (`bin/kb-mcp`, stdio) | agents | search + traverse inside a session | nothing — no port, no auth |
 | **HTTP API** (`bin/kb-api`) | scripts, CI, cron | the same search from bash/python | a port; a token off loopback |
-| **web** (`graphify-out/kb-graph.html`) | a human | look at status: the graph, index health | nothing running — opens from `file://` |
+| **web** (`web/index.html`) | a human | look at status: the graph, index health | nothing running — opens from `file://` |
 
 MCP and the API are the **same contract**: both dispatch through `kb_core.call_tool()` and publish
 `kb_core.TOOLS`, so they cannot drift apart without deleting code. The web surface is not a client of
@@ -272,6 +276,16 @@ Not aspirations — these are the properties the code already has, kept explicit
 - **Failures are loud.** A missing route table warns instead of silently dropping the cross-repo half
   of the graph; steps that must run twice (clustering ↔ labeling is a fixpoint through files) say why
   in a comment rather than looking like a copy-paste slip.
+- **The interface is a source file, not an artefact.** `web/` holds the shell (markup, styling,
+  behaviour) as versioned, diffable, testable files with no build step; the generator emits data only
+  (`kb-manifest.js`, `kb-status.js`, per-domain files). Data arrives as `.js` calls rather than
+  JSON + fetch because a page opened from `file://` cannot fetch a sibling file — the dashboard has to
+  work when nothing is running.
+- **Snapshots say when they were taken.** The Status panel is a build-time snapshot, stamped. A stale
+  number that admits its age is useful; one that pretends to be live is not.
+- **The renderer is local.** `make vendor` fetches vis-network into `web/vendor/` once; the page
+  prefers that copy and falls back to a CDN **with a visible banner**. A tool whose promise is "the
+  corpus never leaves the machine" should not quietly fetch code from a third party.
 - **The interface is English.** Code, comments, commit messages and the web surface are in English —
   it is a public project read by people who did not write the corpus. The indexed content keeps its
   own language; the interface is not the corpus. No i18n layer (it would break the

@@ -123,8 +123,9 @@ build_graph() {
   echo "==> Mining rationale comments (NOTE/WHY/HACK/SECURITY -> rationale nodes)"
   "$PY" "$KB/bin/link_rationale.py" "$OUT/graph.json" "$KB/repos"
   echo "==> Rendering custom typed/domain visualization"
-  "$PY" "$KB/bin/render_viz.py" "$OUT/graph.json" "$OUT/kb-graph.html"
-  echo "    graphify graph.html (fallback) + kb-graph.html (typed/domain) -> $OUT"
+  "$PY" "$KB/bin/render_viz.py" "$OUT/graph.json" "$OUT"
+  rm -f "$OUT/kb-graph.html"   # 0.5.0: the shell moved to web/; drop the stale generated page
+  echo "    graphify graph.html (raw upstream view) -> $OUT · shell: web/index.html"
 }
 
 # Where qmd gets its vector embeddings. Resolved once and remembered in .kb.local.

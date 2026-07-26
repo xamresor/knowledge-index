@@ -29,26 +29,6 @@ The single source of truth for the current version is the `VERSION` file. It is 
   the API happens to be up, the page may light up extra panels (progressive enhancement), never as a
   requirement.
 
-- **0.5.0 — the web surface moves out of the generated directory.** Today the whole UI is a
-  `TEMPLATE` string inside `bin/render_viz.py`, rendered into gitignored `graphify-out/kb-graph.html`:
-  an interface that cannot be diffed, linted or tested. Extract it to a versioned `web/`
-  (`index.html` + `app.js` + `style.css`, no build step, zero dependencies) and replace the four
-  string placeholders with **one generated `manifest.js`** (`kbManifest({domains, fileMap, counts,
-  legend, generated_at, versions})`).
-  - **The data split already exists and stays:** `render_viz.py` writes 210 per-domain `.js` files
-    (~5 MB) that call `kbRecv(domain, {nodes, edges})`, loaded on demand. `.js` rather than JSON+fetch
-    is deliberate: a page opened from `file://` cannot fetch a sibling file but can load a sibling
-    `<script>`.
-  - Panels, all fed by build-time snapshots: the graph, index health (graph diagnostics + `qmd
-    status`), the alias table, search-quality numbers from the golden set. Each snapshot shows **when
-    it was taken** — a stale number that admits its age is honest; one that pretends to be live is not.
-  - Requirement carried over from the sibling project's read-only views: values reach the DOM through
-    `textContent`, never `innerHTML`. This page renders content from other people's repositories.
-  - **The front end is English-only.** It ships with a public repository and is read by people who did
-    not write the corpus, so the interface is in the language the project is published in. No
-    localisation layer: one language in the source means UI strings cannot drift out of sync, and it
-    keeps the zero-dependency rule (no i18n framework, no message catalogues). Indexed **content**
-    keeps whatever language it is written in — the interface is not the corpus.
 - **0.6.0** — rest of the query layer: stopword handling before the lexical leg, and routing between
   the lexical and vector legs by question shape (measured: the lexical leg wins on pinpoint questions,
   the hybrid on multi-page ones).
@@ -63,6 +43,48 @@ The single source of truth for the current version is the `VERSION` file. It is 
   similarity) — **review-gated**, never automatic, or determinism is gone.
 - **0.7.0** — remote canon: the index lives on a server, local agents reach it over MCP/SSH.
 - **1.0.0** — when the MCP tool contract stops changing *and* a second independent consumer exists.
+
+## [0.5.0] — 2026-07-26
+
+**The web surface is a source file now.** The whole interface used to be a `TEMPLATE` string inside
+`bin/render_viz.py`, rendered into git-ignored `graphify-out/kb-graph.html` — an interface that could
+not be diffed, linted or tested, and that nobody could fix without running the pipeline.
+
+### Added
+- **`web/` — the versioned shell**: `index.html`, `app.js`, `style.css`. No build step, no framework,
+  no placeholders. Opens from `file://`; entry point is `make open`.
+- **A Status panel** next to the graph, fed by build-time snapshots: index health (nodes, edges,
+  domains, projects, when the graph was built), the docs collection (files, freshness), **the alias
+  table** (renames are knowledge, not just configuration), search-quality numbers if a benchmark
+  result is present, and the versions of the repo plus both CLIs. Every block is **stamped** — a stale
+  number that admits its age is useful, one that pretends to be live is not.
+- **`make vendor`** downloads the renderer into `web/vendor/` (git-ignored) so the page works
+  offline. The page prefers the local copy and falls back to a CDN **with a visible banner**: a tool
+  whose promise is "the corpus never leaves the machine" must not quietly fetch code from a third
+  party. This was an inconsistency in the previous shell, which loaded vis-network from unpkg
+  unconditionally.
+- Tests 104 → **119**: the data contract the shell depends on (manifest keys, super-node `domkey`,
+  per-domain member/intra split, cross-domain rerouting, search index shape, stamped status) and the
+  shell's own rules — **no `.innerHTML`**, the local renderer first, no leftover placeholders, and the
+  UI strings staying English.
+
+### Changed
+- **`bin/render_viz.py` emits data only** and takes an output *directory*: `kb-manifest.js`
+  (`kbManifest({domains, superNodes, fileMap, dataPath, nodeCount, generatedAt})`), `kb-status.js`,
+  and the per-domain `kb-graph-data/*.js` that already existed. The four `__PLACEHOLDER__`
+  substitutions are gone.
+- **Search results are built with `textContent`.** The old shell assigned node labels into
+  `innerHTML`; a repository containing a symbol named `<img onerror=…>` would have executed it. The
+  generator additionally escapes `</script` in every emitted file, so a label cannot end the script
+  tag early.
+- The stale `graphify-out/kb-graph.html` is removed by the build; graphify's own `graph.html` stays as
+  the raw upstream view.
+- `README.md` and `CLAUDE.md` point at the new entry point; the design rules gained three entries (the
+  interface is a source file, snapshots are stamped, the renderer is local).
+
+### Unchanged on purpose
+- The lazy data split (one `.js` per domain, `_cross.js`, `_index.js`, loaded on demand) predates this
+  release and stays: `.js` calls rather than JSON + fetch is what makes `file://` work.
 
 ## [0.4.0] — 2026-07-26
 
