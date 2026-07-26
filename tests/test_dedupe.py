@@ -142,5 +142,24 @@ class DedupeTest(unittest.TestCase):
         self.assertEqual(len(out["nodes"]), 2)
 
 
+class FileLabelsAreNotSymbolsTest(unittest.TestCase):
+    """A *file* label must never be grouped by name.
+
+    The private suffix list this script used to carry was missing `.tsx` and `.py`, so those files
+    were treated as class-like and merged by label — two `page.tsx` in one Next.js repo would have
+    collapsed into a single node, taking every edge with them. Latent on the current corpus (the
+    graph hashes are unchanged), certain to fire on the next React repo.
+    """
+
+    def test_every_known_code_suffix_marks_a_file(self):
+        import lang
+        from _kbtest import load_script
+        dedupe = load_script("dedupe.py")
+        for suffix in lang.FILE_LABEL_SUFFIXES:
+            with self.subTest(suffix=suffix):
+                self.assertFalse(dedupe.is_classlike("page" + suffix))
+        self.assertFalse(dedupe.is_classlike(".render()"))
+        self.assertTrue(dedupe.is_classlike("BookingService"))
+
 if __name__ == "__main__":
     unittest.main()

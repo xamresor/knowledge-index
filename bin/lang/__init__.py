@@ -45,7 +45,8 @@ DOCS = (".md",)
 ALL_CODE = PHP + FRONTEND + PYTHON
 
 #: Suffixes that mark a *label* as a file rather than a symbol (labels keep their extension).
-FILE_LABEL_SUFFIXES = ALL_CODE + (".vue",)
+#: `.vue` is already in ALL_CODE via FRONTEND — this is the same set, named for the question it answers.
+FILE_LABEL_SUFFIXES = ALL_CODE
 
 #: Comment openers per language family. Rationale extraction needs this, and it is language
 #: knowledge — keeping it here is what lets a new language arrive without touching link_rationale.

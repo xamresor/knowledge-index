@@ -61,7 +61,7 @@ def main() -> int:
             table_node[n["label"]] = n["id"]
             table_domain[n["label"]] = n.get("domain", "database")
         lab = n["label"]
-        if not lab.endswith(("()",) + lang.PHP + (".js", ".vue", ".ts")):
+        if not lab.endswith(("()",) + lang.FILE_LABEL_SUFFIXES):
             if lab not in label_node or n["id"] in defined:
                 label_node[lab] = n["id"]
         sf = (n.get("source_file") or "").lstrip("/")

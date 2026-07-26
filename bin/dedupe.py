@@ -20,11 +20,18 @@ import json
 import sys
 
 import graph
+import lang
 from collections import defaultdict
 
 
 def is_classlike(label: str) -> bool:
-    return not label.endswith(("()", ".php", ".js", ".vue", ".ts"))
+    """A symbol, not a file or a method.
+
+    The suffix list is `lang.FILE_LABEL_SUFFIXES` and not a local copy on purpose: the copy that
+    used to live here was missing `.tsx` and `.py`, so those *files* were grouped as class-like and
+    merged by label. Two `page.tsx` in one Next.js repo would collapse into a single node.
+    """
+    return not label.endswith(("()",) + lang.FILE_LABEL_SUFFIXES)
 
 
 def main() -> int:

@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from _kbtest import BIN  # noqa: F401  (puts bin/ on sys.path)
+from _kbtest import BIN, load_script  # noqa: F401  (BIN puts bin/ on sys.path)
 
 import graph as graph_io
 import lang
@@ -29,9 +29,15 @@ class RegistryTest(unittest.TestCase):
         self.assertTrue(set(lang.FRONTEND) < set(lang.ALL_CODE))
         self.assertIn(".php", lang.ALL_CODE)
 
+    def test_rationale_mining_covers_every_frontend_extension(self):
+        """`.tsx` was missing from the hand-written list, so 132 files were never scanned."""
+        rationale = load_script("link_rationale.py")
+        self.assertIn(".tsx", rationale.EXTS)
+        self.assertEqual(set(rationale.EXTS), set(lang.PHP + lang.FRONTEND))
+
     def test_the_enrichers_no_longer_carry_their_own_copies(self):
         """The duplication this module removed must not come back."""
-        for name in ("enrich.py", "link_data.py", "link_http.py", "link_rationale.py"):
+        for name in ("enrich.py", "link_data.py", "link_http.py", "link_rationale.py", "dedupe.py"):
             source = (Path(BIN) / name).read_text(encoding="utf-8")
             with self.subTest(file=name):
                 self.assertIn("import lang", source)
