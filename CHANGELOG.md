@@ -14,6 +14,12 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+- **Non-goals written down** (2026-07-27, Romans): **multimodality is out of scope** — a document is
+  markdown; PDFs, scans, images, audio and OCR are not handled and are not a gap to close. Also
+  out: SaaS connectors with permission mirroring, a canonical index on a server (a recipe, see below),
+  and a write path. Recorded in the README so the comparison table's "what others do better" is read
+  as a boundary rather than a backlog.
+
 - **Three surfaces, split by consumer** (framing fixed by Romans 2026-07-26 — the reason each exists,
   which decides what each may require):
 
@@ -29,8 +35,29 @@ The single source of truth for the current version is the `VERSION` file. It is 
   the API happens to be up, the page may light up extra panels (progressive enhancement), never as a
   requirement.
 
-- **0.7.0** — remote canon: the index lives on a server, local agents reach it over MCP/SSH.
+- ~~**remote canon**: the index lives on a server, local agents reach it over MCP/SSH.~~
+  **Deferred, and removed from the roadmap as a feature** (2026-07-27). Since 0.4.0 and 0.7.0 there is
+  nothing left to build: install the tool on the box (`uv tool install`), point `KB_HOME` at a data
+  directory, and a client reaches it either as `ssh box /abs/path/to/kb-mcp` or through an SSH tunnel to
+  a loopback-bound `kb-api`. What remains is a *recipe* plus one prerequisite that lives in the corpus
+  repo, not here: the ingest pipeline still assumes a local `qmd update && qmd embed`, and that step
+  would lie the moment the index moved. Findings worth keeping regardless: **SQLite over a network
+  mount is unsafe** (unreliable locks, page-at-a-time latency) while **plain files over sshfs are
+  fine** (the dashboard is just files); embedding is **incremental by content hash**, so the cost to
+  fear is the one-off initial embed, not the reindex interval; and a non-interactive SSH shell does
+  **not** have `~/.local/bin` on `PATH`, so an MCP command must be an absolute path.
 - **1.0.0** — when the MCP tool contract stops changing *and* a second independent consumer exists.
+
+## [0.7.1] — 2026-07-27
+
+### Changed
+- **Scope boundaries are now explicit** (README §Non-goals): multimodality (PDF/scan/image/audio) is
+  out, SaaS connectors and permission mirroring are out, a server-side canonical index is a deployment
+  recipe rather than a feature, and there is no write path. Nothing was removed from the code — this
+  states decisions that were already implicit, so that the comparison table reads as a boundary and not
+  as a to-do list.
+- The remote-canon roadmap item is struck through with the reasoning and with the findings that stay
+  valid either way (SQLite over network mounts, incremental embedding, the SSH `PATH` trap).
 
 ## [0.7.0] — 2026-07-26
 

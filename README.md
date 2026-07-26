@@ -260,6 +260,22 @@ Facts below were checked in **July 2026**; licences and pricing move, so verify 
 - **Scale, operations, support.** A managed service is the right answer for a company; this is one
   process and a directory of generated files.
 
+### Non-goals (decided, not pending)
+
+These are **out of scope on purpose** — the table above lists them as things others do better, which is
+true, and none of them are a gap this project intends to close:
+
+- **Multimodality.** A document here is **markdown**. PDFs, scans, images, audio and OCR are not
+  handled and will not be: the corpora this indexes are code and hand-written docs, and every added
+  format buys parsing bugs, dependencies and a much larger surface for no gain on that corpus. If you
+  need scanned-document understanding, use RAGFlow — that is what it is for.
+- **Connectors to SaaS suites** (Slack, Drive, Confluence, Jira) and the **permission mirroring** they
+  require. One owner, local files. See Onyx or Glean.
+- **A canonical index on a server.** Nothing prevents it — install the tool on the box and point a
+  client at `kb-mcp` over SSH or at `kb-api` through a tunnel — but it is a **deployment recipe, not a
+  feature**, and it is deliberately not on the roadmap while a single machine holds the corpus.
+- **A write path.** The index is a projection; whoever owns the corpus owns writing to it.
+
 ### When this is the better fit
 
 - Several **related repositories you own**, where the interesting facts are the *joins* — which
