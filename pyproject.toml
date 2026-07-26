@@ -35,6 +35,7 @@ kb = "knowledge_index.cli:kb"
 kb-mcp = "knowledge_index.cli:kb_mcp"
 kb-api = "knowledge_index.cli:kb_api"
 kb-install = "knowledge_index.cli:kb_install"
+kb-extract = "knowledge_index.cli:kb_extract"
 
 [tool.hatch.version]
 path = "VERSION"

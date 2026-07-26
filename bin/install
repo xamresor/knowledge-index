@@ -72,6 +72,10 @@ fi
 command -v rsync >/dev/null 2>&1 && ok "rsync" || { bad "rsync not found (used to stage code read-only)"; MISSING=1; }
 
 echo
+echo "Document formats (optional — a missing tool means that format is skipped, never fatal)"
+python3 "$KB/bin/extract" --list | tail -n +2 | sed 's/^/  /'
+
+echo
 echo "Configuration"
 
 make_from_example() {

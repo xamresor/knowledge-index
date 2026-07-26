@@ -58,3 +58,8 @@ def kb_api() -> None:
 def kb_install() -> None:
     """`kb-install` — first-run setup: requirements, config, the MCP snippet."""
     _exec("install")
+
+
+def kb_extract() -> None:
+    """`kb-extract` — turn a non-markdown document into markdown (one plugin per format)."""
+    _exec("extract")

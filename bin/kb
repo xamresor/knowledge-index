@@ -193,6 +193,17 @@ build_kb() {
       --exclude='node_modules/' --exclude='.git/' --exclude='vendor/' \
       --include='*/' --include='*.md' --exclude='*' \
       "$docs/" "$DOCS_STAGE/$name/" 2>/dev/null || true
+    # Non-markdown documents (PDF, docx, scans) are extracted into the same staged tree, so the doc
+    # index sees them too. One parser per format lives in bin/parsers/; a format whose external tool
+    # is absent is reported and skipped, never fatal. Extracted files carry a provenance header, so an
+    # OCR'd scan is never mistaken for authored text. Opt out with KB_EXTRACT=0.
+    if [ "${KB_EXTRACT:-1}" != "0" ]; then
+      find "$docs" -type f \( -iname '*.pdf' -o -iname '*.docx' -o -iname '*.odt' -o -iname '*.rtf' \
+        -o -iname '*.epub' -o -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' \
+        -o -iname '*.tif' -o -iname '*.tiff' \) \
+        -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/vendor/*' -print0 2>/dev/null \
+        | xargs -0 -r "$PY" "$KB/bin/extract" --into "$DOCS_STAGE/$name" 2>&1 | sed 's/^/    /'
+    fi
     # Sanitize the staged copy to ASCII: qmd 0.3.2's chunker slices on byte offsets and
     # panics on multibyte UTF-8 at a chunk boundary. Only this staged mirror is touched —
     # the project's own docs are never modified.

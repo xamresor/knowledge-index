@@ -14,11 +14,9 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
-- **Non-goals written down** (2026-07-27, Romans): **multimodality is out of scope** — a document is
-  markdown; PDFs, scans, images, audio and OCR are not handled and are not a gap to close. Also
-  out: SaaS connectors with permission mirroring, a canonical index on a server (a recipe, see below),
-  and a write path. Recorded in the README so the comparison table's "what others do better" is read
-  as a boundary rather than a backlog.
+- **Tables** are a *retrieval* problem, not a format one, and are still open: markdown tables chunk
+  badly (a row separated from its header is close to meaningless), which is a chunking fix — repeat the
+  header per row-group, or project rows into records. Measured, unfixed. Not the parsers' job.
 
 - **Three surfaces, split by consumer** (framing fixed by Romans 2026-07-26 — the reason each exists,
   which decides what each may require):
@@ -47,6 +45,48 @@ The single source of truth for the current version is the `VERSION` file. It is 
   fear is the one-off initial embed, not the reindex interval; and a non-interactive SSH shell does
   **not** have `~/.local/bin` on `PATH`, so an MCP command must be an absolute path.
 - **1.0.0** — when the MCP tool contract stops changing *and* a second independent consumer exists.
+
+## [0.8.0] — 2026-07-27
+
+**Non-markdown documents can be indexed, one plugin per format.** Reversing the non-goal written a few
+hours earlier the same day (Romans: «давай разберёмся с таблицами и сканами и pdf… можем сделать на
+каждый parsing свой файл/plugin чтобы не мешать в кучу»). The scope is deliberately narrower than
+"multimodality": **text extraction** through external CLIs, not layout reconstruction.
+
+The trigger was concrete: two ConnectPay PDFs sit in a corpus and were **invisible to search**, because
+the doc index only matches `**/*.md`. `pdftotext -layout` pulls 17k and 31k characters out of them.
+
+### Added
+- **`bin/parsers/` — one plugin per format**, each declaring exactly four things (`EXTENSIONS`,
+  `REQUIRES`, `CONFIDENCE`, `extract`) so parsers cannot grow into one pile:
+  - `pdf_text` — PDFs with a text layer (`pdftotext -layout`; `-layout` matters, pricing decks put
+    figures in columns and without it a number loses its row);
+  - `pdf_ocr` — scans and images (`pdftoppm` + `tesseract`, languages from `KB_OCR_LANGS`);
+  - `office` — `.docx .odt .rtf .epub` → markdown **including tables**, via pandoc.
+- **`kb-extract`** (`bin/extract`): `--list` shows what this machine can extract *and what to install
+  for the rest*, `--into <dir>` writes `<name>.md`, otherwise stdout.
+- **Extraction wired into the doc staging** of `kb build`: non-markdown files under a project's `docs`
+  root are extracted into the same staged tree, so the index sees them. `KB_EXTRACT=0` opts out.
+- `kb-install` now lists the formats and the missing tools for the rest.
+- Tests 143 → **159**, including an end-to-end extraction of a hand-written PDF (the figure that
+  matters must survive), the priority order, and the reported-not-crashed rule.
+
+### Rules the registry enforces
+- **A missing tool means the format is unsupported, not a crash** — reported once, build continues.
+  A silent hole in the index is worse than a loud gap.
+- **Text layer before OCR, always.** A PDF that yields almost nothing is *refused with an explanation*
+  rather than indexed as an empty document.
+- **Every extracted file carries provenance**: source, tool **and its version**, timestamp, and
+  `confidence: EXTRACTED | OCR`. OCR output is noisy by nature and must never pass for authored text —
+  a hit from an `OCR` document is a lead, not a quote.
+- **The corpus is never modified**: extraction writes into the staged copy only.
+- **Zero Python dependencies survive** — every parser is a wrapper over an external CLI, like
+  `graphify` and `qmd`.
+
+### Fixed
+- Tool versions in the provenance header are **validated**. Poppler's `pdftotext` treats `--version` as
+  a filename and prints an I/O error, which duly ended up inside a header on the first run; a candidate
+  now has to look like a version and not like a complaint.
 
 ## [0.7.1] — 2026-07-27
 

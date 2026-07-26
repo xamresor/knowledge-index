@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""Extract documents that are not markdown into markdown, so the doc index can see them.
+
+    kb-extract <file> [...]            print the extracted markdown (with provenance) to stdout
+    kb-extract --into <dir> <file>...  write <dir>/<name>.md instead
+    kb-extract --list                  which formats can be extracted on this machine, and why not
+
+Design: one parser per format in bin/parsers/, each a thin wrapper over an external CLI. A missing tool
+means the format is unsupported — reported, never fatal. Every output carries a provenance header, so
+an OCR'd scan can never be mistaken for something a human wrote.
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import parsers
+
+
+def main(argv: list[str]) -> int:
+    args = list(argv)
+    if not args or args[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0 if args else 2
+
+    if args[0] == "--list":
+        ready = parsers.available()
+        table = parsers.registry()
+        print("formats:")
+        for ext in sorted(table):
+            if ext in ready:
+                print(f"  {ext:7} -> {ready[ext]}")
+            else:
+                needs = sorted({t for m in table[ext] for t in m.REQUIRES})
+                print(f"  {ext:7} -- unsupported here: install {', '.join(needs)}")
+        return 0
+
+    into: Path | None = None
+    if args[0] == "--into":
+        if len(args) < 3:
+            print("--into needs a directory and at least one file", file=sys.stderr)
+            return 2
+        into = Path(args[1])
+        into.mkdir(parents=True, exist_ok=True)
+        args = args[2:]
+
+    failures = 0
+    for name in args:
+        path = Path(name)
+        if not path.is_file():
+            print(f"skip {name}: not a file", file=sys.stderr)
+            failures += 1
+            continue
+        module = parsers.for_path(path)
+        if module is None:
+            needed = parsers.MISSING_TOOLS.get(path.suffix.lower())
+            why = f"install {', '.join(needed)}" if needed else "no parser for this format"
+            print(f"skip {path.name}: {why}", file=sys.stderr)
+            failures += 1
+            continue
+        try:
+            text = parsers.with_provenance(module.extract(path), path, module)
+        except parsers.ExtractError as exc:
+            print(f"skip {path.name}: {exc}", file=sys.stderr)
+            failures += 1
+            continue
+        if into is None:
+            sys.stdout.write(text)
+        else:
+            target = into / (path.stem + ".md")
+            target.write_text(text, encoding="utf-8")
+            print(f"{path.name} -> {target}  ({len(text)} chars, {module.CONFIDENCE})")
+    return 1 if failures and not into else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

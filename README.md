@@ -265,16 +265,45 @@ Facts below were checked in **July 2026**; licences and pricing move, so verify 
 These are **out of scope on purpose** — the table above lists them as things others do better, which is
 true, and none of them are a gap this project intends to close:
 
-- **Multimodality.** A document here is **markdown**. PDFs, scans, images, audio and OCR are not
-  handled and will not be: the corpora this indexes are code and hand-written docs, and every added
-  format buys parsing bugs, dependencies and a much larger surface for no gain on that corpus. If you
-  need scanned-document understanding, use RAGFlow — that is what it is for.
+- **Document *understanding*.** Extraction exists (see below) but it is text extraction, not layout
+  reconstruction: no table-structure recovery from a scan, no figure captioning, no audio. If you need
+  that, use RAGFlow — that is what it is for.
 - **Connectors to SaaS suites** (Slack, Drive, Confluence, Jira) and the **permission mirroring** they
   require. One owner, local files. See Onyx or Glean.
 - **A canonical index on a server.** Nothing prevents it — install the tool on the box and point a
   client at `kb-mcp` over SSH or at `kb-api` through a tunnel — but it is a **deployment recipe, not a
   feature**, and it is deliberately not on the roadmap while a single machine holds the corpus.
 - **A write path.** The index is a projection; whoever owns the corpus owns writing to it.
+
+### Document formats: one plugin per format
+
+Not everything worth indexing is markdown. Extraction is handled by **one plugin per format** in
+`bin/parsers/`, each a thin wrapper over an external CLI — so the zero-dependency rule survives and a
+format you do not need costs nothing.
+
+```bash
+kb-extract --list                       # what can be extracted here, and what to install for the rest
+kb-extract quote.pdf                    # to stdout, with a provenance header
+kb-extract --into docs/ *.pdf           # write <name>.md next to your docs
+```
+
+| Plugin | Formats | Needs | Confidence |
+|---|---|---|---|
+| `pdf_text` | `.pdf` with a text layer (`pdftotext -layout`) | poppler | `EXTRACTED` |
+| `pdf_ocr` | scanned `.pdf`, `.png/.jpg/.tif` | tesseract (+poppler for PDFs) | `OCR` |
+| `office` | `.docx .odt .rtf .epub` → markdown incl. tables | pandoc | `EXTRACTED` |
+
+Four rules the registry enforces:
+
+- **A missing tool means the format is unsupported, not a crash.** It is reported once and the build
+  continues — a silent hole in the index is worse than a loud gap.
+- **Text layer before OCR, always** (`PRIORITY`). A PDF that yields almost nothing is refused with an
+  explanation rather than indexed as an empty document.
+- **Every extracted file carries provenance** — source, tool *and its version*, timestamp, and
+  `confidence: EXTRACTED | OCR`. OCR output is noisy by nature; it must never pass for authored text.
+  A search hit from an `OCR` document is a lead, not a quote.
+- **The corpus is still never modified.** Extraction writes into the staged copy only, and
+  `KB_EXTRACT=0` turns it off entirely.
 
 ### When this is the better fit
 
