@@ -14,14 +14,12 @@ Usage: declutter.py <graph.json> <kb.hubs.txt> [--cap N]
 """
 from __future__ import annotations
 
-import json
 import re
 import sys
 
 import graph
 from collections import Counter
 
-BARE_CLASS = re.compile(r"^[A-Z][A-Za-z0-9]*$")  # "Model", "FormRequest" — not a file or method
 
 
 def main() -> int:

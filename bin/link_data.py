@@ -14,7 +14,6 @@ Usage: link_data.py <graph.json> <repos_dir>
 """
 from __future__ import annotations
 
-import json
 import os
 import re
 import sys

@@ -13,7 +13,6 @@ Run once per (route table, frontend) pair; edges accumulate in the graph.
 """
 from __future__ import annotations
 
-import json
 import os
 import re
 import sys
@@ -170,7 +169,7 @@ def main() -> int:
 
     graph.links(g).extend(edges)
     graph.save(g, graph_path)
-    pairs = {(e["source"].split("::")[0], e["target"].split("::")[0]) for e in edges}
+    pairs = {(graph.repo_of(e["source"]), graph.repo_of(e["target"])) for e in edges}
     print(f"[{target_repo}] http edges: {len(edges)} matched, {unmatched} unmatched; pairs={pairs}")
     return 0
 

@@ -76,11 +76,6 @@ def config_file(name: str) -> Path:
     return config_home() / name
 
 
-def example_file(name: str) -> Path:
-    """The committed `.example` twin, always read from the shipped copy."""
-    return PACKAGE_ROOT / f"{name}.example"
-
-
 def web_source() -> Path:
     """The versioned shell that ships with the tool (read-only when installed)."""
     return PACKAGE_ROOT / "web"

@@ -39,7 +39,6 @@ WIKILINK = re.compile(r"\[\[([^\]|#]+)")
 MD_LINK = re.compile(r"\[[^\]]*\]\(([^)#\s]+\.md)\)")
 DISTINCTIVE = re.compile(r"^(?:[A-Z][a-z0-9]+[A-Z]\w*|\w+\(\)|\w+::\w+)$")
 MAX_MENTIONS_PER_DOC = 12
-MAX_LABEL = 90
 
 
 def _is_distinctive(label: str) -> bool:

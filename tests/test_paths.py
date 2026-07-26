@@ -69,12 +69,6 @@ class LocationTest(unittest.TestCase):
             self.assertEqual(paths.data_home(), Path.home() / ".local/share/knowledge-index")
             self.assertEqual(paths.config_home(), Path.home() / ".config/knowledge-index")
 
-    def test_examples_always_come_from_the_shipped_copy(self):
-        with mock.patch.dict(os.environ, {"KB_HOME": "/srv/kb"}):
-            self.assertEqual(paths.example_file("aliases.toml"),
-                             paths.PACKAGE_ROOT / "aliases.toml.example")
-
-
 class StageWebTest(unittest.TestCase):
     def test_in_a_checkout_staging_is_a_no_op(self):
         self.assertEqual(paths.stage_web().resolve(), paths.web_source().resolve())
