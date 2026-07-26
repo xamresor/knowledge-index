@@ -26,12 +26,13 @@ import pathlib
 import re
 import subprocess
 
+import paths
 import query_build
 from alias_expand import expand as expand_aliases, load_aliases
 
-# Resolve the KB root from this file's location so the core is portable across checkouts.
-KB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-GRAPH = f"{KB}/graphify-out/graph.json"
+# Code and data are different roots once the tool is installed — see bin/paths.py.
+KB = str(paths.data_home())
+GRAPH = str(paths.graph_path())
 COLLECTION = os.environ.get("KB_COLLECTION", "kb")
 
 TIMEOUT_GRAPH = 60      # graph queries are sub-second; this is just a safety net
@@ -46,7 +47,7 @@ API_CONTRACT = 1
 def _read_version() -> str:
     """Repo version from the VERSION file (single source of truth); see CHANGELOG.md."""
     try:
-        return (pathlib.Path(KB) / "VERSION").read_text(encoding="utf-8").strip() or "0+unknown"
+        return (paths.PACKAGE_ROOT / "VERSION").read_text(encoding="utf-8").strip() or "0+unknown"
     except OSError:
         return "0+unknown"
 

@@ -40,9 +40,28 @@ qmd query --help >/dev/null 2>&1 && echo "qmd: query CLI ok" || echo "qmd: WRONG
 
 ## Quick start
 
+**Install as a tool** (commands on `PATH`, no checkout to keep around):
+
 ```bash
-make install    # checks requirements, creates config from the examples, prints the MCP snippet
-                # never overwrites an existing file; `make check` reports without writing
+uv tool install knowledge-index      # or: pipx install knowledge-index
+kb-install                           # requirements, config, the MCP snippet
+kb vendor                            # once: offline renderer for the dashboard
+kb build                             # stage repos read-only, build the graph, index the docs
+```
+
+Installed, the tool follows the XDG spec — code stays read-only in site-packages while data and
+config live per machine (`KB_HOME` overrides both, `kb --version` prints all of it):
+
+| | Path |
+|---|---|
+| data (`graphify-out/`, `repos/`, staged shell) | `$XDG_DATA_HOME/knowledge-index` → `~/.local/share/knowledge-index` |
+| config (`kb.projects.toml`, `aliases.toml`) | `$XDG_CONFIG_HOME/knowledge-index` → `~/.config/knowledge-index` |
+
+**Or work from a checkout** — unchanged, no migration: everything stays inside the clone.
+
+```bash
+make install    # same checks; never overwrites an existing file (`make check` only reports)
+make build && make open
 ```
 
 

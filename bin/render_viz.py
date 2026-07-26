@@ -34,6 +34,7 @@ import sys
 from collections import Counter, defaultdict
 
 import graph as graph_io
+import paths
 
 # node type -> vis-network shape (the legend text lives in web/app.js, next to the rendering)
 SHAPE = {
@@ -204,8 +205,10 @@ def write_status(out_dir: str, kb_root: str, g: dict, domains: list[str], counts
 
 
 def main() -> int:
-    graph_path = sys.argv[1]
-    out_dir = sys.argv[2] if len(sys.argv) > 2 else os.path.dirname(os.path.abspath(graph_path))
+    graph_path = sys.argv[1] if len(sys.argv) > 1 else str(paths.graph_path())
+    out_dir = sys.argv[2] if len(sys.argv) > 2 else str(paths.out_dir())
+    # The shell must sit next to the data (a file:// page loads siblings, it cannot fetch them).
+    staged = paths.stage_web()
     kb_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     data_dir = os.path.join(out_dir, DATA_DIR)
     os.makedirs(data_dir, exist_ok=True)
@@ -240,7 +243,7 @@ def main() -> int:
     write_status(out_dir, kb_root, g, domains, counts, graph_path)
 
     print(f"viz data: {len(domains)} domain files + _cross ({len(cross)}) + _index "
-          f"+ {MANIFEST} + {STATUS} -> {out_dir}/  (shell: web/index.html)")
+          f"+ {MANIFEST} + {STATUS} -> {out_dir}/  (shell: {staged}/index.html)")
     return 0
 
 

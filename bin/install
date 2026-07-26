@@ -12,7 +12,7 @@
 set -euo pipefail
 
 KB="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$KB"
+eval "$(python3 "$KB/bin/paths.py" --sh)"   # package vs data vs config — see bin/paths.py
 
 CHECK_ONLY=0
 WITH_VENDOR=0
@@ -30,7 +30,8 @@ warn() { printf '  \033[33m!\033[0m %s\n' "$1"; }
 bad()  { printf '  \033[31m✗\033[0m %s\n' "$1"; }
 MISSING=0
 
-echo "knowledge-index $(cat VERSION 2>/dev/null || echo '?') — setup check"
+echo "knowledge-index $(cat "$KB_PACKAGE/VERSION" 2>/dev/null || echo '?') — setup check"
+python3 "$KB/bin/paths.py" | sed "s/^/  /"
 echo
 echo "Requirements"
 
@@ -85,25 +86,32 @@ make_from_example() {
   fi
 }
 
-make_from_example kb.projects.toml kb.projects.toml.example "list the repos to index (paths, code/docs roots)"
-make_from_example aliases.toml aliases.toml.example "optional: old name -> canonical, for renamed things"
+mkdir -p "$KB_CONFIG"
+make_from_example "$KB_CONFIG/kb.projects.toml" "$KB_PACKAGE/kb.projects.toml.example" "list the repos to index (paths, code/docs roots)"
+make_from_example "$KB_CONFIG/aliases.toml" "$KB_PACKAGE/aliases.toml.example" "optional: old name -> canonical, for renamed things"
 
-if [ -f web/vendor/vis-network.min.js ]; then
-  ok "web/vendor/vis-network.min.js present (dashboard works offline)"
+if [ -f "$KB_WEB/vendor/vis-network.min.js" ]; then
+  ok "renderer vendored ($KB_WEB/vendor) — dashboard works offline"
 elif [ "$WITH_VENDOR" = 1 ] && [ "$CHECK_ONLY" = 0 ]; then
-  make vendor
+  "$KB/bin/kb" vendor
 else
-  warn "renderer not vendored — run 'make vendor' once for an offline dashboard (else it uses a CDN)"
+  warn "renderer not vendored — run 'kb vendor' once for an offline dashboard (else it uses a CDN)"
 fi
 
 echo
 echo "Surfaces"
+# Installed: the console script is on PATH, so name it — that survives an upgrade, while a
+# site-packages path would break on the next reinstall. From a checkout: the absolute script path.
+MCP_CMD="$KB/bin/kb-mcp"
+if [ "$KB_PACKAGE" != "$KB_DATA" ] && command -v kb-mcp >/dev/null 2>&1; then
+  MCP_CMD="$(command -v kb-mcp)"
+fi
 echo "  agents  — MCP over stdio: add this to the agent's .mcp.json"
 cat <<JSON
-    { "mcpServers": { "kb": { "command": "$KB/bin/kb-mcp" } } }
+    { "mcpServers": { "kb": { "command": "$MCP_CMD" } } }
 JSON
-echo "  scripts — HTTP API:  make serve      (127.0.0.1:8899; a token is required off loopback)"
-echo "  human   — dashboard: make open       ($KB/web/index.html)"
+echo "  scripts — HTTP API:  kb-api        (127.0.0.1:8899; a token is required off loopback)"
+echo "  human   — dashboard: $KB_WEB/index.html   (built by 'kb build')"
 
 echo
 if [ "$MISSING" = 1 ]; then
@@ -116,8 +124,8 @@ if [ "$CHECK_ONLY" = 1 ]; then
 fi
 # The example ships placeholder paths; advising `make build` while they are still there would send
 # someone into a confusing failure. Match the placeholder anywhere in the file, not just `path =`.
-if grep -q '/path/to/' kb.projects.toml 2>/dev/null; then
-  echo "Next: edit kb.projects.toml (it still holds the example paths), then run 'make build'."
+if grep -q '/path/to/' "$KB_CONFIG/kb.projects.toml" 2>/dev/null; then
+  echo "Next: edit $KB_CONFIG/kb.projects.toml (it still holds the example paths), then run 'kb build'."
 else
-  echo "Next: run 'make build' — it stages the repos read-only, builds the graph and indexes the docs."
+  echo "Next: run 'kb build' — it stages the repos read-only, builds the graph and indexes the docs."
 fi

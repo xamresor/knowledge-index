@@ -39,8 +39,10 @@ import sys
 import tomllib
 from pathlib import Path
 
-KB = Path(__file__).resolve().parent.parent
-DEFAULT_TABLE = KB / "aliases.toml"
+
+import paths
+
+DEFAULT_TABLE = paths.config_file("aliases.toml")
 
 
 def load_aliases(path: Path | str | None = None) -> list[tuple[str, str]]:

@@ -26,13 +26,10 @@ status: ## Graph diagnostics + qmd index health
 	@bin/kb status
 
 open:   ## Open the dashboard (graph + status) in a browser
-	@xdg-open web/index.html 2>/dev/null || echo "open web/index.html"
+	@bin/kb open
 
-vendor: ## Download the renderer once for offline use (web/vendor/, git-ignored)
-	@mkdir -p web/vendor
-	@curl -fsSL https://unpkg.com/vis-network/standalone/umd/vis-network.min.js \
-	  -o web/vendor/vis-network.min.js && \
-	  echo "vendored web/vendor/vis-network.min.js ($$(du -h web/vendor/vis-network.min.js | cut -f1)) — the page now works offline"
+vendor: ## Download the renderer once for offline use (git-ignored; works installed too)
+	@bin/kb vendor
 
 qmd-backend: ## Re-pick the qmd embedding backend (none|llama|other)
 	@bin/kb qmd-backend

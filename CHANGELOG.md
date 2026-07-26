@@ -32,6 +32,42 @@ The single source of truth for the current version is the `VERSION` file. It is 
 - **0.7.0** — remote canon: the index lives on a server, local agents reach it over MCP/SSH.
 - **1.0.0** — when the MCP tool contract stops changing *and* a second independent consumer exists.
 
+## [0.7.0] — 2026-07-26
+
+**Installable as a tool.** `uv tool install knowledge-index` / `pipx install knowledge-index` puts
+`kb`, `kb-mcp`, `kb-api` and `kb-install` on `PATH`. Answering the question that prompted this
+(«не лучше использовать composer?»): Composer is PHP, and this is Python + bash whose two real
+dependencies come from *different* ecosystems — `graphify` via uv/pip, `qmd` via npm. No single
+package manager can deliver that stack, which is why `kb-install` (a preflight, not a resolver)
+stays.
+
+### Added
+- **`pyproject.toml`** (hatchling), version read from the `VERSION` file so there is still one source
+  of truth. **No runtime Python dependencies** — standard library only, on purpose.
+- **`knowledge_index/` — a thin launcher**, not a rewrite: each entry point `os.execv`s the shipped
+  script, so signals, exit codes and the stdio pipe stay exactly as they are (`kb-mcp`'s whole
+  protocol is that pipe). `bin/` remains the implementation and a plain checkout keeps working.
+- **`bin/paths.py` — the split between code and data**, which packaging forces: `PACKAGE_ROOT`
+  (read-only: `bin/`, `web/`, `VERSION`, examples), `DATA_HOME` (`graphify-out/`, `repos/`, `.docs/`),
+  `CONFIG_HOME` (`kb.projects.toml`, `aliases.toml`). Installed it follows XDG; `KB_HOME` overrides
+  both; **a checkout keeps everything in place, so an existing clone needs no migration**. `bash` and
+  Python read the same resolution (`paths.py --sh`), so they cannot disagree.
+- **`kb vendor` and `kb open` as subcommands** — they work in both modes, unlike the previous
+  Makefile-only versions. The shell is **staged next to the data** when installed, because the page
+  loads its data through relative `<script src>` and a `file://` page cannot fetch a sibling.
+  A vendored renderer survives an upgrade: staging never touches `vendor/`.
+- Tests 132 → **143**: checkout-vs-wheel detection, XDG and `KB_HOME` resolution, examples always
+  read from the shipped copy, staging behaviour, and that the shell exports bash evals are complete
+  and quoted (an empty one would make a build write to `/`).
+
+### Fixed
+- **An installed copy identified itself as a checkout and pointed its data directory at
+  site-packages.** The first marker was `VERSION` + `bin/kb` — both of which the wheel ships. The
+  marker is now `pyproject.toml`, which a wheel never installs. Caught by actually installing the
+  tool and reading `kb --version`, not by reasoning about it.
+- `kb-install` now prints the **console-script** path for `.mcp.json` when installed
+  (`~/.local/bin/kb-mcp`) instead of a site-packages path that the next reinstall would break.
+
 ## [0.6.1] — 2026-07-26
 
 ### Added

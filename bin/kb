@@ -8,22 +8,26 @@
 set -euo pipefail
 
 KB="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$KB"
 PY=python3
-CFG="$KB/kb.projects.toml"
+# One source of truth for paths (see bin/paths.py): in a checkout these all resolve to the checkout,
+# installed they split into a read-only package dir and writable data/config dirs.
+eval "$("$PY" "$KB/bin/paths.py" --sh)"
+mkdir -p "$KB_DATA" "$KB_CONFIG"
+cd "$KB_DATA"
+CFG="$KB_CONFIG/kb.projects.toml"
 # Repo version: single source of truth is the VERSION file (see CHANGELOG.md).
-KB_VERSION="$(cat "$KB/VERSION" 2>/dev/null || echo '0+unknown')"
-OUT="$KB/graphify-out"
-DOCS_STAGE="$KB/.docs"      # aggregated docs root for qmd (one collection = one path); gitignored
+KB_VERSION="$(cat "$KB_PACKAGE/VERSION" 2>/dev/null || echo '0+unknown')"
+OUT="$KB_OUT"
+DOCS_STAGE="$KB_DATA/.docs"      # aggregated docs root for qmd (one collection = one path); gitignored
 COLLECTION="${KB_COLLECTION:-kb}"
-LOCAL_CFG="$KB/.kb.local"   # persisted local choices (e.g. QMD_BACKEND); gitignored
+LOCAL_CFG="$KB_DATA/.kb.local"   # persisted local choices (e.g. QMD_BACKEND); gitignored
 [ -f "$LOCAL_CFG" ] && . "$LOCAL_CFG"
 export GRAPHIFY_VIZ_NODE_LIMIT="${GRAPHIFY_VIZ_NODE_LIMIT:-20000}"
 
 require_cfg() {
   [ -f "$CFG" ] && return
   echo "error: $CFG not found." >&2
-  echo "Copy the template first:  cp kb.projects.toml.example kb.projects.toml" >&2
+  echo "Run 'kb-install' (or copy $KB_PACKAGE/kb.projects.toml.example to $CFG)" >&2
   echo "then edit it with your projects' paths." >&2
   exit 1
 }
@@ -222,6 +226,7 @@ case "${1:-build}" in
           echo "knowledge-index $KB_VERSION"
           echo "  graphify: $(graphify --version 2>/dev/null || echo 'not found')"
           echo "  qmd:      $(qmd --version 2>/dev/null || echo 'not found')"
+          "$PY" "$KB/bin/paths.py" | sed 's/^/  /'
           ;;
   build)  build_graph; build_kb ;;
   graph)  build_graph ;;
@@ -230,6 +235,13 @@ case "${1:-build}" in
   qmd-backend) rm -f "$LOCAL_CFG"; unset QMD_BACKEND; echo "qmd backend set to: $(resolve_qmd_backend)" ;;
   label)  "$PY" "$KB/bin/label_namespaces.py" "$OUT/graph.json" "$OUT/.graphify_labels.json"
           graphify cluster-only "$KB" --no-label >/dev/null; echo "relabeled + report regenerated" ;;
+  vendor) "$PY" -c "import sys; sys.path.insert(0,'$KB/bin'); import paths; print(paths.stage_web())" >/dev/null
+          W="$KB_WEB"; mkdir -p "$W/vendor"
+          curl -fsSL https://unpkg.com/vis-network/standalone/umd/vis-network.min.js \
+            -o "$W/vendor/vis-network.min.js" &&
+            echo "vendored $W/vendor/vis-network.min.js — the dashboard now works offline" ;;
+  open)   W="$KB_WEB"; [ -f "$W/index.html" ] || "$PY" -c "import sys;sys.path.insert(0,'$KB/bin');import paths;paths.stage_web()"
+          xdg-open "$W/index.html" 2>/dev/null || echo "open $W/index.html" ;;
   status) graphify diagnose multigraph --graph "$OUT/graph.json" | head -8; echo; qmd status ;;
-  *) echo "usage: bin/kb {build|graph|kb|update|label|status|qmd-backend|--version}"; exit 1 ;;
+  *) echo "usage: kb {build|graph|kb|update|label|status|open|vendor|qmd-backend|--version}"; exit 1 ;;
 esac
