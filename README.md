@@ -41,6 +41,12 @@ qmd query --help >/dev/null 2>&1 && echo "qmd: query CLI ok" || echo "qmd: WRONG
 ## Quick start
 
 ```bash
+make install    # checks requirements, creates config from the examples, prints the MCP snippet
+                # never overwrites an existing file; `make check` reports without writing
+```
+
+
+```bash
 make build      # build the merged graph + qmd doc index
 make vendor     # once: fetch the renderer for offline use (web/vendor/)
 make open       # open the dashboard: graph + status (web/index.html)
@@ -276,6 +282,9 @@ Not aspirations — these are the properties the code already has, kept explicit
 - **Failures are loud.** A missing route table warns instead of silently dropping the cross-repo half
   of the graph; steps that must run twice (clustering ↔ labeling is a fixpoint through files) say why
   in a comment rather than looking like a copy-paste slip.
+- **Setup reports, it does not surprise.** `bin/install` never overwrites an existing file, never
+  installs someone else's tool behind your back (it prints the exact command), and is idempotent;
+  `--check` writes nothing at all. An installer that violates those is worse than no installer.
 - **The interface is a source file, not an artefact.** `web/` holds the shell (markup, styling,
   behaviour) as versioned, diffable, testable files with no build step; the generator emits data only
   (`kb-manifest.js`, `kb-status.js`, per-domain files). Data arrives as `.js` calls rather than

@@ -26,6 +26,7 @@ import pathlib
 import re
 import subprocess
 
+import query_build
 from alias_expand import expand as expand_aliases, load_aliases
 
 # Resolve the KB root from this file's location so the core is portable across checkouts.
@@ -234,9 +235,17 @@ def with_suggestions(out: str, *terms: str) -> str:
 
 # --- operations ---------------------------------------------------------------------------------
 def _qmd_cmd(args: dict, query: str) -> list[str]:
-    """Build the qmd invocation for a docs search. `mode` maps to qmd's three entry points."""
+    """Build the qmd invocation for a docs search.
+
+    `mode` maps to qmd's entry points — with one deliberate twist: for `auto`/`hybrid` we hand qmd a
+    **query document** (one `lex:` line per content word + a `vec:` line) instead of a raw phrase,
+    because its lexical layer joins a phrase's terms with AND and so excludes the very page that holds
+    the answer. See bin/query_build.py for the measurement behind this.
+    """
     mode = args.get("mode", "auto")
     verb = {"lex": "search", "vec": "vsearch"}.get(mode, "query")
+    if verb == "query":
+        query = query_build.build(query)
     cmd = [verb, query, "-c", args.get("scope") or COLLECTION]
     if args.get("limit"):
         cmd += ["-n", str(args["limit"])]

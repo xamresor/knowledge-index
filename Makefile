@@ -1,5 +1,11 @@
-.PHONY: build graph kb update label status open vendor qmd-backend serve test help
+.PHONY: install check build graph kb update label status open vendor qmd-backend serve test help
 .DEFAULT_GOAL := help
+
+install: ## First-run setup: check requirements, create config, print the MCP snippet
+	@bin/install
+
+check:  ## Report what is missing without writing anything
+	@bin/install --check
 
 build:  ## Full build: cross-repo graph + qmd KB
 	@bin/kb build

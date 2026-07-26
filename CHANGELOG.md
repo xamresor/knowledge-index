@@ -29,20 +29,54 @@ The single source of truth for the current version is the `VERSION` file. It is 
   the API happens to be up, the page may light up extra panels (progressive enhancement), never as a
   requirement.
 
-- **0.6.0** — rest of the query layer: stopword handling before the lexical leg, and routing between
-  the lexical and vector legs by question shape (measured: the lexical leg wins on pinpoint questions,
-  the hybrid on multi-page ones).
-- **Backlog — entity registry with an owner flag.** The alias table shipped in 0.3.0 restores
-  *presence* but not *rank*: a page can now be found by its old name yet still sit at position 6–10,
-  because nothing distinguishes "this page owns the subject" from "this page mentions it in passing"
-  (including incidental hits inside paths). The form that fixes it is
-  `entities(id, prefLabel, altLabels[])` + `mentions(entity_id, doc, role)` with
-  `role ∈ {owner, mention, incidental}`, built at ingest. Worth it when client corpora arrive, not for
-  the few points it would add here.
-- Auto-discovery of alias candidates (git renames via `--diff-filter=R`, edited wikilinks, fuzzy name
-  similarity) — **review-gated**, never automatic, or determinism is gone.
 - **0.7.0** — remote canon: the index lives on a server, local agents reach it over MCP/SSH.
 - **1.0.0** — when the MCP tool contract stops changing *and* a second independent consumer exists.
+
+## [0.6.0] — 2026-07-26
+
+**The lexical layer stops excluding the answer — without patching qmd.** qmd joins a phrase's terms
+with `AND`, so a natural-language question turns every word into a hard filter: the page that holds
+the answer is dropped when it lacks one of them, usually a function word. Measured on the 27-question
+golden set, asking as a phrase gave **recall 0.14**.
+
+The fix uses qmd's own documented multi-line form instead of forking or patching it: hand it a
+**query document** — `intent:` plus one `lex:` line per content word plus a `vec:` line — which qmd
+**fuses (RRF)** rather than intersects.
+
+| Same corpus, same unpatched qmd | recall | MRR |
+|---|---|---|
+| one phrase (`AND` semantics) | 0.142 | 0.167 |
+| **query document, one `lex:` per term** | **0.670** | **0.586** |
+
+For comparison, patching qmd's `parseLexQuery` to `OR` reached recall 0.735 / MRR 0.526 — so this
+keeps ~90% of the recall gain with *better* ranking and **nothing forked**: no maintenance of someone
+else's fast-moving tool, and nothing that a `qmd` upgrade silently reverts.
+
+### Added
+- **`bin/query_build.py`** — the query document builder: content-word extraction, stop words for
+  Russian and English, compound tokens kept whole (`doc-search`, `renget-api`, `graph.json`,
+  `/srv/oldname` are the corpus's most discriminative words and splitting them destroys them), a cap
+  of 12 terms, and a hand-written query document passed through untouched.
+- **`bin/install` + `make install` / `make check`** — first-run setup: verifies python ≥ 3.11
+  (`tomllib`), `graphify ≥ 0.9.25`, `qmd`, `rsync`; creates `kb.projects.toml` and `aliases.toml` from
+  their examples; optionally vendors the renderer; prints the ready `.mcp.json` snippet with absolute
+  paths and the three surface entry points. **Never overwrites an existing file**, never installs
+  another project's tool behind your back (it prints the command), idempotent, and `--check` writes
+  nothing at all.
+- Tests 119 → **132**: stop words in both languages, compound tokens, ordering and deduplication, the
+  term cap, the stop-words-only fallback, and that explicit `mode=lex|vec` is left alone.
+
+### Changed
+- `search` with `mode` `auto`/`hybrid` now sends a query document; `mode=lex` and `mode=vec` remain
+  verbatim passthroughs, because an explicit mode is the caller's decision.
+- **Side effect, deliberate: qmd's own LLM query expansion no longer runs for these searches.** It was
+  actively harmful on unknown proper nouns — for one name it invented a domain ("… in philosophy") and
+  dragged the vector search off the corpus, giving that question a recall of exactly zero.
+
+### Superseded
+- The planned "routing between the lexical and vector legs by question shape" is dropped: the document
+  carries both legs and lets RRF weigh them, which needs no classifier and no heuristics about what a
+  question "looks like".
 
 ## [0.5.0] — 2026-07-26
 

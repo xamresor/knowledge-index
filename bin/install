@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# First-run setup: check what is missing, create the config files, print the MCP snippet.
+#
+# Design rules this script follows, because an installer that violates them is worse than no
+# installer:
+#   * NEVER overwrite an existing file — it prints what it would have written instead;
+#   * it does not install other people's tools behind your back, it tells you the exact command;
+#   * it is idempotent: running it twice changes nothing and still reports the truth;
+#   * `--check` does nothing at all, it only reports (useful in CI or before a build).
+#
+# Usage: bin/install [--check] [--with-vendor]
+set -euo pipefail
+
+KB="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$KB"
+
+CHECK_ONLY=0
+WITH_VENDOR=0
+for arg in "$@"; do
+  case "$arg" in
+    --check) CHECK_ONLY=1 ;;
+    --with-vendor) WITH_VENDOR=1 ;;
+    -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
+  esac
+done
+
+ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
+warn() { printf '  \033[33m!\033[0m %s\n' "$1"; }
+bad()  { printf '  \033[31m✗\033[0m %s\n' "$1"; }
+MISSING=0
+
+echo "knowledge-index $(cat VERSION 2>/dev/null || echo '?') — setup check"
+echo
+echo "Requirements"
+
+# Python 3.11+: `tomllib` (used for the config and the alias table) landed in 3.11.
+if command -v python3 >/dev/null 2>&1; then
+  PYV="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+  if python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'; then
+    ok "python3 $PYV (tomllib available)"
+  else
+    bad "python3 $PYV — need 3.11+ (tomllib is used for TOML config)"; MISSING=1
+  fi
+else
+  bad "python3 not found"; MISSING=1
+fi
+
+# graphify builds the code half. The floor is a real one: cross-repo edge fields we rely on.
+if command -v graphify >/dev/null 2>&1; then
+  GV="$(graphify --version 2>&1 | head -1)"
+  if python3 - "$GV" <<'PY'
+import re, sys
+m = re.search(r"(\d+)\.(\d+)\.(\d+)", sys.argv[1])
+raise SystemExit(0 if m and tuple(map(int, m.groups())) >= (0, 9, 25) else 1)
+PY
+  then ok "$GV"
+  else warn "$GV — 0.9.25+ recommended (older versions lack fields the enrichers expect)"
+  fi
+else
+  bad "graphify not found — install from https://github.com/Graphify-Labs/graphify"; MISSING=1
+fi
+
+# qmd builds the doc half; embeddings run on-device, so no API key is needed.
+if command -v qmd >/dev/null 2>&1; then
+  ok "$(qmd --version 2>&1 | head -1)"
+else
+  bad "qmd not found — install with: npm i -g @tobilu/qmd"; MISSING=1
+fi
+
+command -v rsync >/dev/null 2>&1 && ok "rsync" || { bad "rsync not found (used to stage code read-only)"; MISSING=1; }
+
+echo
+echo "Configuration"
+
+make_from_example() {
+  local target="$1" example="$2" what="$3"
+  if [ -f "$target" ]; then
+    ok "$target exists (left untouched)"
+  elif [ "$CHECK_ONLY" = 1 ]; then
+    warn "$target missing — would be created from $example"
+  else
+    cp "$example" "$target"
+    ok "created $target — edit it: $what"
+  fi
+}
+
+make_from_example kb.projects.toml kb.projects.toml.example "list the repos to index (paths, code/docs roots)"
+make_from_example aliases.toml aliases.toml.example "optional: old name -> canonical, for renamed things"
+
+if [ -f web/vendor/vis-network.min.js ]; then
+  ok "web/vendor/vis-network.min.js present (dashboard works offline)"
+elif [ "$WITH_VENDOR" = 1 ] && [ "$CHECK_ONLY" = 0 ]; then
+  make vendor
+else
+  warn "renderer not vendored — run 'make vendor' once for an offline dashboard (else it uses a CDN)"
+fi
+
+echo
+echo "Surfaces"
+echo "  agents  — MCP over stdio: add this to the agent's .mcp.json"
+cat <<JSON
+    { "mcpServers": { "kb": { "command": "$KB/bin/kb-mcp" } } }
+JSON
+echo "  scripts — HTTP API:  make serve      (127.0.0.1:8899; a token is required off loopback)"
+echo "  human   — dashboard: make open       ($KB/web/index.html)"
+
+echo
+if [ "$MISSING" = 1 ]; then
+  echo "Some requirements are missing (see ✗ above) — install them, then re-run bin/install."
+  exit 1
+fi
+if [ "$CHECK_ONLY" = 1 ]; then
+  echo "Check only; nothing was written."
+  exit 0
+fi
+if grep -q '^\s*path\s*=\s*"/path/to' kb.projects.toml 2>/dev/null; then
+  echo "Next: edit kb.projects.toml (it still holds the example paths), then run 'make build'."
+else
+  echo "Next: run 'make build' — it stages the repos read-only, builds the graph and indexes the docs."
+fi
