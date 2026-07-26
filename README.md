@@ -20,7 +20,7 @@ before running a build:
 |-----------------------|---|---|
 | [**graphify**](https://github.com/Graphify-Labs/graphify) | `>= 0.9.25` | AST code graph (`update`, `merge-graphs`, `cluster-only`, `query`, `path`, `explain`, `affected`). The build and `bin/kb-mcp` shell out to it. |
 | **qmd**               | `>= 2.5.3` (the `query`/`search`/`vsearch` CLI) | On-device markdown vector + BM25 doc search. **Must be the modern lineage**: `bin/kb-mcp` and the docs use `qmd query`. The older `qsearch` lineage (e.g. 0.3.x) has an incompatible command set and will break doc search — see the note below. |
-| **python3**           | `>= 3.10` | The enrichment scripts in `bin/` (standard library only — no packages). |
+| **python3**           | `>= 3.11` | The scripts in `bin/` — standard library only, no packages. 3.11 is the floor because the config and alias table are read with `tomllib`. |
 | **rsync**             | any recent | Code-only staging of the indexed projects into `repos/`. |
 | **php** + **artisan** | the indexed app's version | Only needed if a project sets `routes` — `bin/kb` runs `php artisan route:list --json` to build cross-repo `http_request` edges. |
 
@@ -195,6 +195,62 @@ qmd query --help >/dev/null 2>&1 && echo "qmd query CLI: YES" || echo "qmd query
 Then **restart the agent session** (or open `/hooks` once) so it loads the new `.mcp.json` server,
 the skill, and the freshly-created `settings.json` — the settings watcher only tracks `.claude/` if a
 settings file existed there at session start.
+
+## Where this sits (and where it does not)
+
+**This is a small local tool, not an enterprise search product.** It indexes a handful of related
+repositories you own, on one machine, for one owner, and exposes them to agents, scripts and a browser
+tab. It has no connectors, no multi-user permissions, no UI for administering anything, and no
+support. If you need those, the table below points at what to use instead.
+
+Facts below were checked in **July 2026**; licences and pricing move, so verify before deciding.
+
+### Code side
+
+| | Indexes | Cross-repo edges | Local / on-device | Daemon needed | Licence & cost |
+|---|---|---|---|---|---|
+| **knowledge-index** | code **+ docs** | ✅ incl. frontend call site → controller | ✅ | no (CLI/MCP; API optional) | GPL-3.0, free |
+| [Sourcegraph](https://sourcegraph.com) | code | ✅ (repo-wide search) | ◐ | yes | **proprietary since 2023**; free self-host deprecated, from ~$49/user/mo |
+| [Zoekt](https://github.com/sourcegraph/zoekt) / [OpenGrok](https://oracle.github.io/opengrok/) | code (**search only**, no graph) | ❌ | ✅ | yes | OSS, free |
+| [Glean (Meta)](https://glean.software/) | code, as schema-defined facts | ✅ within its schema | ✅ | yes (fact DB) | OSS, free — **compiler-grade, and heavy** |
+| [CodeQL](https://codeql.github.com/) | code, as a query language | ◐ | ✅ | no | free for OSS, **licence-restricted commercially** |
+| [graphify](https://github.com/Graphify-Labs/graphify) | code (AST graph) | — | ✅ | no | our dependency, not an alternative |
+
+### Docs / retrieval side
+
+| | Indexes | Local / on-device | Daemon needed | Permissions | Licence & cost |
+|---|---|---|---|---|---|
+| **knowledge-index** | markdown docs + the code graph | ✅ embeddings on device | no | **none — one owner by design** | GPL-3.0, free |
+| [Onyx](https://onyx.app) (ex-Danswer) | 45+ connectors | ◐ can self-host, LLM optional | yes (Docker stack) | ✅ mirrors source ACLs | MIT, free |
+| [R2R](https://github.com/SciPhi-AI/R2R) | ingested documents | ◐ | yes | users/auth built in | Apache-2.0, free |
+| [RAGFlow](https://github.com/infiniflow/ragflow) | **deep** PDF/scan parsing | ◐ | yes (Elasticsearch) | multi-tenant | Apache-2.0, free |
+| [txtai](https://github.com/neuml/txtai) | embeddable, single package | ✅ | no | — | Apache-2.0, free |
+| Azure AI Search · Bedrock KB · Vertex AI Search | managed RAG primitives | ❌ cloud | managed | query-time ACL / IAM | metered |
+| [Glean (the company)](https://glean.com) | 100+ connectors, enterprise search | ❌ cloud | managed | ✅ permission mirroring | ~$45–50/seat/mo, ~100-seat minimum |
+
+### What the others do better
+
+- **Compiler-grade code semantics.** Meta's Glean, CodeQL and SCIP-based indexers resolve symbols the
+  way a compiler does. This project uses AST extraction plus regex heuristics for the cross-repo hops,
+  and says so on every edge via `confidence` (`EXTRACTED | INFERRED | AMBIGUOUS | DERIVED`) — honest,
+  but weaker than a real indexer.
+- **Connectors and permission mirroring.** Onyx and Glean read Slack, Drive, Confluence, Jira and
+  reflect their ACLs. This project reads local files and has no permission model at all.
+- **Document understanding.** RAGFlow parses scanned PDFs and tables properly; here a document is
+  markdown, and anything else is out of scope.
+- **Scale, operations, support.** A managed service is the right answer for a company; this is one
+  process and a directory of generated files.
+
+### When this is the better fit
+
+- Several **related repositories you own**, where the interesting facts are the *joins* — which
+  frontend call hits which controller, which model backs which table.
+- **Agents are the primary consumer**: MCP is a first-class surface, not an add-on.
+- **Nothing may leave the machine**: embeddings run on device, no API key is required, and the HTTP
+  surface refuses to bind off loopback without a token.
+- The index is **disposable**: delete `graphify-out/` and rebuild. No migration, no lock-in — the
+  corpus is your files.
+- Small enough to read: ~4k lines including the dashboard and the tests.
 
 ## Three surfaces, three consumers
 

@@ -32,6 +32,19 @@ The single source of truth for the current version is the `VERSION` file. It is 
 - **0.7.0** — remote canon: the index lives on a server, local agents reach it over MCP/SSH.
 - **1.0.0** — when the MCP tool contract stops changing *and* a second independent consumer exists.
 
+## [0.6.1] — 2026-07-26
+
+### Added
+- **README §"Where this sits (and where it does not)"** — an honest comparison against the code-side
+  tools (Sourcegraph, Zoekt/OpenGrok, Meta's Glean, CodeQL) and the retrieval-side ones (Onyx, R2R,
+  RAGFlow, txtai, the managed cloud primitives, Glean the company), with a **"what the others do
+  better"** section: compiler-grade code semantics, connectors and permission mirroring, document
+  understanding, scale and support. Facts stamped July 2026, because licences and pricing move.
+
+### Fixed
+- Requirements said python `>= 3.10`; the floor is **3.11** — `tomllib` reads the config and the alias
+  table. `bin/install` already checked 3.11, so the README was the wrong half.
+
 ## [0.6.0] — 2026-07-26
 
 **The lexical layer stops excluding the answer — without patching qmd.** qmd joins a phrase's terms
