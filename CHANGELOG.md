@@ -14,6 +14,10 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+- **Per-language plugin migration, steps 2–3** (the risky half, gated on a measurement): `link_data`,
+  `enrich` and `link_rationale` have **no tests**, so moving ~700 lines of framework regexes into
+  `bin/lang/php_laravel.py`, `js_ts.py` and `sql.py` needs tests first and an edge-count-by-relation
+  comparison before/after — otherwise "refactoring" silently loses edges and nobody notices for a month.
 - **Tables** are a *retrieval* problem, not a format one, and are still open: markdown tables chunk
   badly (a row separated from its header is close to meaningless), which is a chunking fix — repeat the
   header per row-group, or project rows into records. Measured, unfixed. Not the parsers' job.
@@ -45,6 +49,48 @@ The single source of truth for the current version is the `VERSION` file. It is 
   fear is the one-off initial embed, not the reindex interval; and a non-interactive SSH shell does
   **not** have `~/.local/bin` on `PATH`, so an MCP command must be an absolute path.
 - **1.0.0** — when the MCP tool contract stops changing *and* a second independent consumer exists.
+
+## [0.9.0] — 2026-07-27
+
+**Language knowledge becomes plugins, and documents enter the graph.** The four enrichers each carried
+**their own copy** of the file-type list — `(".js", ".ts", ".tsx", ".vue")` appeared verbatim in four
+files — while framework knowledge (Eloquent, Next/Nuxt HTTP clients) sat in "concern" files rather than
+language ones. Adding a language meant editing four places, and forgetting one produced a **silently
+partial graph**: the worst failure mode here, because nothing looks broken and edges are simply absent.
+
+### Added
+- **`bin/lang/` — the language layer**, with one shared source of truth for file-type facts and a
+  plugin registry. The sets are **named by role and not merged**: `FRONTEND` (files that call a
+  backend) stays narrower than `ALL_CODE`, because `link_http` deliberately scans only the former and
+  a merged list would quietly change what it looks at. Comment openers per language live here too, so
+  a new language no longer requires touching rationale extraction.
+- **`bin/lang/markdown.py` — the first plugin for a format that is not code**, and the proof the
+  contract holds beyond PHP/JS. Documents used to exist only in the search index: findable, but the
+  graph could not answer *which document describes this service*. Now:
+  - a `doc` node per markdown file under a project's docs root (rendered as an ellipse, legend updated);
+  - `links_to` **doc → doc** from `[[wikilink]]` and relative markdown links — `EXTRACTED`, the link is
+    literally in the file;
+  - `documents` **doc → symbol** from a bare mention — `INFERRED` with a score, never `EXTRACTED`.
+  The mention rule is deliberately stingy, because this is where noise would come from: only
+  distinctive labels (≥5 chars, CamelCase / `method()` / namespaced), whole-word case-sensitive,
+  **ambiguous labels skipped** (same rule as `dedupe.py`: when in doubt, do not invent a fact), and
+  capped at 12 per document — a doc mentioning forty symbols is an index, not a description.
+- `bin/link_docs.py` as the pipeline step (a module inside a package cannot be executed directly, and
+  every other step is a `bin/*.py` script, so the plugin stays importable and testable).
+- New relations in the graph contract: `links_to`, `documents`.
+- Tests 159 → **176**: the registry (incl. a test that the removed duplication cannot come back), the
+  distinctiveness rules, ambiguity skipping, the per-doc cap, partial-word rejection, vendor
+  exclusion, and **idempotence** — the pipeline reruns, so nodes must not double.
+
+### Fixed
+- Wikilink resolution was broken on the first write: the index was keyed by a composite
+  `"repo::path.md"` string and `Path("api::b.md").stem` is `api::b`, so `[[b]]` matched nothing. Two
+  separate indexes now — by path for markdown links, by stem for wikilinks. Caught by a test that
+  expected two edges and got one.
+
+### Verified on the real graph
+`+8 doc nodes, +24 edges` across three doc roots, with `links_to` marked `EXTRACTED` and `documents`
+`INFERRED`.
 
 ## [0.8.0] — 2026-07-27
 

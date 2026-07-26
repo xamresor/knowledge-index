@@ -21,6 +21,7 @@ import re
 import sys
 
 import graph
+import lang
 
 LAYER_SUFFIX = re.compile(
     r"(Controller|Resource|Request|Service|Repository|Policy|Observer|Factory|Seeder|"
@@ -36,7 +37,7 @@ def node_type(n: dict) -> str:
         return "method"
     if sf.endswith(".vue") or lab.endswith(".vue"):
         return "template"
-    if lab.endswith((".php", ".js", ".ts")):
+    if lab.endswith(lang.PHP + (".js", ".ts")):
         return "file"
     if BARE_CLASS.match(lab):
         for suf, t in (("Controller", "controller"), ("Resource", "resource"),
@@ -86,7 +87,7 @@ def raw_domain(n: dict) -> str:
     base = None
     if BARE_CLASS.match(lab):
         base = entity(lab)
-    elif lab.endswith((".php", ".vue", ".js", ".ts")):
+    elif lab.endswith(lang.PHP + (".vue", ".js", ".ts")):
         base = entity(os.path.splitext(lab)[0])
     elif lab.startswith(".") and "_" in n.get("id", ""):
         cls = n["id"].split("::")[-1].rsplit("_", 1)[0].split("_")[-1]

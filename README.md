@@ -275,6 +275,21 @@ true, and none of them are a gap this project intends to close:
   feature**, and it is deliberately not on the roadmap while a single machine holds the corpus.
 - **A write path.** The index is a projection; whoever owns the corpus owns writing to it.
 
+### Languages: one plugin per language
+
+`graphify` parses the AST. The plugins in `bin/lang/` add what an AST cannot see — framework relations,
+schema facts, design rationale in comments, and documents as graph nodes:
+
+| Plugin | Claims | Contributes |
+|---|---|---|
+| `markdown` | `.md` | `doc` nodes · `links_to` (wikilinks, relative links — `EXTRACTED`) · `documents` (symbol mentions — `INFERRED`, capped) |
+| *(migrating)* | `.php` | Eloquent relations, controllers, route-table consumption |
+| *(migrating)* | `.js .ts .tsx .vue` | HTTP call sites: `api.verb()`, `$api()`, `apiFetch`, `fetch(BASE)` |
+
+The shared file-type facts live in `bin/lang/__init__.py` — one place, named by role
+(`FRONTEND` ⊂ `ALL_CODE`), because the same list used to be copy-pasted into four enrichers and
+forgetting one produced a silently partial graph.
+
 ### Document formats: one plugin per format
 
 Not everything worth indexing is markdown. Extraction is handled by **one plugin per format** in

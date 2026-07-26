@@ -17,12 +17,13 @@ import re
 import sys
 
 import graph
+import lang
 
 MARKERS = ("NOTE", "WHY", "HACK", "SECURITY", "RATIONALE")
 # `// WHY: ...`, `# NOTE - ...`, `* SECURITY: ...` — a marker word at a comment start
 COMMENT_RE = re.compile(
     r"(?://|#|/\*+|\*)\s*(" + "|".join(MARKERS) + r")\b[:\-–]\s*(.+)", re.IGNORECASE)
-EXTS = (".php", ".js", ".ts", ".vue")
+EXTS = lang.PHP + (".js", ".ts", ".vue")   # single source of truth: bin/lang/__init__.py
 MAX_LABEL = 110
 MAX_PER_FILE = 8  # a file drowning in markers is noise, not knowledge
 

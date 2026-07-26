@@ -124,6 +124,16 @@ build_graph() {
   "$PY" "$KB/bin/enrich.py" "$OUT/graph.json" "$KB/repos"
   echo "==> Adding data-layer links (eloquent model rels, FK table->table, SQL code->table)"
   "$PY" "$KB/bin/link_data.py" "$OUT/graph.json" "$KB/repos"
+  # Docs as graph nodes (bin/lang/markdown.py): [[wikilink]] and relative links are EXTRACTED edges,
+  # a bare symbol mention is INFERRED and capped. Runs after the code plugins — it points at their nodes.
+  local doc_roots=()
+  while IFS='|' read -r name code docs routes calls serves; do
+    [ -n "$docs" ] && [ -d "$docs" ] && doc_roots+=("$name=$docs")
+  done < <(read_projects)
+  if [ "${#doc_roots[@]}" -gt 0 ]; then
+    echo "==> Linking docs into the graph (${#doc_roots[@]} doc roots)"
+    "$PY" "$KB/bin/link_docs.py" "$OUT/graph.json" "${doc_roots[@]}"
+  fi
   echo "==> Mining rationale comments (NOTE/WHY/HACK/SECURITY -> rationale nodes)"
   "$PY" "$KB/bin/link_rationale.py" "$OUT/graph.json" "$KB/repos"
   echo "==> Rendering custom typed/domain visualization"

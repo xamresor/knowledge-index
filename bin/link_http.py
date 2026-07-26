@@ -19,6 +19,7 @@ import re
 import sys
 
 import graph
+import lang
 
 VERBS = ("get", "post", "put", "patch", "delete")
 # Dotted client: api.post('/v1/x') — verb is in the method name.
@@ -111,7 +112,7 @@ def main() -> int:
     api_nodes = [n for n in graph.nodes(g)
                  if n.get("repo") == target_repo and "." not in n["label"] and n.get("source_file")]
     fe_nodes = [n for n in graph.nodes(g)
-                if n.get("repo") != target_repo and n["label"].endswith((".js", ".ts", ".tsx", ".vue"))
+                if n.get("repo") != target_repo and n["label"].endswith(lang.FRONTEND)
                 and n.get("source_file")]
 
     # method nodes (label like ".toggleMic()") in the target repo, by source_file
@@ -150,7 +151,7 @@ def main() -> int:
             dirs[:] = [d for d in dirs
                        if d not in {"node_modules", ".next", ".nuxt", "dist", "build", "vendor"}]
             for fn in files:
-                if not fn.endswith((".js", ".ts", ".tsx", ".vue")):
+                if not fn.endswith(lang.FRONTEND):
                     continue
                 fp = os.path.join(dp, fn)
                 rel = os.path.relpath(fp, repo_root)

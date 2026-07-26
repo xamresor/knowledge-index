@@ -38,6 +38,8 @@ class Relation:
     EXPLAINS = "explains"           # rationale node -> the symbol it explains
     IN_DOMAIN = "in_domain"         # symbol -> domain anchor
     DEFINES_TABLE = "defines_table"  # migration/model -> db_table node
+    LINKS_TO = "links_to"           # doc -> doc, from a wikilink or a relative markdown link
+    DOCUMENTS = "documents"         # doc -> symbol it describes (name match: INFERRED, never EXTRACTED)
 
 
 class Confidence:

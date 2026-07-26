@@ -31,6 +31,7 @@ const LEGEND = [
   ["diamond ◆", "service / repository / interface / trait"],
   ["star ★", "enum / template (.vue)"],
   ["text", "rationale (NOTE / WHY / HACK / SECURITY)"],
+  ["ellipse", "doc (markdown file in the graph)"],
 ];
 
 let MANIFEST = null;   // set by kbManifest()

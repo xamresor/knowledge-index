@@ -20,6 +20,7 @@ import re
 import sys
 
 import graph
+import lang
 
 KB = None  # set in main
 
@@ -82,7 +83,7 @@ def main() -> int:
             table_node[n["label"]] = n["id"]
             table_domain[n["label"]] = n.get("domain", "database")
         lab = n["label"]
-        if not lab.endswith(("()", ".php", ".js", ".vue", ".ts")):
+        if not lab.endswith(("()",) + lang.PHP + (".js", ".vue", ".ts")):
             if lab not in label_node or n["id"] in defined:
                 label_node[lab] = n["id"]
         sf = (n.get("source_file") or "").lstrip("/")
@@ -92,7 +93,7 @@ def main() -> int:
     classnode_by_file: dict[str, str] = {}
     for n in N:
         sf = (n.get("source_file") or "").lstrip("/")
-        if sf and n["id"] in defined and not n["label"].endswith((".php", "()")):
+        if sf and n["id"] in defined and not n["label"].endswith(lang.PHP + ("()",)):
             classnode_by_file.setdefault(sf, n["id"])
 
     def ensure_table(name: str, domain: str = "database") -> str:

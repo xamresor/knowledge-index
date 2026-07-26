@@ -42,7 +42,7 @@ SHAPE = {
     "resource": "box", "request": "box", "model": "database",
     "db_table": "square", "method": "triangle", "function": "triangle",
     "interface": "diamond", "trait": "diamond", "enum": "star", "template": "star",
-    "file": "dot", "symbol": "dot", "rationale": "text",
+    "file": "dot", "symbol": "dot", "rationale": "text", "doc": "ellipse",
 }
 BIG = {"controller", "model", "db_table"}     # types drawn a bit larger
 RED, BLUE, GREEN = "#e15759", "#4e79a7", "#59a14f"
