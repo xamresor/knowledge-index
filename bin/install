@@ -114,7 +114,9 @@ if [ "$CHECK_ONLY" = 1 ]; then
   echo "Check only; nothing was written."
   exit 0
 fi
-if grep -q '^\s*path\s*=\s*"/path/to' kb.projects.toml 2>/dev/null; then
+# The example ships placeholder paths; advising `make build` while they are still there would send
+# someone into a confusing failure. Match the placeholder anywhere in the file, not just `path =`.
+if grep -q '/path/to/' kb.projects.toml 2>/dev/null; then
   echo "Next: edit kb.projects.toml (it still holds the example paths), then run 'make build'."
 else
   echo "Next: run 'make build' — it stages the repos read-only, builds the graph and indexes the docs."
