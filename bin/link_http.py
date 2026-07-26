@@ -20,34 +20,14 @@ import sys
 
 import graph
 import lang
+from lang import js_ts
 
-VERBS = ("get", "post", "put", "patch", "delete")
-# Dotted client: api.post('/v1/x') — verb is in the method name.
-CALL_RE = re.compile(r"\bapi\.(" + "|".join(VERBS) + r")\(\s*[`'\"]([^`'\"]+)", re.IGNORECASE)
-# Options-object style: the verb lives in an options object (same line or the next few),
-# GET when absent. Covers ofetch/fetch wrappers across frameworks:
-#   $api('v2/objects', {method:'POST'})           (Nuxt/ofetch)
-#   apiFetch('/auth/x', {method:'DELETE'})        (Next/React wrapper, incl. apiUpload/apiDownload)
-#   fetch(`${API_BASE}/categories`, {...})        (raw fetch to a base-URL template literal)
-WRAPPER_RE = re.compile(r"(?<![\w.])(\$api|apiFetch|apiUpload|apiDownload|fetch)\(\s*[`'\"]([^`'\"]+)")
-METHOD_RE = re.compile(r"\bmethod\s*:\s*['\"](" + "|".join(VERBS) + r")['\"]", re.IGNORECASE)
-METHOD_WINDOW = 3  # lines after the call to look for `method:`
+VERBS = js_ts.VERBS
 
 
 def iter_calls(lines: list[str]):
-    """Yield (lineno, verb, raw_path) for every recognized API call site."""
-    for i, line in enumerate(lines, 1):
-        for verb, raw in CALL_RE.findall(line):
-            yield i, verb.lower(), raw
-        for m in WRAPPER_RE.finditer(line):
-            name, raw = m.group(1), m.group(2)
-            # Bare fetch() counts only when the URL is a base-URL template (`${...}/…`);
-            # a plain fetch('/static/x') or fetch(url) is not a backend API call.
-            if name == "fetch" and not raw.startswith("${"):
-                continue
-            window = line[m.end():] + "\n" + "\n".join(lines[i:i + METHOD_WINDOW])
-            vm = METHOD_RE.search(window)
-            yield i, (vm.group(1).lower() if vm else "get"), raw
+    """Every recognised API call site — the client shapes live in bin/lang/js_ts.py."""
+    return js_ts.iter_calls(lines)
 
 
 def norm_path(p: str) -> str:
@@ -148,8 +128,7 @@ def main() -> int:
         repo_root = os.path.dirname(root.rstrip("/"))
         for dp, dirs, files in os.walk(root):
             # don't scan dependency / build output — not our source, and slow
-            dirs[:] = [d for d in dirs
-                       if d not in {"node_modules", ".next", ".nuxt", "dist", "build", "vendor"}]
+            dirs[:] = js_ts.prune(dirs)
             for fn in files:
                 if not fn.endswith(lang.FRONTEND):
                     continue

@@ -50,10 +50,31 @@ class RegistryTest(unittest.TestCase):
                 self.assertIn("relations", plugin.CONTRIBUTES)
                 self.assertTrue(callable(plugin.enrich))
 
+    def test_the_registry_separates_pipelines_from_patterns(self):
+        """A knowledge module has no enrich(); calling it as a pipeline step would be a crash."""
+        self.assertEqual({m.NAME for m in lang.plugins()}, {"markdown"})
+        self.assertEqual({m.NAME for m in lang.patterns()}, {"php_laravel", "js_ts"})
+        for module in lang.patterns():
+            self.assertFalse(hasattr(module, "enrich"), module.NAME)
+
     def test_describe_is_status_output(self):
         described = lang.describe()
-        self.assertIn("markdown", described)
         self.assertIn("links_to", described["markdown"]["relations"])
+        self.assertEqual(described["markdown"]["role"], "plugin")
+        self.assertEqual(described["php_laravel"]["role"], "patterns")
+        self.assertIn("eloquent", described["php_laravel"]["relations"])
+
+    def test_the_enrichers_compile_no_patterns_of_their_own(self):
+        """The point of the move: language patterns in lang/, pipelines in the enrichers.
+
+        Asserted structurally rather than by searching for `belongsTo` or `node_modules` — those
+        words legitimately appear in prose explaining what an edge means. A compiled pattern is the
+        thing that must not live here.
+        """
+        for name in ("enrich.py", "link_data.py", "link_http.py"):
+            source = (Path(BIN) / name).read_text(encoding="utf-8")
+            with self.subTest(file=name):
+                self.assertNotIn("re.compile", source)
 
 
 def graph_with(*labels: str) -> dict:

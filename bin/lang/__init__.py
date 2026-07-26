@@ -13,13 +13,21 @@ Two things matter about the sets below: they are **named by role, not merged**. 
 `ALL_CODE` are different questions, and a single `CODE_EXTENSIONS` would quietly change behaviour —
 `link_http` deliberately looks at frontend files only, while `enrich` looks at everything.
 
-Plugin contract (see markdown.py for a worked example):
+Two kinds of module live here, and the difference is deliberate:
+
+* **plugins** define `enrich(graph, roots)` and run as a pipeline step of their own (`markdown`);
+* **knowledge modules** carry only patterns and pure functions over text, called by the enrichers
+  (`php_laravel`, `js_ts`). Their pipelines are older and heavier than one function signature, so
+  the regexes moved first and the pipeline stayed put — the cheap half of the split, done separately
+  from the risky half.
+
+Shared contract:
 
     NAME              str                      short identifier, used in logs
-    EXTENSIONS        tuple[str, ...]          files this plugin claims
+    EXTENSIONS        tuple[str, ...]          files this module claims
     COMMENT_PREFIXES  tuple[str, ...]          comment openers, for rationale extraction
-    CONTRIBUTES       dict[str, list[str]]     {"nodes": [...], "relations": [...]} — for status output
-    enrich(graph, roots) -> tuple[int, int]    (nodes added, edges added); mutates the graph in place
+    CONTRIBUTES       dict[str, list[str]]     what it adds to the graph — for status output
+    enrich(graph, roots) -> tuple[int, int]    plugins only: (nodes added, edges added), in place
 """
 from __future__ import annotations
 
@@ -63,12 +71,23 @@ def _modules():
             yield importlib.import_module(f"{__package__}.{info.name}")
 
 
+def _ordered(modules) -> list:
+    return sorted(modules, key=lambda m: (getattr(m, "PRIORITY", 50), m.NAME))
+
+
 def plugins() -> list:
-    """Language plugins, in a stable order (declaration priority, then name)."""
-    return sorted(_modules(), key=lambda m: (getattr(m, "PRIORITY", 50), m.NAME))
+    """Modules that can enrich a graph themselves, in pipeline order (priority, then name)."""
+    return _ordered(m for m in _modules() if hasattr(m, "enrich"))
+
+
+def patterns() -> list:
+    """Modules that only carry language patterns; the enrichers call into them."""
+    return _ordered(m for m in _modules() if not hasattr(m, "enrich"))
 
 
 def describe() -> dict[str, dict]:
-    """What each plugin claims and contributes — for `kb status` and for the dashboard."""
-    return {m.NAME: {"extensions": list(m.EXTENSIONS), **getattr(m, "CONTRIBUTES", {})}
-            for m in plugins()}
+    """What each module claims and contributes — for `kb status` and for the dashboard."""
+    return {m.NAME: {"extensions": list(m.EXTENSIONS),
+                     "role": "plugin" if hasattr(m, "enrich") else "patterns",
+                     **getattr(m, "CONTRIBUTES", {})}
+            for m in _ordered(_modules())}

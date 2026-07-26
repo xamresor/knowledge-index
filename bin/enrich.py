@@ -22,45 +22,22 @@ import sys
 
 import graph
 import lang
+from lang import js_ts, php_laravel
 
-LAYER_SUFFIX = re.compile(
-    r"(Controller|Resource|Request|Service|Repository|Policy|Observer|Factory|Seeder|"
-    r"Cast|Enum|Type|Job|Listener|Event|Command|Middleware|Exception|Provider|Mixin|"
-    r"Collection|Trait|Interface|Test|Handler|Builder|Manager|Action|Rule|Scope)$"
-)
-BARE_CLASS = re.compile(r"^[A-Z][A-Za-z0-9]*$")
+#: Re-exported for callers that used to find them here (the patterns now live in the plugin).
+entity = php_laravel.entity
 
 
 def node_type(n: dict) -> str:
+    """Node kind, asking each language plugin about the labels it owns."""
     lab, sf = n["label"], (n.get("source_file") or "")
     if lab.startswith(".") and lab.endswith("()"):
         return "method"
-    if sf.endswith(".vue") or lab.endswith(".vue"):
+    if sf.endswith(js_ts.TEMPLATES) or lab.endswith(js_ts.TEMPLATES):
         return "template"
-    if lab.endswith(lang.PHP + (".js", ".ts")):
+    if lab.endswith(lang.PHP + js_ts.SCRIPTS):
         return "file"
-    if BARE_CLASS.match(lab):
-        for suf, t in (("Controller", "controller"), ("Resource", "resource"),
-                       ("Request", "request"), ("Service", "service"),
-                       ("Repository", "repository"), ("Interface", "interface"),
-                       ("Trait", "trait")):
-            if lab.endswith(suf):
-                return t
-        if lab.endswith("Enum") or "/Enums/" in sf or "/Enum/" in sf:
-            return "enum"
-        if "/Models/" in sf or sf.startswith("app/Models") or "\\Models\\" in sf:
-            return "model"
-        return "class"
-    return "symbol"
-
-
-def entity(name: str) -> str:
-    """OrderController -> Order ; CustomerResource -> Customer ; keep already-bare names."""
-    prev = None
-    while prev != name:
-        prev = name
-        name = LAYER_SUFFIX.sub("", name)
-    return name or prev
+    return php_laravel.class_type(lab, sf) or "symbol"
 
 
 def layer_bucket(sf: str, repo: str) -> str:
@@ -85,9 +62,9 @@ def raw_domain(n: dict) -> str:
     # entity from the class name (Order, Customer, Product, ...)
     lab = n["label"]
     base = None
-    if BARE_CLASS.match(lab):
+    if php_laravel.BARE_CLASS.match(lab):
         base = entity(lab)
-    elif lab.endswith(lang.PHP + (".vue", ".js", ".ts")):
+    elif lab.endswith(lang.PHP + js_ts.TEMPLATES + js_ts.SCRIPTS):
         base = entity(os.path.splitext(lab)[0])
     elif lab.startswith(".") and "_" in n.get("id", ""):
         cls = n["id"].split("::")[-1].rsplit("_", 1)[0].split("_")[-1]
@@ -95,27 +72,6 @@ def raw_domain(n: dict) -> str:
     if base and len(base) > 2:
         return base
     return layer_bucket(sf, n.get("repo", "misc"))
-
-
-def find_tables(repos_dir: str) -> dict[str, str]:
-    """class name -> table, scanned from staged model files ($table = '...')."""
-    tbl = {}
-    pat_t = re.compile(r"protected\s+\$table\s*=\s*'([^']+)'")
-    pat_c = re.compile(r"class\s+(\w+)")
-    for dp, _, files in os.walk(repos_dir):
-        if "/Models" not in dp and "/Model" not in dp:
-            continue
-        for fn in files:
-            if not fn.endswith(".php"):
-                continue
-            try:
-                txt = open(os.path.join(dp, fn), encoding="utf-8", errors="ignore").read()
-            except OSError:
-                continue
-            mt, mc = pat_t.search(txt), pat_c.search(txt)
-            if mt and mc:
-                tbl[mc.group(1)] = mt.group(1)
-    return tbl
 
 
 def main() -> int:
@@ -152,7 +108,7 @@ def main() -> int:
         del n["_raw_domain"]
 
     # db_table nodes + model->table edges
-    tables = find_tables(repos_dir)
+    tables = php_laravel.declared_tables(repos_dir)
     table_nodes, new_links = {}, []
     for n in N:
         if n["type"] == "model" and n["label"] in tables:
