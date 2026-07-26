@@ -14,10 +14,6 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
-- **Per-language plugin migration, steps 2–3** (the risky half, gated on a measurement): `link_data`,
-  `enrich` and `link_rationale` have **no tests**, so moving ~700 lines of framework regexes into
-  `bin/lang/php_laravel.py`, `js_ts.py` and `sql.py` needs tests first and an edge-count-by-relation
-  comparison before/after — otherwise "refactoring" silently loses edges and nobody notices for a month.
 - **Tables** are a *retrieval* problem, not a format one, and are still open: markdown tables chunk
   badly (a row separated from its header is close to meaningless), which is a chunking fix — repeat the
   header per row-group, or project rows into records. Measured, unfixed. Not the parsers' job.
@@ -49,6 +45,55 @@ The single source of truth for the current version is the `VERSION` file. It is 
   fear is the one-off initial embed, not the reindex interval; and a non-interactive SSH shell does
   **not** have `~/.local/bin` on `PATH`, so an MCP command must be an absolute path.
 - **1.0.0** — when the MCP tool contract stops changing *and* a second independent consumer exists.
+
+## [0.10.0] — 2026-07-27
+
+### Language plugins, finished (steps 2–3, gated on a measurement)
+
+The migration that stopped at v0.9.0 because the three enrichers had **no tests**. Done in the order
+that made it safe, one commit each:
+
+1. **Tests first.** `tests/test_enrichers.py` pins `enrich.py`, `link_data.py` and `link_rationale.py`
+   at two levels: the pure functions that were about to move, and the whole scripts run as
+   subprocesses against a fixture repo tree (an Eloquent relation, a `$table` declaration, a foreign
+   key in a migration, a query-builder reference, a rationale comment). Every assertion checks the
+   edge's **confidence** too — the one field that must never drift, because a regex-derived edge
+   posing as an AST fact is a lie the rest of the graph rests on.
+2. **The move.** `bin/lang/php_laravel.py` (class/layer vocabulary, `$table`, Eloquent relations,
+   schema + FK patterns, query-builder refs, migration-name parsing, model scan) and
+   `bin/lang/js_ts.py` (API client shapes, template/script suffixes, build-output dirs). The
+   enrichers now compile **no patterns at all**, and a test asserts `re.compile` cannot come back.
+3. **The leftovers.** With the patterns centralised, three private suffix lists became visible, each
+   missing a file type the project has: `dedupe.py` (`.tsx`/`.py` labels treated as class-like, so
+   files were merged **by name** — two `page.tsx` in one Next.js repo would collapse into one node),
+   `link_rationale.py` (`.tsx` never scanned for markers — 132 files), `link_data.py` (same omission
+   in the label index).
+
+**Proven neutral, not assumed.** Same input graph, same three enrichers, before and after: 4731 nodes,
+18881 edges, `edge_hash 07f5d50aa1f29ea0`, identical counts by relation and by type. The step-3 fixes
+are **latent on the current corpus** and the changelog says so rather than claiming a fix: there are
+zero rationale markers in `.tsx` today, and the duplicate `.tsx`/`.py` basenames in the staged repos
+do not collide inside a single repo yet. What changed is that the next React repo will not silently
+corrupt the graph.
+
+Two boundaries drawn against the tidier-looking option: **no `sql.py`** (nothing parses `.sql`;
+`DB::table` and `Schema::create` match PHP source, so a SQL "language plugin" would be a fake
+boundary) and **route matching stays in `link_http.py`** (a Laravel route table meeting a JS call site
+is a join between two languages and belongs to neither plugin).
+
+The registry now has two tiers: `lang.plugins()` for modules that enrich a graph themselves,
+`lang.patterns()` for modules that only carry language knowledge.
+
+### Removed
+
+A sweep for what the refactor made dead: `import json` in 7 files (left over from before `graph.py`
+owned all JSON I/O), `import re` in two, `import pathlib` in one, a duplicate `BARE_CLASS` in
+`declutter.py`, an unapplied `MAX_LABEL` in `lang/markdown.py`, and `paths.example_file()` (no caller
+— `bin/install` resolves the `.example` twins in bash). One replacement rather than a deletion:
+`link_http.py` re-split a node id by hand to get the repo tag, which is what `graph.repo_of` exists
+for — that inline split was the bypass `graph.py` was written to end.
+
+Tests: **176 → 200**.
 
 ## [0.9.0] — 2026-07-27
 

@@ -280,11 +280,24 @@ true, and none of them are a gap this project intends to close:
 `graphify` parses the AST. The plugins in `bin/lang/` add what an AST cannot see — framework relations,
 schema facts, design rationale in comments, and documents as graph nodes:
 
-| Plugin | Claims | Contributes |
-|---|---|---|
-| `markdown` | `.md` | `doc` nodes · `links_to` (wikilinks, relative links — `EXTRACTED`) · `documents` (symbol mentions — `INFERRED`, capped) |
-| *(migrating)* | `.php` | Eloquent relations, controllers, route-table consumption |
-| *(migrating)* | `.js .ts .tsx .vue` | HTTP call sites: `api.verb()`, `$api()`, `apiFetch`, `fetch(BASE)` |
+| Module | Role | Claims | Contributes |
+|---|---|---|---|
+| `markdown` | plugin | `.md` | `doc` nodes · `links_to` (wikilinks, relative links — `EXTRACTED`) · `documents` (symbol mentions — `INFERRED`, capped) |
+| `php_laravel` | patterns | `.php` | class/layer vocabulary · `$table` · Eloquent relations · schema + FK · query-builder refs · migration-name parsing |
+| `js_ts` | patterns | `.js .ts .tsx .vue` | HTTP call sites: `api.verb()`, `$api()`, `apiFetch`, `fetch(BASE)` · template/script suffixes · build-output dirs |
+
+Two roles, and the difference is deliberate. A **plugin** defines `enrich(graph, roots)` and runs as a
+pipeline step of its own; a **patterns** module carries only regexes and pure functions that the
+enrichers call. The enrichers' pipelines are older and heavier than one function signature, so the
+patterns moved first and the pipelines stayed — the cheap half of the split, separate from the risky
+half. `lang.plugins()` and `lang.patterns()` keep the two apart, and a test asserts `re.compile` never
+reappears in an enricher.
+
+Two boundaries were drawn against the tidier-looking option. There is **no `sql.py`**: nothing here
+parses `.sql` files, so `DB::table` and `Schema::create` — which match PHP source — live in
+`php_laravel`, and a "SQL language plugin" would be a fake boundary. And **route matching stays in
+`link_http.py`**: a Laravel route table meeting a JS call site is a join between two languages and
+belongs to neither plugin.
 
 The shared file-type facts live in `bin/lang/__init__.py` — one place, named by role
 (`FRONTEND` ⊂ `ALL_CODE`), because the same list used to be copy-pasted into four enrichers and
