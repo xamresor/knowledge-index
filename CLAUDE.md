@@ -60,33 +60,5 @@ and `docs_search`, `docs_get` (qmd `kb` collection). It wraps the `graphify`/`qm
 - `make status` — graph diagnostics + qmd index health.
 - Add/remove a project by editing `kb.projects.toml` (no symlinks; explicit paths).
 
-## How it's built (see `bin/kb`)
-
-Per project: code is rsynced (code-only) into `repos/<name>/`, graphified (AST, no LLM), then all
-graphs are `merge-graphs`'d into `graphify-out/graph.json`. `bin/link_http.py` injects the
-cross-repo `http_request` edges from each Laravel app's `route:list` + frontend `api.<verb>()`
-call sites. `bin/dedupe.py` canonicalizes duplicate symbol nodes — graphify emits a separate reference node
-per usage site, so it merges all same-label class-like nodes (per repo) into the one definition
-(redirecting edges) so a class connects to its real users instead of leaving throwaway copies
-floating. `bin/declutter.py` then strips framework "god nodes" (Laravel base types/traits/helpers
-listed in `kb.hubs.txt` — `Model`, `FormRequest`, `.log()`, …) — **curated-only**, so consolidated
-domain services are never pruned. Domain classes (those with their own members) are always kept.
-`cluster-only` builds communities + `graph.html`, and `bin/label_namespaces.py` names them.
-`bin/enrich.py` adds per-node **type** + **domain**, synthesizes **db_table** nodes from model
-`$table` (`defines_table` edges) and **domain anchor** nodes (`in_domain`). `bin/link_data.py`
-then adds the semantic data layer graphify's AST misses: **`eloquent`** model→model relations
-(belongsTo/hasMany…), **`fk`** table→table (parsed from migration foreign keys), and **`sql`**
-code→table (`DB::table()`/`->from()`). `bin/link_rationale.py` mines rationale comments
-(`NOTE:`/`WHY:`/`HACK:`/`SECURITY:`/`RATIONALE:` — deliberately not TODO) into **rationale** nodes
-with `explains` edges to the class/file they annotate (capped 8/file). The function-usage graph
-(method→method `calls`) and use/import/trait edges come from graphify directly.
-`bin/render_viz.py` emits the viz **data** (`kb-manifest.js`, `kb-status.js`, per-domain files) for the shell in `web/`, coloring edges by relation (http_request=red,
-eloquent=purple, fk=orange, sql=teal, defines_table=green); AMBIGUOUS edges render dashed.
-
-**Edge confidence** (every edge carries it): `EXTRACTED` — straight from AST/literal syntax
-(graphify edges, backfilled in `enrich.py`; rationale `explains`); `INFERRED` — literal fact +
-heuristic node resolution (http_request 0.9, eloquent 0.9, defines_table 0.85, sql 0.8 — suffix
-or bare-label matching can mis-attach on collisions); `AMBIGUOUS` — guessed key, e.g. an fk whose
-owning table came from the migration *filename* (0.6); `DERIVED` — organizational, not a code
-fact (`in_domain`). Consumers: trust EXTRACTED, verify AMBIGUOUS.
-Tune framework pruning via `kb.hubs.txt`; domain folding threshold is `MIN_DOMAIN` in `enrich.py`.
+## How it's built
+Pipeline internals (graphify graph, cross-repo edges, doc nodes, plugins by language/format) — see `README.md` and `bin/kb`.
