@@ -35,6 +35,7 @@ const LEGEND = [
 ];
 
 let MANIFEST = null;   // set by kbManifest()
+const hidden = new Set();   // domains unticked in the Domains list
 let STATUS = null;     // set by kbStatus()
 let net = null, nodes = null, edges = null;
 const loaded = {};     // domain -> {nodeIds, edgeIds}
@@ -99,6 +100,18 @@ window.kbRecv = (domain, data) => {
 /* --- graph ------------------------------------------------------------------------------------- */
 function representative(id, domain) { return loaded[domain] ? id : "domain:" + domain; }
 
+// A super-node carries its domain as `domkey`, a member as `group`.
+const domainOfNode = (n) => (n ? n.domkey || n.group : undefined);
+const domainOfId = (id) => domainOfNode(nodes.get(id));
+
+/* Hiding a domain filters the views the network draws; the data sets themselves stay whole, so
+ * expanding, collapsing and the cross-domain rerouting work the same whether a domain is shown or not. */
+function setShown(domain, shown) {
+  if (shown) hidden.delete(domain); else hidden.add(domain);
+  net.nodesView.refresh();
+  net.edgesView.refresh();
+}
+
 function rebuildCross() {
   if (!CROSS || !edges) return;
   if (crossIds.length) edges.remove(crossIds);
@@ -157,6 +170,7 @@ function collapse(domain) {
 }
 
 function focusNode(id, domain) {
+  if (hidden.has(domain)) { setShown(domain, true); renderDomains(); }
   if (loaded[domain]) {
     net.selectNodes([id]);
     net.focus(id, { scale: 1.1, animation: true });
@@ -210,14 +224,59 @@ function renderDomains() {
   box.replaceChildren();
   for (const node of MANIFEST.superNodes) {
     const row = document.createElement("div");
+    const tick = document.createElement("input");
+    tick.type = "checkbox";
+    tick.checked = !hidden.has(node.domkey);
+    tick.onchange = () => setShown(node.domkey, tick.checked);
     const swatch = document.createElement("span");
     swatch.className = "dot";
     swatch.style.background = node.color.background;
-    row.appendChild(swatch);
-    row.appendChild(text("span", node.label));
-    row.onclick = () => (loaded[node.domkey] ? collapse(node.domkey) : expand(node.domkey));
-    row.style.cursor = "pointer";
+    const name = text("span", node.label, "name");
+    name.onclick = () => (loaded[node.domkey] ? collapse(node.domkey) : expand(node.domkey));
+    row.append(tick, swatch, name);
     box.appendChild(row);
+  }
+}
+
+function showAll(shown) {
+  for (const d of MANIFEST.domains) {
+    if (shown) hidden.delete(d); else hidden.add(d);
+  }
+  net.nodesView.refresh();
+  net.edgesView.refresh();
+  renderDomains();
+}
+
+/* --- ask the index (needs `make serve`) ---------------------------------------------------------
+ * graphify query and qmd docs search run as processes, so they cannot work from file://. Opened from
+ * kb-api the page shares its origin and calls /search directly; opened as a file it says how to get
+ * there. The answer is plain text from the same core the MCP tools use. */
+function wireAsk() {
+  const answer = el("answer");
+  const served = location.protocol === "http:" || location.protocol === "https:";
+  if (!served) {
+    const hint = el("server-hint");
+    hint.hidden = false;
+    hint.textContent = "Needs the server: run `make serve`, then open http://127.0.0.1:8899/";
+  }
+  for (const input of document.querySelectorAll("input.ask")) {
+    input.disabled = !served;
+    input.onkeydown = async (event) => {
+      if (event.key !== "Enter" || !input.value.trim()) return;
+      answer.hidden = false;
+      answer.textContent = "searching… (the first docs search loads a model and can take a while)";
+      try {
+        const res = await fetch("../search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ q: input.value.trim(), domain: input.dataset.domain }),
+        });
+        const body = await res.json();
+        answer.textContent = res.ok ? body.text : `error ${res.status}: ${body.error}`;
+      } catch (err) {
+        answer.textContent = "server unreachable — is `make serve` still running?";
+      }
+    };
   }
 }
 
@@ -297,7 +356,11 @@ function start() {
 
   nodes = new vis.DataSet(MANIFEST.superNodes);
   edges = new vis.DataSet([]);
-  net = new vis.Network(el("net"), { nodes, edges }, {
+  const nodesView = new vis.DataView(nodes, { filter: (n) => !hidden.has(domainOfNode(n)) });
+  const edgesView = new vis.DataView(edges, {
+    filter: (e) => !hidden.has(domainOfId(e.from)) && !hidden.has(domainOfId(e.to)),
+  });
+  net = new vis.Network(el("net"), { nodes: nodesView, edges: edgesView }, {
     physics: {
       solver: "forceAtlas2Based",
       stabilization: { iterations: 150 },
@@ -305,6 +368,9 @@ function start() {
     },
     interaction: { hover: true, tooltipDelay: 120 },
   });
+
+  net.nodesView = nodesView;
+  net.edgesView = edgesView;
 
   net.on("doubleClick", (params) => {
     if (!params.nodes.length) return;
@@ -317,7 +383,9 @@ function start() {
   });
 
   el("expand-all").onclick = () =>
-    Object.keys(MANIFEST.fileMap).forEach((d) => { if (!loaded[d]) expand(d); });
+    Object.keys(MANIFEST.fileMap).forEach((d) => { if (!loaded[d] && !hidden.has(d)) expand(d); });
+  el("show-all").onclick = () => showAll(true);
+  el("hide-all").onclick = () => showAll(false);
   el("collapse-all").onclick = () => Object.keys(loaded).slice().forEach(collapse);
 
   const input = el("q");
@@ -330,6 +398,7 @@ function start() {
 
   renderDomains();
   renderStatus();
+  wireAsk();
   loadData("_cross.js");                      // cross-domain structure, once
 }
 

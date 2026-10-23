@@ -51,6 +51,8 @@ button, input {
   font: inherit;
 }
 button { cursor: pointer; }
+input:disabled { opacity: .5; }
+input[type="checkbox"] { width: auto; margin: 0 6px 0 0; padding: 0; vertical-align: middle; }
 button:hover { background: #34343a; }
 
 #tabs { display: flex; gap: 4px; margin: 8px 0; }
@@ -69,6 +71,14 @@ button:hover { background: #34343a; }
 .swatch.route { background: var(--route); }
 .swatch.cross { background: var(--cross); }
 .swatch.internal { background: var(--internal); }
+
+#domains .name { cursor: pointer; }
+#domains .name:hover { text-decoration: underline; }
+.pair { display: flex; gap: 4px; }
+.pair button { flex: 1; }
+
+#answer { max-height: 320px; overflow: auto; margin: 4px 0; padding: 6px; background: #17171a;
+          border: 1px solid var(--line); border-radius: 3px; font-size: 11px; white-space: pre-wrap; }
 
 .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; vertical-align: middle;
        margin-right: 6px; }

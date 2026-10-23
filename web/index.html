@@ -23,8 +23,18 @@
 
   <section id="panel-graph">
     <p id="summary" class="muted">loading…</p>
-    <input id="q" placeholder="search a class / method / table…" autocomplete="off" spellcheck="false">
+    <h2>Filter</h2>
+    <input id="q" placeholder="a class / method / table name…" autocomplete="off" spellcheck="false">
     <div id="qres"></div>
+
+    <h2>Ask the index</h2>
+    <p id="server-hint" class="muted" hidden></p>
+    <input id="code-q" class="ask" data-domain="code" placeholder="graphify query: how does checkout work?"
+           autocomplete="off" spellcheck="false">
+    <input id="docs-q" class="ask" data-domain="docs" placeholder="qmd docs: where are invoices described?"
+           autocomplete="off" spellcheck="false">
+    <pre id="answer" hidden></pre>
+
     <button id="expand-all">Expand all domains</button>
     <button id="collapse-all">Collapse all</button>
     <p class="muted">Double-click a domain to expand · double-click a member to collapse</p>
@@ -40,7 +50,9 @@
       <div class="muted">dashed = AMBIGUOUS confidence (a heuristic edge)</div>
     </div>
 
-    <h2>Colour = domain</h2>
+    <h2>Domains</h2>
+    <p class="muted">Tick = shown in the graph · click a name to expand it</p>
+    <div class="pair"><button id="show-all">Show all</button><button id="hide-all">Hide all</button></div>
     <div id="domains"></div>
   </section>
 

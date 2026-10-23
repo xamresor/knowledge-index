@@ -79,6 +79,8 @@ use the tools above. Point the user to it when they want to *see* the architectu
   graph only), then `make open`. A missing renderer shows a banner: `make vendor`.
 - The data (`graphify-out/kb-manifest.js`, `kb-graph-data/`) is generated and not in git — it maps
   private code. Never commit it.
+- With `make serve` running, <http://127.0.0.1:8899/> serves the same dashboard plus two inputs that
+  run `graphify query` and the qmd docs search — handy for a human; you still use the MCP tools.
 - `make demo` opens a bundled demo on a fictional shop, useful to show what the dashboard does
   without touching real projects.
 

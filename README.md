@@ -124,6 +124,19 @@ make build                                     # graph + docs; render_viz.py wri
 make open                                      # open web/index.html
 ```
 
+**In the browser** the sidebar has three inputs and a domain list:
+
+| Control | Does | Needs |
+|---|---|---|
+| **Filter** | finds nodes by name, click to jump | nothing — works from `file://` |
+| **graphify query** | "how does X work" → a scoped subgraph as text | `make serve` |
+| **qmd docs** | search the indexed docs by meaning | `make serve` (first query loads the model, ~1 min) |
+| **Domains** | tick to show or hide a domain; click a name to expand it | nothing |
+
+For the two queries run `make serve` and open <http://127.0.0.1:8899/>: the API serves the dashboard
+itself, so the page and `/search` share one origin and no CORS header is ever sent (one would let any
+open website read the index from 127.0.0.1). Opened as a file, those two inputs are disabled and say so.
+
 Only the graph changed? `make graph && make open` is enough — the docs index is not involved.
 `bin/render_viz.py graphify-out/graph.json` re-splits an existing graph without rebuilding it.
 
@@ -401,7 +414,7 @@ MCP and the API are the **same contract**: both dispatch through `kb_core.call_t
 that contract — it must work when nothing is running, which is precisely when you want to look at it.
 
 ```bash
-make serve                      # 127.0.0.1:8899, no token needed on loopback
+make serve                      # 127.0.0.1:8899, no token needed on loopback; dashboard at /
 PORT=9000 TOKEN=secret make serve
 ```
 

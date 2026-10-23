@@ -34,6 +34,44 @@ class BindPolicyTest(unittest.TestCase):
         kb_api.check_bind("0.0.0.0", "secret")  # must not raise
 
 
+class HostPolicyTest(unittest.TestCase):
+    """A tokenless server answers only loopback names: a website that rebinds its own domain to
+    127.0.0.1 must not be able to read the index (or the dashboard, which carries its data)."""
+
+    def test_loopback_names_pass(self):
+        for host in ("127.0.0.1:8899", "localhost:8899", "[::1]:8899", "localhost"):
+            with self.subTest(host=host):
+                self.assertTrue(kb_api.host_allowed(None, host))
+
+    def test_other_names_are_refused_without_a_token(self):
+        for host in ("evil.example:8899", "127.0.0.1.evil.example", "", None):
+            with self.subTest(host=host):
+                self.assertFalse(kb_api.host_allowed(None, host))
+
+    def test_a_token_takes_over_from_the_host_check(self):
+        self.assertTrue(kb_api.host_allowed("secret", "kb.internal:8899"))
+
+
+class StaticFileTest(unittest.TestCase):
+    """The dashboard is served so its search can share an origin with /search — but only the dashboard."""
+
+    def test_the_shell_is_served(self):
+        self.assertEqual(kb_api.static_file("/web/app.js").name, "app.js")
+
+    def test_paths_cannot_walk_out_of_their_root(self):
+        for path in ("/web/../bin/kb_api.py", "/web/%2e%2e/kb.projects.toml",
+                     "/graphify-out/kb-graph-data/../graph.json"):
+            with self.subTest(path=path):
+                self.assertIsNone(kb_api.static_file(path))
+
+    def test_only_the_split_viz_data_is_served_from_the_output_dir(self):
+        self.assertIsNone(kb_api.static_file("/graphify-out/graph.json"))
+        self.assertIsNone(kb_api.static_file("/graphify-out/GRAPH_REPORT.md"))
+
+    def test_unknown_paths_are_not_files(self):
+        self.assertIsNone(kb_api.static_file("/etc/passwd"))
+
+
 class AuthTest(unittest.TestCase):
     def test_loopback_needs_no_header_when_no_token_is_configured(self):
         self.assertTrue(kb_api.authorized("127.0.0.1", None, None))

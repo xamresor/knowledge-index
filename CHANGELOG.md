@@ -14,6 +14,17 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+- **Added: ask the index from the dashboard.** Two inputs run `graphify query` and the qmd docs search
+  through `/search`. They work when the page is opened from `make serve` (<http://127.0.0.1:8899/>),
+  which now serves the dashboard on the same origin — no CORS, so no other website can read the index.
+  Opened from `file://` the page works as before and says how to enable them.
+- **Added: show or hide domains.** Each domain in the sidebar has a checkbox, plus Show all / Hide all.
+  Hiding filters what is drawn; expanding and edge rerouting are unaffected.
+- **Security: tokenless kb-api answers loopback names only.** A request whose `Host` is not
+  127.0.0.1 / localhost / [::1] gets 403, which closes DNS rebinding. With `--token` the token decides.
+  This also changes the framing of 2026-07-26: the web page is still usable with nothing running, but
+  with the server up it becomes a client of `/search`.
+
 - **Fixed: the dashboard was empty.** Since 0.5.0 `web/index.html` loaded the generated data before
   `app.js`, so `kbManifest(…)` threw a `ReferenceError` and the page showed "no generated data" even
   after a good build. `app.js` now loads first and starts on `load`; a test pins the order.

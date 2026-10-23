@@ -19,10 +19,17 @@ Endpoints — the MCP shape plus ergonomic aliases:
     POST /graph/explain   {symbol}              -> {"text": …}
     POST /graph/affected  {symbol}              -> {"text": …}
     GET  /doc?path=…                            -> {"text": …}
+    GET  /  and  /web/…, /graphify-out/…        -> the dashboard, so its docs search can call /search
+
+Serving the dashboard from here is what lets the page search docs: the page and the API share one
+origin, so no CORS header is ever sent. A CORS header would let any website open in the same browser
+read the index from 127.0.0.1 — the opposite of the point.
 
 Why the security defaults are strict: this project's whole value is that the corpus never leaves the
 machine. A knowledge index bound to the world without a token would be exactly the leak it exists to
 prevent — so binding off loopback without a token is refused at startup, not warned about in a log.
+For the same reason a tokenless server answers only requests addressed to a loopback name (the `Host`
+header): otherwise a website could point its own domain at 127.0.0.1 (DNS rebinding) and read it.
 """
 from __future__ import annotations
 
@@ -33,6 +40,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import kb_core
+import paths
 
 LOOPBACK = ("127.0.0.1", "::1", "localhost")
 
@@ -43,6 +51,11 @@ ROUTES = {
     "/graph/explain": "graph_explain",
     "/graph/affected": "graph_affected",
 }
+
+
+# What the dashboard needs, and nothing more: the shell and the split viz data. Not graph.json.
+STATIC_TYPES = {".html": "text/html", ".js": "text/javascript", ".css": "text/css"}
+DATA_FILES = ("kb-manifest.js", "kb-status.js")
 
 
 class ApiError(Exception):
@@ -69,6 +82,32 @@ def authorized(host: str, token: str | None, header: str | None) -> bool:
         return False
     supplied = header[7:] if header.lower().startswith("bearer ") else header
     return supplied == token
+
+
+def host_allowed(token: str | None, host_header: str | None) -> bool:
+    """Without a token the trust boundary is "a request to this machine by a loopback name". A request
+    whose Host is some other domain reached us through DNS rebinding, so it is refused."""
+    if token:
+        return True
+    name = urllib.parse.urlsplit("//" + (host_header or "")).hostname or ""
+    return name in LOOPBACK
+
+
+def static_file(path: str):
+    """URL path -> a file of the dashboard, or None. Only the shell and the split viz data are served;
+    the resolved file must stay inside its root, so `..` cannot walk out of it."""
+    roots = {"/web/": paths.web_staged(), "/graphify-out/": paths.out_dir()}
+    for prefix, root in roots.items():
+        if not path.startswith(prefix):
+            continue
+        rel = urllib.parse.unquote(path[len(prefix):])
+        if prefix == "/graphify-out/" and not (rel in DATA_FILES or rel.startswith("kb-graph-data/")):
+            return None
+        target = (root / rel).resolve()
+        if root.resolve() not in target.parents or target.suffix not in STATIC_TYPES:
+            return None
+        return target if target.is_file() else None
+    return None
 
 
 def dispatch(method: str, path: str, query: dict, body: dict) -> dict:
@@ -113,10 +152,35 @@ def make_handler(host: str, token: str | None):
             self.end_headers()
             self.wfile.write(data)
 
+        def _static(self, path: str) -> bool:
+            """Serve a dashboard file if `path` names one. The page carries no secrets and loopback is
+            the trust boundary, so it needs no token; its /search calls do, when one is set."""
+            target = static_file(path)
+            if target is None:
+                return False
+            data = target.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", STATIC_TYPES[target.suffix] + "; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return True
+
         def _handle(self, method: str) -> None:
             parsed = urllib.parse.urlparse(self.path)
             query = {k: v[0] for k, v in urllib.parse.parse_qs(parsed.query).items()}
             try:
+                if not host_allowed(token, self.headers.get("Host")):
+                    raise ApiError(403, "not addressed to a loopback name; pass --token to serve others")
+                if method == "GET" and parsed.path in ("", "/"):
+                    # a redirect, not the page itself: the shell's relative paths assume /web/
+                    self.send_response(302)
+                    self.send_header("Location", "/web/index.html")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                if method == "GET" and self._static(parsed.path):
+                    return
                 if not authorized(host, token, self.headers.get("Authorization")):
                     raise ApiError(401, "missing or invalid token")
                 length = int(self.headers.get("Content-Length") or 0)
@@ -154,8 +218,10 @@ def main(argv: list[str] | None = None) -> int:
     kb_core.warm_qmd()
     httpd = ThreadingHTTPServer((args.bind, args.port), make_handler(args.bind, args.token))
     auth = "token required" if args.token else "loopback only, no token"
+    paths.stage_web()   # installed mode: put the shell next to the data, as `kb open` does
     print(f"kb-api {kb_core.VERSION} (contract {kb_core.API_CONTRACT}) on "
-          f"http://{args.bind}:{args.port} — {auth}", flush=True)
+          f"http://{args.bind}:{args.port} — {auth} · dashboard: http://{args.bind}:{args.port}/",
+          flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
