@@ -1,0 +1,19 @@
+<?php
+// Demo fixture, not Laravel: a real app answers `php artisan route:list --json` from its router.
+// This prints the same shape for the demo's routes so the frontend -> controller edges can be built
+// without installing Laravel.
+$c = 'App\\Http\\Controllers\\';
+$routes = [
+    ['GET|HEAD', 'api/customers', 'CustomerController@index'],
+    ['POST', 'api/customers', 'CustomerController@store'],
+    ['GET|HEAD', 'api/customers/{customer}', 'CustomerController@show'],
+    ['GET|HEAD', 'api/products', 'ProductController@index'],
+    ['GET|HEAD', 'api/products/{product}', 'ProductController@show'],
+    ['GET|HEAD', 'api/orders', 'OrderController@index'],
+    ['POST', 'api/orders', 'OrderController@store'],
+    ['GET|HEAD', 'api/orders/{order}', 'OrderController@show'],
+    ['POST', 'api/orders/{order}/checkout', 'OrderController@checkout'],
+    ['GET|HEAD', 'api/invoices', 'InvoiceController@index'],
+    ['GET|HEAD', 'api/invoices/{invoice}', 'InvoiceController@show'],
+];
+echo json_encode(array_map(fn ($r) => ['method' => $r[0], 'uri' => $r[1], 'action' => $c . $r[2]], $routes));

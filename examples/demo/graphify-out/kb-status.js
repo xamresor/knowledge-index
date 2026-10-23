@@ -1,0 +1,1 @@
+kbStatus({"graph": {"nodes": 95, "edges": 229, "domains": 13, "projects": 4, "built_at": "2026-10-23 11:58"}, "docs": {"collection": "kb-demo-none"}, "aliases": [], "quality": {}, "versions": {"knowledge-index": "0.10.0", "graphify": "graphify 0.9.25", "qmd": "qmd 2.5.3 (c92adb3)"}, "takenAt": "2026-10-23 11:58"});

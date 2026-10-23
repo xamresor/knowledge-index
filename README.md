@@ -11,6 +11,20 @@ service.
 Built on two existing tools: [**graphify**](https://github.com/Graphify-Labs/graphify) (AST code graph)
 and [**qmd**](https://github.com/tobi/qmd) (on-device markdown vector search).
 
+## See it first: the demo
+
+A small built graph ships with the repo, so you can look at the dashboard before configuring anything.
+It indexes a fictional shop in [`examples/demo/src/`](examples/demo/src/) — a Laravel-style API and a
+Vue frontend — not anyone's real code.
+
+```bash
+make demo         # open the demo dashboard in a browser (python3 only, nothing to build)
+make demo-build   # rebuild the demo graph from examples/demo/src (graphify + php)
+```
+
+Red edges are routes: a Vue view's `api.get('/orders')` linked to the controller method that serves it.
+Double-click a domain to open it. See [`examples/demo/README.md`](examples/demo/README.md).
+
 ## Requirements
 
 These are external dependencies — not vendored. Install them and make sure they're on your `PATH`
@@ -89,6 +103,34 @@ The qmd collection name defaults to `kb`; override it by setting `KB_COLLECTION`
 - `graphify-out/graph.html` — graphify's full interactive visualization (fallback).
 - `graphify-out/GRAPH_REPORT.md` — human-readable architecture report with communities.
 - qmd `kb` collection (`.qmd/`) — hybrid BM25 + vector search over all docs.
+
+## The dashboard: how it is made and how to rebuild it
+
+The dashboard is two halves that meet in the browser:
+
+| Half | Files | In git? | Made by |
+|---|---|---|---|
+| **Shell** — markup, styling, behaviour | `web/index.html`, `web/app.js`, `web/style.css` | yes | hand-written |
+| **Data** — the graph split per domain | `graphify-out/kb-manifest.js`, `kb-status.js`, `kb-graph-data/*.js` | **no** | `bin/render_viz.py`, last step of `make build` |
+| **Renderer** — vis-network | `web/vendor/vis-network.min.js` | no | `make vendor` (CDN fallback with a banner if absent) |
+
+The data stays out of git on purpose: it is a map of the indexed projects' code, and those projects
+are usually private. Everyone rebuilds it from their own checkouts:
+
+```bash
+cp kb.projects.toml.example kb.projects.toml   # once: point it at your repos
+make vendor                                    # once: offline renderer
+make build                                     # graph + docs; render_viz.py writes the data
+make open                                      # open web/index.html
+```
+
+Only the graph changed? `make graph && make open` is enough — the docs index is not involved.
+`bin/render_viz.py graphify-out/graph.json` re-splits an existing graph without rebuilding it.
+
+How the split works: the shell opens with only one node per domain (`kb-manifest.js`). A domain's
+members load from `kb-graph-data/<domain>.js` when you double-click it; cross-domain edges come from
+`_cross.js`, search from `_index.js`. Every data file is a `<script>` that calls a function in
+`app.js` (`kbManifest(…)`, `kbRecv(…)`), which is how a page on `file://` reads its siblings.
 
 ## Configuration
 

@@ -34,3 +34,6 @@ aliases.toml
 
 # Vendored renderer: fetched by `make vendor`, not part of the source
 web/vendor/
+
+# The demo's copy of the shell, staged next to its data by `make demo` (the source is web/)
+/examples/demo/web/

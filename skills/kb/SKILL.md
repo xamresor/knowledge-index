@@ -69,6 +69,19 @@ because it follows real edges (calls, eloquent, fk, sql, http_request) rather th
    `select:mcp__kb__graph_query,mcp__kb__graph_explain,mcp__kb__graph_affected,mcp__kb__graph_path,mcp__kb__docs_search`),
    then call them normally. Activating this skill is the cue to do that — not to fall back to grep.
 
+## The dashboard (for a human, not for you)
+
+The KB also has a visual dashboard: `web/index.html` in the KB checkout, opened with `make open`.
+It shows the graph by domain and an index-health panel. It is for people to look at; agents should
+use the tools above. Point the user to it when they want to *see* the architecture.
+
+- Empty page or "no generated data" → the data is not built: `make build` (or `make graph` for the
+  graph only), then `make open`. A missing renderer shows a banner: `make vendor`.
+- The data (`graphify-out/kb-manifest.js`, `kb-graph-data/`) is generated and not in git — it maps
+  private code. Never commit it.
+- `make demo` opens a bundled demo on a fictional shop, useful to show what the dashboard does
+  without touching real projects.
+
 ## Known caveats
 
 - **`docs_search` (qmd) has a one-time cold start** (loading the embedding model). The server

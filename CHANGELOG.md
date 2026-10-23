@@ -14,6 +14,17 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+- **Fixed: the dashboard was empty.** Since 0.5.0 `web/index.html` loaded the generated data before
+  `app.js`, so `kbManifest(…)` threw a `ReferenceError` and the page showed "no generated data" even
+  after a good build. `app.js` now loads first and starts on `load`; a test pins the order.
+- **Fixed: builds with a Laravel project crashed.** Since 0.3.1 `link_http.py` read the
+  `route:list` table through the graph loader, which rejects anything that is not a graph. It reads
+  plain JSON again; a test covers it.
+- **Added: a demo.** `examples/demo/` holds a fictional shop (Laravel-style API + Vue) and its built
+  dashboard data, so the dashboard can be seen right after cloning: `make demo`. `make demo-build`
+  rebuilds it in a throwaway copy of the checkout, because `bin/kb` writes `repos/` and clusters
+  relative to the checkout root and would overwrite your own graph.
+
 - **Tables** are a *retrieval* problem, not a format one, and are still open: markdown tables chunk
   badly (a row separated from its header is close to meaningless), which is a chunking fix — repeat the
   header per row-group, or project rows into records. Measured, unfixed. Not the parsers' job.
