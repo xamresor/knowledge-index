@@ -154,6 +154,12 @@ class ShellRulesTest(unittest.TestCase):
         self.assertIn(render_viz.MANIFEST, html)
         self.assertIn(render_viz.STATUS, html)
 
+    def test_receivers_load_before_the_data_that_calls_them(self):
+        """The data files call kbManifest()/kbStatus() as they load; app.js defines them. Loading the
+        data first threw a ReferenceError and left an empty page (v0.5.0 → v0.10.0)."""
+        html = self.read("index.html")
+        self.assertLess(html.index('src="app.js"'), html.index(render_viz.MANIFEST))
+
     def test_no_leftover_template_placeholders(self):
         """0.5.0 removed the `__PLACEHOLDER__` substitution; nothing may reintroduce it."""
         self.assertNotIn("__", re.sub(r"__kb\w+", "", self.read("index.html")))

@@ -68,10 +68,12 @@
 
 <main id="net"></main>
 
+<!-- app.js comes first: it defines the kbManifest()/kbStatus() receivers the data files call, and it
+     starts on `load`, after the data below has arrived. -->
+<script src="app.js"></script>
 <!-- Generated data. The manifest is written by `bin/render_viz.py` next to the graph, so this shell
      stays a plain versioned file with no build step and no placeholders to substitute. -->
 <script src="../graphify-out/kb-manifest.js" onerror="window.__kbManifestMissing = true"></script>
 <script src="../graphify-out/kb-status.js" onerror="window.__kbStatusMissing = true"></script>
-<script src="app.js"></script>
 </body>
 </html>

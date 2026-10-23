@@ -333,5 +333,7 @@ function start() {
   loadData("_cross.js");                      // cross-domain structure, once
 }
 
-if (window.__kbVendorMissing || typeof vis === "undefined") loadVendorFallback();
-else start();
+window.addEventListener("load", () => {
+  if (window.__kbVendorMissing || typeof vis === "undefined") loadVendorFallback();
+  else start();
+});
