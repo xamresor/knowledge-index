@@ -57,7 +57,7 @@ def action_parts(action: str) -> tuple[str, str | None] | None:
 
 def load_routes(path: str) -> dict[tuple[str, str], tuple[str, str | None]]:
     routes: dict[tuple[str, str], tuple[str, str | None]] = {}
-    for r in graph.load(path):
+    for r in graph.read_json(path):  # a route table is a list, not a graph
         ap = action_parts(r.get("action") or "")
         if not ap:
             continue

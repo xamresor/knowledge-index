@@ -174,3 +174,18 @@ class EndToEndCallToRoute(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LoadRoutes(unittest.TestCase):
+    def test_reads_the_route_list_artisan_prints(self):
+        # `php artisan route:list --json` is a JSON list, not a graph: loading it through the graph
+        # loader broke every build that had a Laravel project (v0.3.1 → v0.10.0).
+        import json
+        import os
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump([{"method": "GET|HEAD", "uri": "api/orders",
+                        "action": "App\\Http\\Controllers\\OrderController@index"}], fh)
+        self.addCleanup(os.unlink, fh.name)
+        self.assertEqual(lh.load_routes(fh.name),
+                         {("get", "api/orders"): ("Http/Controllers/OrderController.php", "index")})
