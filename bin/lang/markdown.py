@@ -46,6 +46,23 @@ def _is_distinctive(label: str) -> bool:
     return len(label) >= 5 and bool(DISTINCTIVE.match(label))
 
 
+# The three label shapes _is_distinctive() admits are `CamelCase`, `name()` and `Class::member`.
+def _words(text: str) -> set[str]:
+    """Every standalone token of a doc that a distinctive label could equal.
+
+    Each shape is searched on its own and with overlaps (`A::b()` yields `A::b`, `b()`, `A`, `b`),
+    so the result equals testing `(?<!\\w)label(?!\\w)` for every label, one regex per label."""
+    def free(a: int, b: int) -> bool:
+        return not (a and (text[a - 1].isalnum() or text[a - 1] == "_")) and \
+            not (b < len(text) and (text[b].isalnum() or text[b] == "_"))
+    out: set[str] = set()
+    for pattern in (r"(?=(\w+::\w+))", r"(?=(\w+\(\)))", r"(?=(\w+))"):
+        for m in re.finditer(pattern, text):
+            if free(m.start(1), m.end(1)):
+                out.add(m.group(1))
+    return out
+
+
 def _doc_id(repo: str, rel: str) -> str:
     return graph_io.node_id(repo, rel)
 
@@ -127,11 +144,15 @@ def enrich(graph: dict, roots: list[tuple[str, str]]) -> tuple[int, int]:
                               "confidence": graph_io.Confidence.EXTRACTED, "weight": 1.0})
 
             # doc -> symbol: a name match is a guess, hence INFERRED and capped
+            # One pass over the text, then set lookups: a regex per (doc, symbol) pair made this the
+            # slowest build step by far (minutes on a ~12k-symbol graph). Same rule as before: the
+            # label stands alone, not inside a longer word.
             mentions = 0
+            words = _words(text)
             for label, nid in symbols.items():
                 if mentions >= MAX_MENTIONS_PER_DOC:
                     break
-                if re.search(rf"(?<!\w){re.escape(label)}(?!\w)", text):
+                if label in words:
                     edges.append({"source": src, "target": nid, "relation": "documents",
                                   "confidence": graph_io.Confidence.INFERRED,
                                   "confidence_score": 0.6, "weight": 1.0})

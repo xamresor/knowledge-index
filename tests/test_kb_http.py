@@ -471,6 +471,18 @@ class ProblemTests(unittest.TestCase):
             ("fe", "unknown-route", "src/a.js:L4"),
         ])
 
+    def test_a_frontend_may_call_several_apis(self):
+        """`serves = ["api", "own"]`: a call is known if ANY listed API has the route."""
+        t = self.tmp.name
+        os.makedirs(f"{t}/two/src", exist_ok=True)
+        with open(f"{t}/two/src/x.js", "w") as f:
+            f.write("api.get('v2/users')\napi.get('v2/own/things')\napi.get('v2/nowhere')\n")
+        rows = contracts.build_problems({}, {"two": ("api,own", [f"{t}/two/src"])},
+                                        {"api": [{"method": "GET|HEAD", "uri": "v2/users"}],
+                                         "own": [{"method": "GET|HEAD", "uri": "v2/own/things"}]}, [])
+        self.assertEqual([r["where"] for r in rows], ["src/x.js:L3"])
+        self.assertIn("api / own", rows[0]["message"])
+
     def test_filtered_by_projects(self):
         out = contracts.problems("", {"api"}, self.path)
         self.assertIn("[api] bad-contract", out)

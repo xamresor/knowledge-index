@@ -185,5 +185,53 @@ class AliasIntegrationTest(unittest.TestCase):
         self.assertEqual(run.call_count, 1, "an explicit mode must not silently switch strategy")
 
 
+class ProjectScopeTest(unittest.TestCase):
+    """`project` narrows; `allowed` (from the caller's token) is the boundary it can never cross."""
+
+    def setUp(self):
+        self.old = (kb_core.PROJECTS, kb_core.HOME_PROJECTS)
+        kb_core.PROJECTS = {"a": ["/x/a"], "b": ["/x/b"], "c": ["/x/c"]}
+        kb_core.HOME_PROJECTS = []
+
+    def tearDown(self):
+        kb_core.PROJECTS, kb_core.HOME_PROJECTS = self.old
+
+    def test_project_narrows_inside_allowed(self):
+        self.assertEqual(kb_core.scope_projects({"project": "a"}, {"a", "b"})[0], {"a"})
+
+    def test_project_outside_allowed_is_refused_like_an_unknown_one(self):
+        with self.assertRaises(kb_core.ToolError) as outside:
+            kb_core.scope_projects({"project": "c"}, {"a", "b"})
+        with self.assertRaises(kb_core.ToolError) as unknown:
+            kb_core.scope_projects({"project": "zz"}, {"a", "b"})
+        self.assertEqual(str(outside.exception).split(":")[0], str(unknown.exception).split(":")[0])
+
+    def test_all_never_widens_past_allowed(self):
+        self.assertEqual(kb_core.scope_projects({"project": "all"}, {"a"})[0], {"a"})
+        self.assertIsNone(kb_core.scope_projects({"project": "all"}, None)[0])
+
+    def test_session_projects_are_the_default_and_are_cut_by_allowed(self):
+        kb_core.HOME_PROJECTS = ["b", "c"]
+        projects, _, auto = kb_core.scope_projects({}, None)
+        self.assertEqual((projects, auto), ({"b", "c"}, True))
+        self.assertEqual(kb_core.scope_projects({}, {"c"})[0], {"c"})
+        self.assertEqual(kb_core.scope_projects({}, {"a"})[0], {"a"}, "no overlap = all allowed")
+
+    def test_auto_scope_widens_when_the_graph_has_no_match(self):
+        kb_core.HOME_PROJECTS = ["a"]
+        calls = []
+        def fake_run(cmd, *a, **k):
+            calls.append(cmd)
+            return "No node matching 'X' found." if len(calls) == 1 else "node X"
+        old_run, old_graph = kb_core.run, kb_core.graph_for
+        kb_core.run, kb_core.graph_for = fake_run, lambda p: f"g-{sorted(p) if p else 'all'}"
+        try:
+            out = kb_core.graph_call(["graphify", "explain", "X"], {}, None)
+        finally:
+            kb_core.run, kb_core.graph_for = old_run, old_graph
+        self.assertEqual(len(calls), 2)
+        self.assertIn("all (nothing in a)", out)
+
+
 if __name__ == "__main__":
     unittest.main()

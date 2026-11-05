@@ -14,6 +14,25 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+- **Fixed: deleted code stayed in the graph.** With graphify's cache kept between builds, `graphify
+  update` refused to overwrite a project graph that would shrink. The staged copy is the truth, so the
+  build now passes `--force`.
+- **Fixed: `KB_HOME` was half-honoured by the build.** Staged repos, route tables and `cluster-only`
+  used the package directory instead of the data directory, so an installed or relocated KB clustered
+  the wrong graph. `kb.hubs.txt` is read from the config directory when present.
+
+- **Faster: linking docs into the graph took ~75% of a build.** Every doc was searched with one regex
+  per symbol label (docs × symbols). Each doc is now split into its standalone tokens once and the
+  labels are set lookups. Same edges, checked on a 20k-node graph with 370 docs: 141 s -> 1.1 s.
+
+- **Added: one frontend may call several APIs.** `serves = ["api", "own-api"]` links each call site to
+  whichever listed API has the route, and `problems` reports a call as unknown only when none has it.
+
+- **Added: `project` on the graph tools** (`graph_path`, `graph_explain`, `graph_affected`, and the code
+  half of `search`). It only narrows: a project outside the caller's `allowed` set is refused with the
+  same message as an unknown one. Default = the session's project(s); an empty answer there widens to
+  everything the caller may see. Every graph answer starts with `[projects: …]`.
+
 - **Added: a shared MCP server over HTTP, off by default (`bin/kb-http`).** One index on a server for a
   team; each caller sees only their projects. Bearer tokens are checked against an identity endpoint
   you run (`KB_AUTH_URL`), cached per token hash. It refuses to start unless `KB_SERVER=on` and

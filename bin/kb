@@ -53,7 +53,7 @@ PY
 
 stage_and_build() {
   local name="$1" code_csv="$2"
-  local dest="$KB/repos/$name"
+  local dest="$KB_DATA/repos/$name"
   # Keep repos/<name>/graphify-out/ between runs: its cache makes `graphify update` re-extract only
   # changed files. Everything else (the staged sources) is re-copied; rsync -a keeps source mtimes.
   mkdir -p "$dest"
@@ -66,7 +66,9 @@ stage_and_build() {
       --exclude '*.gif' --exclude '*.ico' --exclude '*.webp' "$d" "$dest/" 2>/dev/null || true
   done
   echo "  [$name] staged $(find "$dest" -type f \( -name '*.php' -o -name '*.js' -o -name '*.vue' -o -name '*.ts' -o -name '*.tsx' -o -name '*.py' -o -name '*.kt' \) | wc -l) source files"
-  graphify update "$dest" >/dev/null 2>&1 || true
+  # --force: the staged copy is the truth. Without it graphify keeps the old graph when code was
+  # deleted (it refuses to overwrite a graph.json that would shrink), so removed code stayed in the KB.
+  graphify update "$dest" --force >/dev/null 2>&1 || true
 }
 
 build_graph() {
@@ -80,15 +82,15 @@ build_graph() {
       continue
     fi
     stage_and_build "$name" "$code"
-    merge_inputs+=("$KB/repos/$name/graphify-out/graph.json")
+    merge_inputs+=("$KB_DATA/repos/$name/graphify-out/graph.json")
     if [ -n "$routes" ]; then
       # Route table feeds the frontend->controller edges. A silent failure here means the graph
       # quietly loses its cross-repo half, so say so instead of swallowing it.
       # LOG_CHANNEL=null: the indexed app must not get log files from this run (they would be owned
       # by the KB's user, and the app's own user could not append to them later).
-      if ! env -C "$routes" LOG_CHANNEL=null php artisan route:list --json >"$KB/routes.$name.json" 2>/dev/null; then
+      if ! env -C "$routes" LOG_CHANNEL=null php artisan route:list --json >"$KB_DATA/routes.$name.json" 2>/dev/null; then
         echo "  [$name] WARNING: 'php artisan route:list' failed — HTTP edges for this repo will be missing" >&2
-        rm -f "$KB/routes.$name.json"
+        rm -f "$KB_DATA/routes.$name.json"
       fi
     fi
     [ -n "$calls" ] && [ -n "$serves" ] && routes_specs+=("$serves|$calls")
@@ -108,15 +110,20 @@ build_graph() {
   while IFS='|' read -r name code docs routes calls serves; do
     [ -z "$calls" ] || [ -z "$serves" ] && continue
     IFS=',' read -ra fe <<< "$calls"
-    "$PY" "$KB/bin/link_http.py" "$OUT/graph.json" "$KB/routes.$serves.json" "$serves" "${fe[@]}"
+    # `serves` may list several APIs (a frontend that talks to its own backend and to a shared one):
+    # each call site is matched against every listed route table.
+    IFS=',' read -ra apis <<< "$serves"
+    for api in "${apis[@]}"; do
+      "$PY" "$KB/bin/link_http.py" "$OUT/graph.json" "$KB_DATA/routes.$api.json" "$api" "${fe[@]}"
+    done
   done < <(read_projects)
 
   echo "==> Canonicalizing duplicate symbol/reference nodes"
   "$PY" "$KB/bin/dedupe.py" "$OUT/graph.json"
   echo "==> Decluttering framework god nodes (before clustering)"
-  "$PY" "$KB/bin/declutter.py" "$OUT/graph.json" "$KB/kb.hubs.txt"
+  "$PY" "$KB/bin/declutter.py" "$OUT/graph.json" "$([ -f "$KB_CONFIG/kb.hubs.txt" ] && echo "$KB_CONFIG/kb.hubs.txt" || echo "$KB/kb.hubs.txt")"
   echo "==> Clustering (locks final community ids)"
-  graphify cluster-only "$KB" --no-label >/dev/null
+  graphify cluster-only "$KB_DATA" --no-label >/dev/null
   echo "==> Labeling communities by namespace/domain"
   "$PY" "$KB/bin/label_namespaces.py" "$OUT/graph.json" "$OUT/.graphify_labels.json" | head -1
   echo "==> Re-rendering report + full visualization with labels"
@@ -124,13 +131,13 @@ build_graph() {
   # community ids, while the labels file is keyed by those ids. So this is a two-step fixpoint, not a
   # redundant call: label (ids from pass 1) -> re-render with labels (ids may shift) -> label again.
   # Keep both passes; if a third were ever needed the dependency should be expressed instead.
-  graphify cluster-only "$KB" --no-label >/dev/null
+  graphify cluster-only "$KB_DATA" --no-label >/dev/null
   "$PY" "$KB/bin/label_namespaces.py" "$OUT/graph.json" "$OUT/.graphify_labels.json" >/dev/null
 
   echo "==> Enriching with node types, domains, db_table nodes + domain anchors"
-  "$PY" "$KB/bin/enrich.py" "$OUT/graph.json" "$KB/repos"
+  "$PY" "$KB/bin/enrich.py" "$OUT/graph.json" "$KB_DATA/repos"
   echo "==> Adding data-layer links (eloquent model rels, FK table->table, SQL code->table)"
-  "$PY" "$KB/bin/link_data.py" "$OUT/graph.json" "$KB/repos"
+  "$PY" "$KB/bin/link_data.py" "$OUT/graph.json" "$KB_DATA/repos"
   # Docs as graph nodes (bin/lang/markdown.py): [[wikilink]] and relative links are EXTRACTED edges,
   # a bare symbol mention is INFERRED and capped. Runs after the code plugins — it points at their nodes.
   local doc_roots=()
@@ -142,7 +149,7 @@ build_graph() {
     "$PY" "$KB/bin/link_docs.py" "$OUT/graph.json" "${doc_roots[@]}"
   fi
   echo "==> Mining rationale comments (NOTE/WHY/HACK/SECURITY -> rationale nodes)"
-  "$PY" "$KB/bin/link_rationale.py" "$OUT/graph.json" "$KB/repos"
+  "$PY" "$KB/bin/link_rationale.py" "$OUT/graph.json" "$KB_DATA/repos"
   echo "==> Rendering custom typed/domain visualization"
   "$PY" "$KB/bin/render_viz.py" "$OUT/graph.json" "$OUT"
   rm -f "$OUT/kb-graph.html"   # 0.5.0: the shell moved to web/; drop the stale generated page
@@ -156,9 +163,9 @@ build_graph() {
 build_contracts() {
   local specs=() docs_specs=() prob_specs=()
   while IFS='|' read -r name code docs routes calls serves; do
-    [ -n "$routes" ] && [ -f "$KB/routes.$name.json" ] && specs+=("$name=$KB/routes.$name.json")
+    [ -n "$routes" ] && [ -f "$KB_DATA/routes.$name.json" ] && specs+=("$name=$KB_DATA/routes.$name.json")
     [ -n "$docs" ] && [ -d "$docs" ] && docs_specs+=("$name=$docs") && prob_specs+=("docs:$name=$docs")
-    [ -n "$routes" ] && prob_specs+=("routes:$name=$KB/routes.$name.json")
+    [ -n "$routes" ] && prob_specs+=("routes:$name=$KB_DATA/routes.$name.json")
     [ -n "$calls" ] && [ -n "$serves" ] && prob_specs+=("calls:$name=$serves=$calls")
   done < <(read_projects)
   # The KB service's own contract docs, if this checkout has any (<data>/docs/contracts/).
@@ -295,7 +302,7 @@ case "${1:-build}" in
   update) build_graph; build_kb >/dev/null; echo "refreshed" ;;
   qmd-backend) rm -f "$LOCAL_CFG"; unset QMD_BACKEND; echo "qmd backend set to: $(resolve_qmd_backend)" ;;
   label)  "$PY" "$KB/bin/label_namespaces.py" "$OUT/graph.json" "$OUT/.graphify_labels.json"
-          graphify cluster-only "$KB" --no-label >/dev/null; echo "relabeled + report regenerated" ;;
+          graphify cluster-only "$KB_DATA" --no-label >/dev/null; echo "relabeled + report regenerated" ;;
   vendor) "$PY" -c "import sys; sys.path.insert(0,'$KB/bin'); import paths; print(paths.stage_web())" >/dev/null
           W="$KB_WEB"; mkdir -p "$W/vendor"
           curl -fsSL https://unpkg.com/vis-network/standalone/umd/vis-network.min.js \

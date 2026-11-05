@@ -150,6 +150,50 @@ def resolve_collections(args: dict) -> tuple[list[str], str]:
         return [f"{COLLECTION}-{n}" for n in home], ", ".join(home) + " (auto)"
     return [], "all"
 
+def scope_projects(args: dict, allowed: set[str] | None) -> tuple[set[str] | None, str, bool]:
+    """The projects one call works on -> (set, or None = everything; label; chosen automatically?).
+
+    `project` only ever NARROWS. The security boundary is `allowed` (set by the server from the
+    caller's token); a project outside it is refused with the same message as an unknown one, so a
+    limited caller cannot probe which other projects exist. Without `project`, the session's own
+    projects are used (see HOME_PROJECTS), else everything the caller may see."""
+    want = (args.get("project") or "").strip()
+    if want and want.lower() != "all":
+        names = {n.strip() for n in want.split(",") if n.strip()}
+        bad = sorted(n for n in names if n not in PROJECTS or (allowed is not None and n not in allowed))
+        if bad:
+            raise ToolError(f"unknown or not allowed project: {', '.join(bad)}")
+        return names, ", ".join(sorted(names)), False
+    if not want:
+        home = set(HOME_PROJECTS) if allowed is None else set(HOME_PROJECTS) & allowed
+        if home:
+            return home, ", ".join(sorted(home)) + " (auto)", True
+    if allowed is None:
+        return None, "all", False
+    return set(allowed), ", ".join(sorted(allowed)), False
+
+
+def _no_match(out: str) -> bool:
+    """graphify found nothing for the term (it says so in a few wordings)."""
+    low = out.lower()
+    return "no node matching" in low or "no matching nodes" in low or "no unique node match" in low
+
+
+def graph_call(cmd: list[str], args: dict, allowed: set[str] | None, *terms: str) -> str:
+    """Run a graphify command on the graph of the call's projects. An automatic (session) scope
+    that finds nothing widens to everything the caller may see, like the docs search does."""
+    projects, label, auto = scope_projects(args, allowed)
+    graph = graph_for(projects)
+    out = run([*cmd, "--graph", graph] + (["--budget", "1800"] if cmd[1] == "query" else []))
+    if auto and _no_match(out):
+        projects, graph = allowed, graph_for(allowed)
+        out = run([*cmd, "--graph", graph] + (["--budget", "1800"] if cmd[1] == "query" else []))
+        label = f"all (nothing in {label[:-7]})"
+    if terms:
+        out = with_suggestions(out, *terms, graph=graph)
+    return f"[projects: {label}]\n\n{out}"
+
+
 # --- tool schemas -------------------------------------------------------------------------------
 # One list, published by both adapters. `deprecated` entries still work (a caller written against an
 # older surface must not break) but point at their replacement.
@@ -164,7 +208,7 @@ TOOLS = [
          "domain": {"type": "string", "enum": ["docs", "code", "both"],
                     "description": "what to search (default: both)"},
          "project": {"type": "string",
-                     "description": "docs: which project(s) to search — a name from kb.projects.toml, "
+                     "description": "which project(s) to search (docs and code) — a name from kb.projects.toml, "
                                     "several comma-separated, or 'all'. Default: the project(s) of the "
                                     "session's working directory, else all; an empty scoped search "
                                     "widens to all by itself"},
@@ -179,18 +223,20 @@ TOOLS = [
     {"name": "graph_path",
      "description": "Shortest path between two symbols/files in the code graph, traversing real "
                     "relations incl. cross-repo http_request (frontend↔controller).",
-     "inputSchema": {"type": "object", "properties": {"from": {"type": "string"},
+     "inputSchema": {"type": "object", "properties": {"from": {"type": "string"}, "project": {"type": "string", "description": "limit to these project(s): a name, several comma-separated, or 'all'. Default: the session's project(s), widening to all when nothing is found"},
                                                      "to": {"type": "string"}},
                      "required": ["from", "to"]}},
     {"name": "graph_explain",
      "description": "Explain a symbol: its node, neighbours and relation types (calls, eloquent, fk, "
                     "sql, http_request, …).",
-     "inputSchema": {"type": "object", "properties": {"symbol": {"type": "string"}},
+     "inputSchema": {"type": "object", "properties": {"symbol": {"type": "string"},
+                                                     "project": {"type": "string", "description": "limit to these project(s): a name, several comma-separated, or 'all'. Default: the session's project(s), widening to all when nothing is found"}},
                      "required": ["symbol"]}},
     {"name": "graph_affected",
      "description": "Reverse impact analysis — what depends on / would be affected by a change to "
                     "the given symbol.",
-     "inputSchema": {"type": "object", "properties": {"symbol": {"type": "string"}},
+     "inputSchema": {"type": "object", "properties": {"symbol": {"type": "string"},
+                                                     "project": {"type": "string", "description": "limit to these project(s): a name, several comma-separated, or 'all'. Default: the session's project(s), widening to all when nothing is found"}},
                      "required": ["symbol"]}},
     {"name": "docs_get",
      "description": "Fetch a full document by its qmd path or id (e.g. from a search result).",
@@ -407,7 +453,13 @@ def search_docs(args: dict, allowed: set[str] | None = None) -> str:
             q = expanded
     if allowed is not None:
         want = int(args.get("limit") or 5)
+        projects, label, _ = scope_projects(args, allowed)
+        narrow = sorted(n for n in (projects or ()) if n in DOC_PROJECTS)
         scoped = {k: v for k, v in args.items() if k not in ("project", "scope")}
+        if narrow and set(narrow) != allowed:   # the caller narrowed: only those collections
+            out = _filter_hits(_docs_once({**scoped, "project": ",".join(narrow), "limit": want * 5}, q),
+                               set(narrow), want)
+            return note + f"[projects: {label}]\n\n" + out
         out = _filter_hits(_docs_once({**scoped, "project": "all", "limit": want * 5}, q),
                            allowed, want)
         return note + f"[projects: {', '.join(sorted(allowed))} + contract docs]\n\n" + out
@@ -446,7 +498,7 @@ def _docs_once(args: dict, q: str) -> str:
 
 def search_code(args: dict, allowed: set[str] | None = None) -> str:
     """Code half of `search`: a scoped subgraph for the question."""
-    return run(["graphify", "query", args["q"], "--graph", graph_for(allowed), "--budget", "1800"])
+    return graph_call(["graphify", "query", args["q"]], args, allowed)
 
 
 def search(args: dict, allowed: set[str] | None = None) -> str:
@@ -514,15 +566,12 @@ def call_tool(name: str, args: dict, allowed: set[str] | None = None) -> str:
 
     if name == "search":
         return search(args, allowed)
-    if name in ("graph_path", "graph_explain", "graph_affected"):
-        graph = graph_for(allowed)
-        if name == "graph_path":
-            a, b = args["from"], args["to"]
-            return with_suggestions(run(["graphify", "path", a, b, "--graph", graph]), a, b,
-                                    graph=graph)
-        s = args["symbol"]
+    if name == "graph_path":
+        return graph_call(["graphify", "path", args["from"], args["to"]], args, allowed,
+                          args["from"], args["to"])
+    if name in ("graph_explain", "graph_affected"):
         verb = "explain" if name == "graph_explain" else "affected"
-        return with_suggestions(run(["graphify", verb, s, "--graph", graph]), s, graph=graph)
+        return graph_call(["graphify", verb, args["symbol"]], args, allowed, args["symbol"])
     if name == "docs_get":
         return docs_get(args["path"], allowed)
     if name == "contracts_search":

@@ -191,5 +191,21 @@ class MarkdownEnrichTest(unittest.TestCase):
         self.assertEqual(nodes, 0, "the pipeline reruns; nodes must be idempotent")
 
 
+class MarkdownWordsTest(unittest.TestCase):
+    """_words() replaced one regex per (doc, label) pair; it must agree with that regex exactly."""
+
+    def test_same_answer_as_the_per_label_regex(self):
+        import re
+        from lang import markdown
+        text = ("Call `Foo::query()` then x.bar() and Baz::qux::Deep, not prefixFooBar or "
+                "FooBarx; ShipIt() glued: ShipIt()x; Class::member_ok; _Hidden; done.")
+        labels = ["Foo::query", "query()", "Foo", "bar()", "Baz::qux", "qux::Deep", "FooBar",
+                  "ShipIt()", "Class::member_ok", "Hidden", "member_ok", "Deep"]
+        words = markdown._words(text)
+        for label in labels:
+            expected = bool(re.search(rf"(?<!\w){re.escape(label)}(?!\w)", text))
+            self.assertEqual(label in words, expected, label)
+
+
 if __name__ == "__main__":
     unittest.main()

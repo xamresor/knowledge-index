@@ -350,7 +350,8 @@ def build_problems(docs: dict[str, str], calls: dict[str, tuple[str, list[str]]]
     from lang import js_ts  # noqa: PLC0415
     for fe, (serves, roots) in sorted(calls.items()):
         table: dict[str, set[str]] = {}
-        for r in routes.get(serves, []):
+        apis = [a for a in serves.split(",") if a]          # one frontend may call several APIs
+        for r in (row for a in apis for row in routes.get(a, [])):
             for v in str(r.get("method") or "").split("|"):
                 for uri in route_variants(str(r.get("uri") or "")):
                     table.setdefault(v.strip().lower(), set()).add(uri)
@@ -382,7 +383,7 @@ def build_problems(docs: dict[str, str], calls: dict[str, tuple[str, list[str]]]
                                 or known(verb, uri):
                             continue
                         add(fe, "unknown-route", f"{os.path.relpath(fp, base)}:L{i}",
-                            f"Calls {verb.upper()} {raw}, but {serves} has no such route.")
+                            f"Calls {verb.upper()} {raw}, but {' / '.join(apis)} has no such route.")
     return out
 
 
