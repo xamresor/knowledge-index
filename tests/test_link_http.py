@@ -30,6 +30,11 @@ class IterCalls(unittest.TestCase):
     def test_nuxt_ofetch_defaults_to_get(self):
         self.assertEqual(calls("$api('v2/objects')"), [("get", "v2/objects")])
 
+    def test_typescript_type_argument_before_the_call(self):
+        self.assertEqual(calls("$api<Page<Item>>('v2/items')"), [("get", "v2/items")])
+        self.assertEqual(calls("await apiFetch<User>('/auth/me', {method: 'PUT'})"),
+                         [("put", "/auth/me")])
+
     def test_apifetch_wrapper(self):
         self.assertEqual(calls("apiFetch('/auth/phone/send-otp', { method: 'POST' })"),
                          [("post", "/auth/phone/send-otp")])

@@ -50,13 +50,13 @@ def main() -> None:
         elif method == "tools/call":
             p = req.get("params", {})
             try:
-                text = kb_core.call_tool(p.get("name", ""), p.get("arguments", {}) or {})
+                text, err = kb_core.call_tool(p.get("name", ""), p.get("arguments", {}) or {}), False
             except kb_core.ToolError as e:
                 # A bad call is the caller's bug: report it as tool output (an agent can read and
-                # retry) rather than as a protocol error it cannot see.
-                text = f"(bad request: {e})"
+                # retry) rather than as a protocol error it cannot see; isError marks it as such.
+                text, err = f"(bad request: {e})", True
             send({"jsonrpc": "2.0", "id": mid,
-                  "result": {"content": [{"type": "text", "text": text}]}})
+                  "result": {"content": [{"type": "text", "text": text}], "isError": err}})
         elif method == "ping":
             send({"jsonrpc": "2.0", "id": mid, "result": {}})
         elif mid is not None:  # unknown request -> respond so the client isn't left hanging

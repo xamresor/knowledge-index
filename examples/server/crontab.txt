@@ -1,0 +1,7 @@
+# Crontab of the `kb` user (crontab -e). A template: replace /srv/kb.
+# kb-refresh compares the HEADs of the indexed checkouts with the last build and exits at once when
+# nothing changed or a build runs. It runs `kb update` under nice 19.
+# Set KB_REFRESH_WAIT_LOCK=<file> if your deploy script holds a lock while it resets the checkouts.
+* * * * * cd /srv/kb && PATH=/srv/kb/.local/bin:/usr/local/bin:/usr/bin:/bin bin/kb-refresh
+# Safety net: one full rebuild a night, also when no commit arrived.
+30 2 * * * cd /srv/kb && PATH=/srv/kb/.local/bin:/usr/local/bin:/usr/bin:/bin bin/kb-refresh --force

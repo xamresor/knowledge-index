@@ -37,3 +37,6 @@ web/vendor/
 
 # The demo's copy of the shell, staged next to its data by `make demo` (the source is web/)
 /examples/demo/web/
+
+# Server logs and usage counters (bin/kb-refresh, bin/kb-http)
+/logs/

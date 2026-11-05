@@ -1,0 +1,36 @@
+# systemd unit for the shared KB MCP server (bin/kb-http). A template: replace /srv/kb, the user,
+# and the auth endpoint with yours.
+# Install: sudo cp kb-http.service /etc/systemd/system/
+#          sudo systemctl daemon-reload && sudo systemctl enable --now kb-http
+[Unit]
+Description=Code knowledge base MCP server over HTTP (kb-http)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kb
+Group=kb
+WorkingDirectory=/srv/kb
+Environment=PATH=/srv/kb/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=/srv/kb
+Environment=KB_SERVER=on
+Environment=KB_AUTH_URL=https://api.example.com/kb/me
+Environment=KB_HTTP_HOST=127.0.0.1
+Environment=KB_HTTP_PORT=8790
+Environment=KB_DOCS_MODE=light
+Environment=KB_MAX_GRAPH_JOBS=3
+Environment=KB_MAX_DOCS_JOBS=1
+ExecStart=/usr/bin/python3 /srv/kb/bin/kb-http
+Restart=on-failure
+RestartSec=5
+# The limits cover the server and its graphify/qmd child processes.
+MemoryHigh=1536M
+MemoryMax=2G
+TasksMax=128
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

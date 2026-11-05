@@ -1,0 +1,458 @@
+#!/usr/bin/env python3
+"""Shared MCP server over HTTP — so **a team** can query one index. Off by default.
+
+Why it exists
+-------------
+`kb-mcp` serves one person's agent over stdio; `kb-api` serves scripts on loopback. A team wants one
+build on one server, reached by every developer's agent, where each developer sees only the projects
+they are allowed to see. That needs a network transport *and* identity, and identity is something
+this tool must not invent: it asks an endpoint you already run.
+
+Transport: MCP "streamable HTTP", JSON answers only. POST /mcp with one JSON-RPC message or a batch.
+Methods: initialize, notifications/initialized, tools/list, tools/call, ping. GET /mcp -> 405 (no SSE).
+The tools are the core's (`kb_core.TOOLS`) plus `usage`; every call goes through `kb_core.call_tool`
+with the caller's project set, so the access filter lives in one place (bin/access.py).
+
+Auth: every request carries `Authorization: Bearer <token>`. The server sends the token to
+$KB_AUTH_URL (GET) and expects 200 with
+    {"user": {"name"|"uname"|"username"|"id"|"uid": ...}, "projects": ["<project>", ...]}
+— the projects of kb.projects.toml this caller may see. Mapping:
+    no / malformed Authorization header -> 401 + WWW-Authenticate: Bearer
+    auth endpoint 200                   -> allowed, projects = answer.projects
+    auth endpoint 401                   -> 401
+    auth endpoint 403/404/other status  -> 403
+    auth endpoint unreachable / bad body -> 503 (never cached)
+    empty project list                  -> 403
+The verdict is cached KB_AUTH_CACHE_SECONDS per SHA-256 of the token; the token is never logged.
+
+Off by default: it refuses to start unless KB_SERVER=on and KB_AUTH_URL is set. A local install
+never opens a port by accident.
+
+Environment:
+  KB_SERVER (off)            must be "on" to start
+  KB_AUTH_URL (none)         identity endpoint, see above
+  KB_HTTP_HOST (127.0.0.1)   KB_HTTP_PORT (8790)   put a TLS proxy in front for the network
+  KB_AUTH_CACHE_SECONDS (60) KB_AUTH_TIMEOUT (10)
+  KB_MAX_GRAPH_JOBS (3)      KB_MAX_DOCS_JOBS (1)   parallel graphify / qmd processes
+  KB_DOCS_MODE (full|light|bm25), KB_CONTRACT_EDGES (1|0): see kb_core.py / access.py
+  KB_USAGE_FILE (<data>/logs/usage.json)   tool usage counters, saved every 30 s
+
+`kb-http usage` prints the usage report with user names; the MCP tool `usage` shows it without them.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import kb_core  # noqa: E402
+
+HOST = os.environ.get("KB_HTTP_HOST", "127.0.0.1")
+PORT = int(os.environ.get("KB_HTTP_PORT", "8790"))
+AUTH_URL = os.environ.get("KB_AUTH_URL", "")
+CACHE_SECONDS = float(os.environ.get("KB_AUTH_CACHE_SECONDS", "60"))
+AUTH_TIMEOUT = float(os.environ.get("KB_AUTH_TIMEOUT", "10"))
+MAX_BODY = 1024 * 1024
+SUPPORTED_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
+
+USAGE_FILE = os.environ.get("KB_USAGE_FILE", os.path.join(kb_core.KB, "logs", "usage.json"))
+USAGE_DAYS = 90       # per-day counters older than this are dropped
+USAGE_TOP_ARGS = 200  # most frequent arguments kept per tool
+
+GRAPH_JOBS = threading.BoundedSemaphore(int(os.environ.get("KB_MAX_GRAPH_JOBS", "3")))
+DOCS_JOBS = threading.BoundedSemaphore(int(os.environ.get("KB_MAX_DOCS_JOBS", "1")))
+DOCS_TOOLS = {"search", "docs_search", "docs_get"}  # qmd loads a model: fewer of these at once
+NAME_FIELDS = ("name", "uname", "username", "id", "uid")
+
+
+def log(msg: str) -> None:
+    sys.stderr.write(time.strftime("%Y-%m-%d %H:%M:%S ") + msg + "\n")
+    sys.stderr.flush()
+
+
+# --------------------------------------------------------------------------- auth
+
+class Identity:
+    def __init__(self, user: dict, projects: list[str]):
+        self.user = user
+        self.projects = set(projects)
+
+    @property
+    def name(self) -> str:
+        return next((str(self.user[k]) for k in NAME_FIELDS if self.user.get(k)), "?")
+
+
+class AuthError(Exception):
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+class Authenticator:
+    """Checks a bearer token with the identity endpoint and caches the verdict per token hash."""
+
+    def __init__(self, url: str = "", ttl: float = CACHE_SECONDS,
+                 timeout: float = AUTH_TIMEOUT, max_entries: int = 1000):
+        self.url = url or AUTH_URL
+        self.ttl = ttl
+        self.timeout = timeout
+        self.max_entries = max_entries
+        self._cache: dict[str, tuple[float, Identity | AuthError]] = {}
+        self._lock = threading.Lock()
+        self.upstream_calls = 0  # for tests and logs
+
+    @staticmethod
+    def token_from_header(header: str | None) -> str:
+        parts = (header or "").strip().split(None, 1)
+        if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1].strip():
+            raise AuthError(401, "missing bearer token")
+        return parts[1].strip()
+
+    def check(self, header: str | None) -> Identity:
+        token = self.token_from_header(header)
+        key = hashlib.sha256(token.encode()).hexdigest()
+        now = time.monotonic()
+        with self._lock:
+            hit = self._cache.get(key)
+            if hit and hit[0] > now:
+                verdict = hit[1]
+                if isinstance(verdict, AuthError):
+                    raise verdict
+                return verdict
+        verdict = self._ask(token)
+        if not (isinstance(verdict, AuthError) and verdict.status == 503):  # never cache an outage
+            with self._lock:
+                if len(self._cache) >= self.max_entries:
+                    self._cache = {k: v for k, v in self._cache.items() if v[0] > now}
+                    if len(self._cache) >= self.max_entries:
+                        self._cache.clear()
+                self._cache[key] = (now + self.ttl, verdict)
+        if isinstance(verdict, AuthError):
+            raise verdict
+        return verdict
+
+    def _ask(self, token: str) -> Identity | AuthError:
+        self.upstream_calls += 1
+        req = urllib.request.Request(self.url, headers={
+            "Authorization": f"Bearer {token}", "Accept": "application/json",
+            "User-Agent": "kb-http/1.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                status, body = r.status, r.read(1024 * 1024)
+        except urllib.error.HTTPError as e:
+            status, body = e.code, b""
+        except Exception as e:  # noqa: BLE001  (URLError, timeout, TLS, reset)
+            log(f"auth: endpoint unreachable: {type(e).__name__}")
+            return AuthError(503, "auth service unreachable")
+        if status == 401:
+            return AuthError(401, "invalid or expired token")
+        if status != 200:
+            return AuthError(403, f"access denied (auth service answered {status})")
+        try:
+            data = json.loads(body)
+            user = data.get("user") or {}
+            projects = data.get("projects")
+            if not isinstance(user, dict) or not isinstance(projects, list) \
+                    or not all(isinstance(p, str) for p in projects):
+                raise ValueError("unexpected shape")
+        except (ValueError, AttributeError):
+            log("auth: endpoint answered 200 with an unexpected body")
+            return AuthError(503, "auth service gave an unexpected answer")
+        if not projects:
+            return AuthError(403, "no KB projects for this user")
+        return Identity(user, projects)
+
+
+# --------------------------------------------------------------------------- usage
+
+class Usage:
+    """Counters of tool calls: per tool, per day, per user, and the most frequent arguments.
+    Kept in memory and saved to a JSON file at most every `flush_every` seconds."""
+
+    def __init__(self, path: str = USAGE_FILE, flush_every: float = 30.0):
+        self.path = path
+        self.flush_every = flush_every
+        self._lock = threading.Lock()
+        self._saved_at = time.monotonic()
+        self.data = {"since": time.strftime("%Y-%m-%d"), "tools": {}, "days": {}, "users": {},
+                     "args": {}}
+        try:
+            with open(path, encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                self.data.update({k: v for k, v in loaded.items() if k in self.data})
+        except (OSError, ValueError):
+            pass
+
+    @staticmethod
+    def arg_key(args: dict) -> str:
+        """The main argument of a call, short: what people ask the KB about."""
+        parts = [str(v) for k, v in sorted(args.items()) if isinstance(v, (str, int))]
+        return " | ".join(" ".join(p.split()) for p in parts)[:120]
+
+    def record(self, tool: str, user: str, args: dict, ok: bool, seconds: float) -> None:
+        day = time.strftime("%Y-%m-%d")
+        with self._lock:
+            d = self.data
+            t = d["tools"].setdefault(tool, {"calls": 0, "errors": 0, "seconds": 0.0})
+            t["calls"] += 1
+            t["errors"] += 0 if ok else 1
+            t["seconds"] = round(t["seconds"] + seconds, 1)
+            d["days"].setdefault(day, {})
+            d["days"][day][tool] = d["days"][day].get(tool, 0) + 1
+            u = d["users"].setdefault(user, {})
+            u[tool] = u.get(tool, 0) + 1
+            key = self.arg_key(args)
+            if key:
+                a = d["args"].setdefault(tool, {})
+                a[key] = a.get(key, 0) + 1
+                if len(a) > USAGE_TOP_ARGS * 2:  # keep the most frequent ones
+                    d["args"][tool] = dict(sorted(a.items(), key=lambda kv: -kv[1])[:USAGE_TOP_ARGS])
+            if len(d["days"]) > USAGE_DAYS:
+                for old in sorted(d["days"])[:-USAGE_DAYS]:
+                    del d["days"][old]
+            due = time.monotonic() - self._saved_at >= self.flush_every
+        if due:
+            self.save()
+
+    def save(self) -> None:
+        with self._lock:
+            payload = json.dumps(self.data)
+            self._saved_at = time.monotonic()
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            tmp = f"{self.path}.tmp.{os.getpid()}"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(payload)
+            os.replace(tmp, self.path)
+        except OSError as e:
+            log(f"usage: cannot save {self.path}: {e}")
+
+    def report(self, with_users: bool, days: int = 30, top: int = 15) -> str:
+        with self._lock:
+            d = json.loads(json.dumps(self.data))
+        if not d["tools"]:
+            return f"(no tool calls since {d['since']})"
+        lines = [f"KB tool usage since {d['since']}", "", "Tool               calls  errors  avg s"]
+        for name, t in sorted(d["tools"].items(), key=lambda kv: -kv[1]["calls"]):
+            avg = t["seconds"] / t["calls"] if t["calls"] else 0
+            lines.append(f"{name:<18} {t['calls']:>5}  {t['errors']:>6}  {avg:>5.1f}")
+        recent = sorted(d["days"])[-days:]
+        lines += ["", f"Last {len(recent)} day(s): "
+                  + ", ".join(f"{day} {sum(d['days'][day].values())}" for day in recent)]
+        for name, args in sorted(d["args"].items()):
+            best = sorted(args.items(), key=lambda kv: -kv[1])[:top]
+            lines += ["", f"Top {name} arguments:"] + [f"  {n:>4}  {a}" for a, n in best]
+        if with_users:
+            lines += ["", "Users:"]
+            for user, tools in sorted(d["users"].items(), key=lambda kv: -sum(kv[1].values())):
+                lines.append(f"  {user}: {sum(tools.values())} ("
+                             + ", ".join(f"{k} {v}" for k, v in sorted(tools.items())) + ")")
+        return "\n".join(lines)
+
+
+USAGE: Usage | None = None  # set by make_server()
+
+USAGE_TOOL = {"name": "usage", "description": "How the KB is used: calls per tool, per day, and "
+              "the most frequent arguments (the symbols, queries and services people ask about "
+              "most). No user names.",
+              "inputSchema": {"type": "object", "properties": {}}}
+
+
+# --------------------------------------------------------------------------- MCP
+
+_warm_lock = threading.Lock()
+_warm_at = float("-inf")
+
+
+def warm_docs(every: float = 600.0) -> None:
+    """Preload the qmd model at most once per `every` seconds: each warm-up is a qmd process of
+    several hundred MB, so one per client session would add up."""
+    global _warm_at
+    with _warm_lock:
+        if time.monotonic() - _warm_at < every:
+            return
+        _warm_at = time.monotonic()
+    kb_core.warm_qmd()
+
+
+def rpc_result(mid, result: dict) -> dict:
+    return {"jsonrpc": "2.0", "id": mid, "result": result}
+
+
+def rpc_error(mid, code: int, message: str) -> dict:
+    return {"jsonrpc": "2.0", "id": mid, "error": {"code": code, "message": message}}
+
+
+def handle_message(msg: dict, ident: Identity) -> dict | None:
+    """One JSON-RPC message -> answer (None for a notification)."""
+    if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0":
+        return rpc_error(msg.get("id") if isinstance(msg, dict) else None, -32600,
+                         "invalid request")
+    method, mid = msg.get("method"), msg.get("id")
+    is_notification = "id" not in msg
+    params = msg.get("params") or {}
+    if method == "initialize":
+        asked = params.get("protocolVersion") if isinstance(params, dict) else None
+        proto = asked if asked in SUPPORTED_PROTOCOLS else SUPPORTED_PROTOCOLS[0]
+        warm_docs()
+        return rpc_result(mid, {
+            "protocolVersion": proto,
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "kb", "version": kb_core.VERSION,
+                           "apiContract": kb_core.API_CONTRACT},
+            "instructions": "Code knowledge base. Projects you can see: "
+                            + ", ".join(sorted(ident.projects)) + "."})
+    if method == "ping":
+        return rpc_result(mid, {})
+    if method == "tools/list":
+        return rpc_result(mid, {"tools": [*kb_core.TOOLS, USAGE_TOOL]})
+    if method == "tools/call":
+        if not isinstance(params, dict):
+            return rpc_error(mid, -32602, "params must be an object")
+        name, args = params.get("name", ""), params.get("arguments") or {}
+        if name == USAGE_TOOL["name"]:
+            text = USAGE.report(with_users=False) if USAGE else "(usage counting is off)"
+            return rpc_result(mid, {"content": [{"type": "text", "text": text}], "isError": False})
+        if name not in kb_core.TOOLS_BY_NAME:
+            return rpc_error(mid, -32602, f"unknown tool: {name}")
+        if not isinstance(args, dict):
+            return rpc_error(mid, -32602, "arguments must be an object")
+        sem = DOCS_JOBS if name in DOCS_TOOLS else GRAPH_JOBS
+        t0 = time.monotonic()
+        try:
+            with sem:
+                text = kb_core.call_tool(name, args, ident.projects)
+            err = False
+        except kb_core.ToolError as e:
+            text, err = f"(error: {e})", True
+        took = time.monotonic() - t0
+        log(f"call user={ident.name} tool={name} projects={','.join(sorted(ident.projects))} "
+            f"ok={not err} {took:.1f}s")
+        if USAGE:
+            USAGE.record(name, ident.name, args, not err, took)
+        return rpc_result(mid, {"content": [{"type": "text", "text": text}], "isError": err})
+    if is_notification:
+        return None  # notifications/initialized and any other notification
+    return rpc_error(mid, -32601, f"method not found: {method}")
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "kb-http/1.0"
+    protocol_version = "HTTP/1.1"
+    auth: Authenticator  # set on the subclass by make_server()
+
+    def log_message(self, fmt: str, *args) -> None:  # request line only, never headers
+        log(f"{self.address_string()} {fmt % args}")
+
+    def _send(self, status: int, body: dict | list | None, headers: dict | None = None) -> None:
+        data = b"" if body is None else json.dumps(body).encode()
+        self.send_response(status)
+        if body is not None:
+            self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
+        if status >= 400:
+            # An error can come before the body is read; the rest of the body must not be parsed
+            # as the next request on a kept-alive connection.
+            self.send_header("Connection", "close")
+            self.close_connection = True
+        self.end_headers()
+        if data:
+            self.wfile.write(data)
+
+    def _not_allowed(self) -> None:
+        if self.path.split("?")[0] != "/mcp":
+            self._send(404, {"error": "not found"})
+        else:
+            self._send(405, {"error": "method not allowed"}, {"Allow": "POST"})
+
+    do_GET = do_DELETE = do_PUT = do_PATCH = _not_allowed
+
+    def do_POST(self) -> None:  # noqa: N802
+        if self.path.split("?")[0] != "/mcp":
+            self._send(404, {"error": "not found"})
+            return
+        try:
+            ident = self.auth.check(self.headers.get("Authorization"))
+        except AuthError as e:
+            extra = {"WWW-Authenticate": 'Bearer realm="kb"'} if e.status == 401 else {}
+            self._send(e.status, {"error": e.message}, extra)
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = -1
+        if length < 0 or length > MAX_BODY:
+            self._send(413, {"error": "body too large"})
+            return
+        try:
+            payload = json.loads(self.rfile.read(length) or b"null")
+        except (ValueError, UnicodeDecodeError):
+            self._send(400, rpc_error(None, -32700, "parse error"))
+            return
+        if isinstance(payload, list):
+            answers = [a for a in (handle_message(m, ident) for m in payload) if a is not None]
+            self._send(200, answers) if answers else self._send(202, None)
+        elif isinstance(payload, dict):
+            answer = handle_message(payload, ident)
+            self._send(200, answer) if answer is not None else self._send(202, None)
+        else:
+            self._send(400, rpc_error(None, -32600, "invalid request"))
+
+
+def make_server(host: str = HOST, port: int = PORT, auth: Authenticator | None = None,
+                usage: Usage | None = None) -> ThreadingHTTPServer:
+    global USAGE
+    USAGE = usage
+    handler = type("KbHandler", (Handler,), {"auth": auth or Authenticator()})
+    srv = ThreadingHTTPServer((host, port), handler)
+    srv.daemon_threads = True
+    return srv
+
+
+def refuse_reason(env: dict | None = None) -> str | None:
+    """Why the server must not start, or None. Off unless explicitly switched on and configured."""
+    env = os.environ if env is None else env
+    if env.get("KB_SERVER", "off").lower() != "on":
+        return ("kb-http is off. It is a shared, network-facing server: set KB_SERVER=on and "
+                "KB_AUTH_URL=<identity endpoint> to run it (see the README, 'Shared server').")
+    if not env.get("KB_AUTH_URL"):
+        return "kb-http: KB_AUTH_URL is not set — there is no way to check who is asking."
+    return None
+
+
+def main() -> int:
+    if sys.argv[1:] == ["usage"]:
+        print(Usage().report(with_users=True))
+        return 0
+    reason = refuse_reason()
+    if reason:
+        print(reason, file=sys.stderr)
+        return 2
+    usage = Usage()
+    srv = make_server(usage=usage)
+    log(f"kb-http listening on {HOST}:{PORT}, auth={AUTH_URL}, docs_mode={kb_core.DOCS_MODE}, "
+        f"projects={','.join(kb_core.PROJECTS)}")
+    warm_docs()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        usage.save()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

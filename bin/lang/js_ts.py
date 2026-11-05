@@ -38,7 +38,9 @@ CALL_RE = re.compile(r"\bapi\.(" + "|".join(VERBS) + r")\(\s*[`'\"]([^`'\"]+)", 
 #:   $api('v2/objects', {method:'POST'})        (Nuxt/ofetch)
 #:   apiFetch('/auth/x', {method:'DELETE'})     (Next/React wrapper, incl. apiUpload/apiDownload)
 #:   fetch(`${API_BASE}/categories`, {…})       (raw fetch to a base-URL template literal)
-WRAPPER_RE = re.compile(r"(?<![\w.])(\$api|apiFetch|apiUpload|apiDownload|fetch)\(\s*[`'\"]([^`'\"]+)")
+#: A TypeScript type argument may sit between the name and the call: $api<Page<Item>>('v2/items').
+WRAPPER_RE = re.compile(
+    r"(?<![\w.])(\$api|apiFetch|apiUpload|apiDownload|fetch)(?:<.*?>)?\(\s*[`'\"]([^`'\"]+)")
 METHOD_RE = re.compile(r"\bmethod\s*:\s*['\"](" + "|".join(VERBS) + r")['\"]", re.IGNORECASE)
 METHOD_WINDOW = 3          # lines after the call to look for `method:`
 

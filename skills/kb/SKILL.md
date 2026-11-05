@@ -42,6 +42,9 @@ because it follows real edges (calls, eloquent, fk, sql, http_request) rather th
 | `graph_path` | Shortest path between two symbols/files (crosses repos via `http_request`). | `from`, `to` |
 | `docs_search` | Find docs by meaning. Returns snippets + paths. | `query` |
 | `docs_get` | Fetch a full doc by the path returned from `docs_search`. | `path` |
+| `connections` | Which services talk to which, over what, and why. Start here for a cross-service question; read the named contract doc with `docs_get`. | `service` (optional) |
+| `problems` | Gaps the KB found (missing contract docs, calls to unknown routes). Check it before you finish work on a project. | `project` or kind (optional) |
+| `contracts_search` | An API endpoint: method, URI, controller action, middleware and the frontend files that call it. Words match all of them (`POST v2/users`, `UserController`). | `query` |
 
 ## How to use it well
 
@@ -66,7 +69,7 @@ because it follows real edges (calls, eloquent, fk, sql, http_request) rather th
    defer the `kb` tools behind a tool-search index — they won't appear in the live tool list and a
    direct call fails until their schemas are loaded. Pull them in first via the host's tool-search
    (e.g. a query like
-   `select:mcp__kb__graph_query,mcp__kb__graph_explain,mcp__kb__graph_affected,mcp__kb__graph_path,mcp__kb__docs_search`),
+   `select:mcp__kb__graph_query,mcp__kb__graph_explain,mcp__kb__graph_affected,mcp__kb__graph_path,mcp__kb__docs_search,mcp__kb__contracts_search,mcp__kb__connections,mcp__kb__problems`),
    then call them normally. Activating this skill is the cue to do that — not to fall back to grep.
 
 ## The dashboard (for a human, not for you)

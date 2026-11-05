@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""Get a token for a shared KB server (bin/kb-http) and write it into an agent's .mcp.json.
+
+kb-http does not issue tokens: it asks your identity endpoint who a token belongs to. This helper
+logs in to *your* API to get such a token, then writes the `kb` server entry for the agent:
+
+    { "mcpServers": { "kb": { "type": "http", "url": "<kb url>",
+                               "headers": { "Authorization": "Bearer <token>" } } } }
+
+Nothing here has a default address — the API, the KB URL and the login paths are yours.
+
+Usage:
+  kb-login --api https://api.example.com --kb-url https://kb.example.com/mcp --mcp-json .mcp.json
+  KB_LOGIN_API=... KB_URL=... kb-login --username jdoe
+
+Login contract (adjust the paths and headers with env to match your API):
+  POST {api}{KB_LOGIN_PATH} {"username", "password"}
+       -> {"data": {"token": "..."}}                                  done, or
+       -> {"data": {"two_factor": {"challenge": "...", "type": "verify"|"enroll"}}}
+  enroll: POST {api}{KB_LOGIN_2FA_SETUP_PATH} {"challenge"} -> {"data": {"secret", "otpauth_uri"}}
+  then:   POST {api}{KB_LOGIN_2FA_PATH} {"challenge", "code"|"recovery_code"}
+       -> {"data": {"token": "...", "recovery_codes": [...]?}}
+
+Environment:
+  KB_LOGIN_API              API base URL (or --api)
+  KB_URL                    KB MCP endpoint written into .mcp.json (or --kb-url)
+  KB_LOGIN_PATH             (/login)
+  KB_LOGIN_2FA_PATH         (/login/two-factor)
+  KB_LOGIN_2FA_SETUP_PATH   (/login/two-factor/setup)
+  KB_LOGIN_HEADERS          extra request headers as a JSON object, e.g. {"X-Client": "dev"}
+"""
+from __future__ import annotations
+
+import argparse
+import getpass
+import json
+import os
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+
+
+class LoginError(Exception):
+    pass
+
+
+def _paths(env: dict | None = None) -> dict[str, str]:
+    env = os.environ if env is None else env
+    return {"login": env.get("KB_LOGIN_PATH", "/login"),
+            "2fa": env.get("KB_LOGIN_2FA_PATH", "/login/two-factor"),
+            "2fa_setup": env.get("KB_LOGIN_2FA_SETUP_PATH", "/login/two-factor/setup")}
+
+
+def _extra_headers(env: dict | None = None) -> dict[str, str]:
+    env = os.environ if env is None else env
+    raw = env.get("KB_LOGIN_HEADERS", "").strip()
+    if not raw:
+        return {}
+    try:
+        h = json.loads(raw)
+    except ValueError:
+        raise LoginError("KB_LOGIN_HEADERS must be a JSON object") from None
+    if not isinstance(h, dict):
+        raise LoginError("KB_LOGIN_HEADERS must be a JSON object")
+    return {str(k): str(v) for k, v in h.items()}
+
+
+def post(api: str, path: str, body: dict, timeout: float = 30, headers: dict | None = None) -> dict:
+    req = urllib.request.Request(
+        api.rstrip("/") + path, data=json.dumps(body).encode(), method="POST",
+        headers={"Content-Type": "application/json", "Accept": "application/json",
+                 "User-Agent": "kb-login/1.0", **(headers or {})})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            data = {}
+        msg = data.get("message") or data.get("error") or raw[:200].decode(errors="replace")
+        if isinstance(data.get("errors"), dict):
+            msg = f"{msg} {json.dumps(data['errors'], ensure_ascii=False)}"
+        if e.code == 429 and e.headers.get("Retry-After"):
+            msg = f"{msg} (retry after {e.headers['Retry-After']} s)"
+        raise LoginError(f"HTTP {e.code}: {msg}") from None
+    except urllib.error.URLError as e:
+        raise LoginError(f"cannot reach {api}: {e.reason}") from None
+
+
+def login(api: str, username: str, password: str, ask=input, say=print,
+          env: dict | None = None) -> str:
+    """Run the login (with the second factor when asked). Returns the token."""
+    p, h = _paths(env), _extra_headers(env)
+    data = post(api, p["login"], {"username": username, "password": password},
+                headers=h).get("data") or {}
+    tf = data.get("two_factor") or {}
+    challenge = tf.get("challenge")
+    if challenge:
+        if tf.get("type") == "enroll":
+            setup = post(api, p["2fa_setup"], {"challenge": challenge}, headers=h).get("data") or {}
+            say("Your account must set up an authenticator app first.")
+            say(f"  Secret:      {setup.get('secret', '?')}")
+            say(f"  otpauth URI: {setup.get('otpauth_uri', '?')}")
+            say("Add it to the authenticator app, then enter the code it shows.")
+        code = ask("Authenticator code (or a recovery code): ").strip()
+        body = {"challenge": challenge}
+        if code.isdigit() and len(code) == 6:
+            body["code"] = code
+        else:
+            body["recovery_code"] = code
+        data = post(api, p["2fa"], body, headers=h).get("data") or {}
+        if data.get("recovery_codes"):
+            say("Recovery codes (shown once, keep them safe):")
+            for c in data["recovery_codes"]:
+                say(f"  {c}")
+    token = data.get("token")
+    if not token:
+        raise LoginError("the API answered without a token")
+    return token
+
+
+def in_git_and_not_ignored(path: str) -> bool:
+    d = os.path.dirname(os.path.abspath(path))
+    try:
+        inside = subprocess.run(["git", "-C", d, "rev-parse", "--is-inside-work-tree"],
+                                capture_output=True, text=True).stdout.strip() == "true"
+        if not inside:
+            return False
+        return subprocess.run(["git", "-C", d, "check-ignore", "-q", os.path.abspath(path)],
+                              capture_output=True).returncode != 0
+    except OSError:
+        return False
+
+
+def write_mcp_json(path: str, token: str, kb_url: str, name: str = "kb") -> None:
+    """Add or replace the `name` server in an .mcp.json; keep every other key."""
+    if not kb_url:
+        raise LoginError("no KB URL: pass --kb-url or set KB_URL")
+    cfg: dict = {}
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        if text.strip():
+            cfg = json.loads(text)
+    if not isinstance(cfg, dict):
+        raise LoginError(f"{path} does not hold a JSON object")
+    servers = cfg.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise LoginError(f"{path}: mcpServers is not an object")
+    servers[name] = {"type": "http", "url": kb_url,
+                     "headers": {"Authorization": f"Bearer {token}"}}
+    new = not os.path.exists(path)
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+    if new:
+        os.chmod(path, 0o600)  # it holds a token
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="Log in to your API and get a token for a shared KB.")
+    ap.add_argument("--api", default=os.environ.get("KB_LOGIN_API", ""),
+                    help="API base URL (env KB_LOGIN_API)")
+    ap.add_argument("--username", help="API user name")
+    ap.add_argument("--mcp-json", help="write the kb server entry into this .mcp.json")
+    ap.add_argument("--kb-url", default=os.environ.get("KB_URL", ""),
+                    help="KB MCP endpoint for .mcp.json (env KB_URL)")
+    ap.add_argument("--name", default="kb", help="server name in .mcp.json (default kb)")
+    args = ap.parse_args(argv)
+
+    api = args.api or input("API base URL: ").strip()
+    if not api:
+        print("No API base URL (--api or KB_LOGIN_API).", file=sys.stderr)
+        return 2
+    username = args.username or input("Username: ").strip()
+    password = getpass.getpass("Password: ")
+    try:
+        token = login(api, username, password)
+    except LoginError as e:
+        print(f"Login failed: {e}", file=sys.stderr)
+        return 1
+
+    print(f"\nToken (keep it secret):\n{token}\n")
+    path = args.mcp_json
+    if path is None and sys.stdin.isatty():
+        path = input("Write it to an .mcp.json? Path, or Enter to skip: ").strip() or None
+    if path:
+        path = os.path.expanduser(path)
+        try:
+            write_mcp_json(path, token, args.kb_url, args.name)
+        except (LoginError, ValueError, OSError) as e:
+            print(f"Could not update {path}: {e}", file=sys.stderr)
+            return 1
+        print(f"Wrote the '{args.name}' server to {path}. Restart the agent session to load it.")
+        if in_git_and_not_ignored(path):
+            print(f"WARNING: {path} is tracked or trackable by git. Do not commit the token: "
+                  "add the file to .gitignore or use a private settings file.", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

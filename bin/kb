@@ -20,6 +20,8 @@ KB_VERSION="$(cat "$KB_PACKAGE/VERSION" 2>/dev/null || echo '0+unknown')"
 OUT="$KB_OUT"
 DOCS_STAGE="$KB_DATA/.docs"      # aggregated docs root for qmd (one collection = one path); gitignored
 COLLECTION="${KB_COLLECTION:-kb}"
+CONTRACT_DIR="contracts"          # <project docs>/contracts/*.md = contract docs (bin/contracts.py)
+SELF_DOCS="${KB_SELF_DOCS_NAME:-kb}"  # project name for the KB checkout's own docs/, if present
 LOCAL_CFG="$KB_DATA/.kb.local"   # persisted local choices (e.g. QMD_BACKEND); gitignored
 [ -f "$LOCAL_CFG" ] && . "$LOCAL_CFG"
 export GRAPHIFY_VIZ_NODE_LIMIT="${GRAPHIFY_VIZ_NODE_LIMIT:-20000}"
@@ -63,7 +65,7 @@ stage_and_build() {
       --exclude tests --exclude '*.png' --exclude '*.svg' --exclude '*.jpg' --exclude '*.jpeg' \
       --exclude '*.gif' --exclude '*.ico' --exclude '*.webp' "$d" "$dest/" 2>/dev/null || true
   done
-  echo "  [$name] staged $(find "$dest" -type f \( -name '*.php' -o -name '*.js' -o -name '*.vue' -o -name '*.ts' -o -name '*.tsx' -o -name '*.py' \) | wc -l) source files"
+  echo "  [$name] staged $(find "$dest" -type f \( -name '*.php' -o -name '*.js' -o -name '*.vue' -o -name '*.ts' -o -name '*.tsx' -o -name '*.py' -o -name '*.kt' \) | wc -l) source files"
   graphify update "$dest" >/dev/null 2>&1 || true
 }
 
@@ -82,7 +84,9 @@ build_graph() {
     if [ -n "$routes" ]; then
       # Route table feeds the frontend->controller edges. A silent failure here means the graph
       # quietly loses its cross-repo half, so say so instead of swallowing it.
-      if ! env -C "$routes" php artisan route:list --json >"$KB/routes.$name.json" 2>/dev/null; then
+      # LOG_CHANNEL=null: the indexed app must not get log files from this run (they would be owned
+      # by the KB's user, and the app's own user could not append to them later).
+      if ! env -C "$routes" LOG_CHANNEL=null php artisan route:list --json >"$KB/routes.$name.json" 2>/dev/null; then
         echo "  [$name] WARNING: 'php artisan route:list' failed — HTTP edges for this repo will be missing" >&2
         rm -f "$KB/routes.$name.json"
       fi
@@ -143,6 +147,28 @@ build_graph() {
   "$PY" "$KB/bin/render_viz.py" "$OUT/graph.json" "$OUT"
   rm -f "$OUT/kb-graph.html"   # 0.5.0: the shell moved to web/; drop the stale generated page
   echo "    graphify graph.html (raw upstream view) -> $OUT · shell: web/index.html"
+  build_contracts
+}
+
+# The contract layer (bin/contracts.py): routes joined with their frontend call sites, the service
+# map from <docs>/contracts/*.md, and the gaps between the two. Read by contracts_search,
+# connections and problems; built after the graph because it reads its http_request edges.
+build_contracts() {
+  local specs=() docs_specs=() prob_specs=()
+  while IFS='|' read -r name code docs routes calls serves; do
+    [ -n "$routes" ] && [ -f "$KB/routes.$name.json" ] && specs+=("$name=$KB/routes.$name.json")
+    [ -n "$docs" ] && [ -d "$docs" ] && docs_specs+=("$name=$docs") && prob_specs+=("docs:$name=$docs")
+    [ -n "$routes" ] && prob_specs+=("routes:$name=$KB/routes.$name.json")
+    [ -n "$calls" ] && [ -n "$serves" ] && prob_specs+=("calls:$name=$serves=$calls")
+  done < <(read_projects)
+  # The KB service's own contract docs, if this checkout has any (<data>/docs/contracts/).
+  [ -d "$KB_DATA/docs/$CONTRACT_DIR" ] && docs_specs+=("$SELF_DOCS=$KB_DATA/docs")
+  echo "==> Building the contract index (routes + frontend call sites)"
+  "$PY" "$KB/bin/contracts.py" contracts "$OUT/graph.json" "$OUT/contracts.json" "${specs[@]}"
+  echo "==> Building the connection map (contract docs + HTTP calls)"
+  "$PY" "$KB/bin/contracts.py" connections "$OUT/contracts.json" "$OUT/connections.json" "${docs_specs[@]}"
+  echo "==> Finding problems (contract docs, unknown routes)"
+  "$PY" "$KB/bin/contracts.py" problems "$OUT/connections.json" "$OUT/problems.json" "${prob_specs[@]}"
 }
 
 # Where qmd gets its vector embeddings. Resolved once and remembered in .kb.local.
@@ -194,15 +220,21 @@ build_kb() {
   require_cfg
   echo "==> Staging + indexing docs into qmd collection '$COLLECTION'"
   [ -d "$KB/.qmd" ] || qmd init >/dev/null 2>&1 || true
-  # qmd binds one collection to a single root path, so aggregate every project's
-  # docs under one staged root ($DOCS_STAGE/<project>/...) and index that — otherwise
-  # only the first project's docs would be searchable.
-  rm -rf "$DOCS_STAGE"; mkdir -p "$DOCS_STAGE"
-  local staged=0
+  # Every project's docs are staged under $DOCS_STAGE/<project>/ (one qmd collection each, below).
+  # rsync --delete in place, never rm -rf first: a search during a rebuild still finds the docs.
+  mkdir -p "$DOCS_STAGE"
+  local staged=0 keep=()
+  local roots=()
   while IFS='|' read -r name code docs routes calls serves; do
-    [ -z "$docs" ] || [ ! -d "$docs" ] && continue
+    [ -n "$docs" ] && [ -d "$docs" ] && roots+=("$name|$docs")
+  done < <(read_projects)
+  [ -d "$KB_DATA/docs" ] && roots+=("$SELF_DOCS|$KB_DATA/docs")
+  local root name docs
+  for root in "${roots[@]}"; do
+    name="${root%%|*}"; docs="${root#*|}"
+    keep+=("$name")
     mkdir -p "$DOCS_STAGE/$name"
-    rsync -a --prune-empty-dirs \
+    rsync -a --delete --prune-empty-dirs \
       --exclude='node_modules/' --exclude='.git/' --exclude='vendor/' \
       --include='*/' --include='*.md' --exclude='*' \
       "$docs/" "$DOCS_STAGE/$name/" 2>/dev/null || true
@@ -219,7 +251,13 @@ build_kb() {
     fi
     echo "  [$name] staged $(find "$DOCS_STAGE/$name" -name '*.md' | wc -l) docs"
     staged=1
-  done < <(read_projects)
+  done
+  # drop the staged docs of a project that left kb.projects.toml
+  local d
+  for d in "$DOCS_STAGE"/*/; do
+    [ -d "$d" ] || continue
+    [[ " ${keep[*]} " == *" $(basename "$d") "* ]] || rm -rf "$d"
+  done
   [ "$staged" = 1 ] || { echo "  (no docs configured)"; return; }
   # One qmd collection per project ($COLLECTION-<project>), so a search can be scoped to one project
   # and the rest of the network stays out of its results. Searching all projects = all collections.

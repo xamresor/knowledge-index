@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Rebuild the KB (`kb update`: graph, contracts, docs) when an indexed checkout has a new HEAD.
+# Meant for a server's cron, every minute; a tick without a new commit costs a few `git rev-parse`.
+#
+# Usage: bin/kb-refresh [--force]
+#
+# - The git checkouts come from the absolute paths in kb.projects.toml.
+# - One build at a time (<data>/logs/update.lock). A tick during a build exits at once.
+# - KB_REFRESH_WAIT_LOCK=<file>: when set and readable, a tick exits while another process holds
+#   that lock (e.g. your deploy script resetting the checkouts). The next tick builds. Unset = no wait.
+# - The HEADs of the last build go to logs/heads.txt, also after a failed build: a broken build does
+#   not repeat every minute; the next commit or --force retries it.
+# - logs/update.log holds the output of the last build; logs/refresh.log one line per build.
+set -euo pipefail
+
+BIN="$(cd "$(dirname "$0")" && pwd)"
+eval "$(python3 "$BIN/paths.py" --sh)"
+cd "$KB_DATA"
+mkdir -p logs
+# graphify and qmd usually live in ~/.local/bin (uv tool, npm prefix); cron does not add it.
+export PATH="$HOME/.local/bin:$PATH"
+CFG="$KB_CONFIG/kb.projects.toml"
+STAMP="$KB_DATA/logs/heads.txt"
+WAIT_LOCK="${KB_REFRESH_WAIT_LOCK:-}"
+
+exec 8>"$KB_DATA/logs/update.lock"
+flock -n 8 || exit 0
+
+if [ -n "$WAIT_LOCK" ] && [ -r "$WAIT_LOCK" ]; then
+  exec 7<"$WAIT_LOCK"
+  flock -n -s 7 || exit 0
+  exec 7<&-  # release at once: holding it would make the other process skip its own ticks
+fi
+
+heads() {
+  local p top
+  grep -oE '"/[^"]+"' "$CFG" | tr -d '"' | while read -r p; do
+    [ -d "$p" ] || continue
+    top=$(git -C "$p" rev-parse --show-toplevel 2>/dev/null) || continue
+    echo "$top"
+  done | sort -u | while read -r top; do
+    echo "$top $(git -C "$top" rev-parse HEAD 2>/dev/null || echo unknown)"
+  done
+}
+
+now=$(heads)
+if [ "${1:-}" != "--force" ] && [ "$now" = "$(cat "$STAMP" 2>/dev/null || true)" ]; then
+  exit 0
+fi
+
+start=$(date +%s)
+status=0
+# nice 19: qmd embed takes every core; whatever else runs on the server goes first.
+{ date; echo "$now"; nice -n 19 "$BIN/kb" update; } >logs/update.log 2>&1 || status=$?
+echo "$now" >"$STAMP"
+echo "$(date '+%F %T') exit=$status $(( $(date +%s) - start ))s $(echo "$now" | awk '{printf "%s@%.9s ", $1, $2}')" \
+  >>logs/refresh.log
+exit "$status"

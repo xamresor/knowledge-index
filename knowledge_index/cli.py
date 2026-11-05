@@ -55,6 +55,21 @@ def kb_api() -> None:
     _exec("kb-api")
 
 
+def kb_http() -> None:
+    """`kb-http` — shared MCP server over HTTP for a team (off unless KB_SERVER=on)."""
+    _exec("kb-http")
+
+
+def kb_login() -> None:
+    """`kb-login` — get a token for a shared KB server and write it into .mcp.json."""
+    _exec("kb-login")
+
+
+def kb_refresh() -> None:
+    """`kb-refresh` — rebuild when an indexed checkout has a new HEAD (for cron)."""
+    _exec("kb-refresh")
+
+
 def kb_install() -> None:
     """`kb-install` — first-run setup: requirements, config, the MCP snippet."""
     _exec("install")

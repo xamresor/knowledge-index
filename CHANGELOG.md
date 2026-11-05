@@ -14,6 +14,27 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+- **Added: a shared MCP server over HTTP, off by default (`bin/kb-http`).** One index on a server for a
+  team; each caller sees only their projects. Bearer tokens are checked against an identity endpoint
+  you run (`KB_AUTH_URL`), cached per token hash. It refuses to start unless `KB_SERVER=on` and
+  `KB_AUTH_URL` are set. Usage counters (`kb-http usage`, MCP tool `usage`), job limits per tool kind,
+  `KB_DOCS_MODE=light|bm25` for a small server. Around it: `bin/kb-refresh` (rebuild on a new HEAD,
+  for cron), `bin/kb-login` (get a token from your API, write `.mcp.json`; no default addresses),
+  templates in `examples/server/`.
+- **Added: per-caller project access in the core.** `kb_core.call_tool(name, args, allowed)`: graph
+  tools run on a filtered graph copy (`bin/access.py`), doc hits and `docs_get` are checked by their
+  resolved path, contract docs stay open to all. `allowed=None` (local use) changes nothing.
+- **Added: `contracts_search`, `connections`, `problems` (`bin/contracts.py`).** Routes joined with
+  their frontend call sites and contract docs; the service map from `<docs>/contracts/*.md`; the gaps
+  between docs and code. Built by `kb update` after the graph.
+- **Changed: argument values that start with `-` are refused** for every tool whose argument reaches a
+  subprocess, so a value cannot read as a CLI option. MCP answers carry `isError` for a refused call.
+- **Changed: docs are staged with `rsync --delete` in place** — search keeps working during a rebuild —
+  and the staged docs of a project removed from the config are dropped.
+- **Fixed: `$api<Type>('...')` calls were missed** — a TypeScript type argument between the name and
+  the call. `php artisan route:list` runs with `LOG_CHANNEL=null`, so the indexed app gets no log files
+  from the build; `.kt` files are counted in the staged sources.
+
 - **Changed: one qmd collection per project.** Docs of project `<name>` are indexed as `kb-<name>`
   (the single aggregated `kb` collection is removed on the next `kb kb`). `search` takes a new
   `project` argument: a name, several comma-separated, or `all`. Without it the search is scoped to

@@ -325,9 +325,9 @@ true, and none of them are a gap this project intends to close:
   that, use RAGFlow — that is what it is for.
 - **Connectors to SaaS suites** (Slack, Drive, Confluence, Jira) and the **permission mirroring** they
   require. One owner, local files. See Onyx or Glean.
-- **A canonical index on a server.** Nothing prevents it — install the tool on the box and point a
-  client at `kb-mcp` over SSH or at `kb-api` through a tunnel — but it is a **deployment recipe, not a
-  feature**, and it is deliberately not on the roadmap while a single machine holds the corpus.
+- **Issuing identities.** The shared server (`bin/kb-http`, off by default — see "Shared server")
+  asks an identity endpoint you already run who a token belongs to; it never stores users, passwords
+  or roles of its own.
 - **A write path.** The index is a projection; whoever owns the corpus owns writing to it.
 
 ### Languages: one plugin per language
@@ -408,6 +408,7 @@ Each surface exists for a different reader, and that decides what it may require
 | **MCP** (`bin/kb-mcp`, stdio) | agents | search + traverse inside a session | nothing — no port, no auth |
 | **HTTP API** (`bin/kb-api`) | scripts, CI, cron | the same search from bash/python | a port; a token off loopback |
 | **web** (`web/index.html`) | a human | look at status: the graph, index health | nothing running — opens from `file://` |
+| **shared MCP** (`bin/kb-http`, **off by default**) | a team's agents | one index on a server, each caller limited to their projects | `KB_SERVER=on`, an identity endpoint, TLS in front |
 
 MCP and the API are the **same contract**: both dispatch through `kb_core.call_tool()` and publish
 `kb_core.TOOLS`, so they cannot drift apart without deleting code. The web surface is not a client of
@@ -436,6 +437,66 @@ they translate to `search`, so there is one implementation rather than two.
 **Binding off loopback requires a token, and the server refuses to start without one.** The point of
 this project is that the corpus never leaves the machine; an index published to the network without
 auth would be the leak it exists to prevent. For remote use, bind loopback and tunnel over SSH.
+
+## Shared server (off by default)
+
+One build on one server, reached by every developer's agent over MCP "streamable HTTP", where each
+caller sees only the projects they may see. It is the same core: `bin/kb-http` dispatches through
+`kb_core.call_tool(name, args, allowed)`, and the access filter (`bin/access.py`) works on the inputs —
+graph tools run on a filtered copy of the graph, doc hits are checked by their resolved path. Contract
+docs and the cross-repo `http_request` edges stay visible to everyone: they are the interfaces between
+services (`KB_CONTRACT_EDGES=0` hides the edges too).
+
+**It does not start unless you switch it on.** A local install never opens a port by accident:
+
+```bash
+KB_SERVER=on KB_AUTH_URL=https://api.example.com/kb/me kb-http   # 127.0.0.1:8790; TLS proxy in front
+```
+
+Identity is yours, not this tool's. Every request carries `Authorization: Bearer <token>`; the server
+sends it to `KB_AUTH_URL` and expects `200 {"user": {"name": ...}, "projects": ["api", "web"]}` — the
+names from `kb.projects.toml` this caller may see. 401 stays 401, any other refusal is 403, an
+unreachable endpoint is 503 (never cached). Verdicts are cached `KB_AUTH_CACHE_SECONDS` (60) per SHA-256
+of the token; the token is never logged.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `KB_SERVER` | `off` | must be `on` |
+| `KB_AUTH_URL` | — | identity endpoint (required) |
+| `KB_HTTP_HOST` / `KB_HTTP_PORT` | `127.0.0.1` / `8790` | bind address; put a TLS proxy in front |
+| `KB_DOCS_MODE` | `full` | `light` = no reranker (~650 MB RAM), `bm25` = keywords only (~70 MB) |
+| `KB_MAX_GRAPH_JOBS` / `KB_MAX_DOCS_JOBS` | `3` / `1` | parallel graphify / qmd processes |
+| `KB_AUTH_CACHE_SECONDS` / `KB_AUTH_TIMEOUT` | `60` / `10` | auth cache and timeout |
+| `KB_CONTRACT_EDGES` | `1` | `0` hides other repos' endpoints of `http_request` edges |
+| `KB_USAGE_FILE` | `<data>/logs/usage.json` | tool usage counters (`kb-http usage` prints them with user names; the MCP tool `usage` without) |
+
+Around it:
+
+- **`bin/kb-refresh`** — cron, every minute: runs `kb update` when an indexed checkout has a new HEAD.
+  `KB_REFRESH_WAIT_LOCK=<file>` makes it wait while your deploy holds that lock.
+- **`bin/kb-login`** — logs a developer in to *your* API and writes the `kb` entry with the token into
+  their `.mcp.json`. No default addresses: `--api`/`KB_LOGIN_API`, `--kb-url`/`KB_URL`, and the login
+  paths and extra headers through `KB_LOGIN_PATH`, `KB_LOGIN_2FA_PATH`, `KB_LOGIN_2FA_SETUP_PATH`,
+  `KB_LOGIN_HEADERS` (the contract is in the script's header).
+- **`examples/server/`** — a systemd unit, an nginx vhost and a crontab, with `kb.example.com`
+  placeholders.
+
+## Contracts between services
+
+Three tools answer what the graph answers badly — they read indexes `kb update` builds next to the
+graph (`bin/contracts.py`):
+
+- **`contracts_search`** — an API route with its controller action, middleware, the frontend files
+  that call it, and the contract docs that name it. Words match all of them (`POST v2/users`).
+- **`connections`** — the service map: who talks to whom, over what, and why. Built from contract docs,
+  one file per connection in `<project docs>/contracts/<from>-<to>.md` with front matter `from`, `to`,
+  `protocol`, `summary`, plus one generated HTTP line per frontend→API pair the code shows.
+- **`problems`** — the gaps: a project without contract docs, a contract doc with incomplete front
+  matter, a connection the code shows but no doc describes, a frontend call to a route that does not
+  exist. Check it before finishing work on a project.
+
+A checkout of the KB itself may hold `docs/contracts/` too (the KB's own connections); it is indexed
+as project `kb` (`KB_SELF_DOCS_NAME`).
 
 ## How the projects connect
 
