@@ -14,6 +14,21 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+- **Changed: one qmd collection per project.** Docs of project `<name>` are indexed as `kb-<name>`
+  (the single aggregated `kb` collection is removed on the next `kb kb`). `search` takes a new
+  `project` argument: a name, several comma-separated, or `all`. Without it the search is scoped to
+  the project(s) owning the session's directory (`KB_SESSION_DIR` or the MCP server's cwd); if that
+  scope finds nothing, it widens to all projects by itself. Every docs answer starts with
+  `[projects: …]` so the scope is visible. `scope` still takes a raw collection and wins.
+- **Fixed: Cyrillic and every other non-ASCII text was cut out of the doc index.** The staged copy
+  was forced to ASCII — a workaround for a qmd 0.3.2 chunker crash. qmd ≥ 2.5.3 is required now and
+  has no such crash, so the workaround only destroyed text: Russian docs were unsearchable.
+- **Fixed: `kb update` did not re-stage docs.** It re-indexed the old staged copy, so new or edited
+  docs never reached search until a full `kb build`. `update` now runs the docs stage too.
+- **Changed: graphify's cache survives a rebuild.** `repos/<name>/graphify-out/` (with its extraction
+  cache) is no longer deleted before each build; only the staged sources are re-copied. Measured: it
+  does not make `kb update` noticeably faster (~2.5 min) — the time goes to clustering and enrichment.
+
 - **Added: ask the index from the dashboard.** Two inputs run `graphify query` and the qmd docs search
   through `/search`. They work when the page is opened from `make serve` (<http://127.0.0.1:8899/>),
   which now serves the dashboard on the same origin — no CORS, so no other website can read the index.

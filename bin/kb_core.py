@@ -57,6 +57,85 @@ VERSION = _read_version()
 # Loaded once: the table is small and hand-curated, not hot data.
 ALIASES = load_aliases()
 
+
+# --- projects (one qmd collection per project: <COLLECTION>-<name>) ------------------------------
+def load_projects(cfg=None) -> dict[str, list[str]]:
+    """name -> every path the project lists (code, docs, routes, calls), from kb.projects.toml.
+
+    Same tiny reader as bin/kb (no TOML package): only `key = "str"` and `key = ["a", "b"]` lines."""
+    cfg = cfg or paths.config_file("kb.projects.toml")
+    try:
+        txt = open(cfg, encoding="utf-8").read()
+    except OSError:
+        return {}
+    out: dict[str, list[str]] = {}
+    for block in re.split(r"(?m)^\[\[project\]\]\s*$", txt)[1:]:
+        name = re.search(r'(?m)^\s*name\s*=\s*"([^"]+)"', block)
+        if not name:
+            continue
+        roots = []
+        for key in ("code", "docs", "routes", "calls"):
+            m = re.search(rf"(?m)^\s*{key}\s*=\s*(.+)$", block)
+            if m:
+                roots += re.findall(r'"([^"]+)"', m.group(1).split("#", 1)[0])
+        out[name.group(1)] = [os.path.normpath(r) for r in roots]
+    return out
+
+
+def _has_docs(name: str, cfg=None) -> bool:
+    cfg = cfg or paths.config_file("kb.projects.toml")
+    try:
+        txt = open(cfg, encoding="utf-8").read()
+    except OSError:
+        return False
+    for block in re.split(r"(?m)^\[\[project\]\]\s*$", txt)[1:]:
+        if re.search(rf'(?m)^\s*name\s*=\s*"{re.escape(name)}"', block):
+            return bool(re.search(r"(?m)^\s*docs\s*=", block))
+    return False
+
+
+def projects_for_dir(cwd: str, projects: dict[str, list[str]]) -> list[str]:
+    """Projects that own `cwd`: one of their roots is inside it, or it is inside one of their roots.
+
+    /private/projects/rentget -> renget-api, renget-web, renget-knowledge (all live under it);
+    /private/projects/rentget/apps/web/src -> renget-web. A dir that owns nothing (or the shared
+    parent of every project) -> [], meaning: search everything."""
+    cwd = os.path.normpath(cwd)
+    def inside(a, b):
+        return a == b or a.startswith(b.rstrip(os.sep) + os.sep)
+    hit = [n for n, roots in projects.items() if any(inside(r, cwd) or inside(cwd, r) for r in roots)]
+    return [] if len(hit) == len(projects) else hit
+
+
+PROJECTS = load_projects()
+# Only projects with a `docs` root get a qmd collection (bin/kb build_kb); code-only ones have none.
+DOC_PROJECTS = {n for n in PROJECTS if _has_docs(n)}
+# The MCP server is started by the consuming session, in that session's directory.
+HOME_PROJECTS = projects_for_dir(os.environ.get("KB_SESSION_DIR") or os.getcwd(), PROJECTS)
+
+
+def resolve_collections(args: dict) -> tuple[list[str], str]:
+    """-> (qmd collections, scope label). Empty list = every collection in the index."""
+    if args.get("scope"):
+        return [args["scope"]], args["scope"]
+    want = (args.get("project") or "").strip()
+    if want.lower() == "all":
+        return [], "all"
+    if want:
+        names = [n.strip() for n in want.split(",") if n.strip()]
+        unknown = [n for n in names if n not in PROJECTS]
+        if unknown:
+            raise ToolError(f"unknown project: {', '.join(unknown)} (known: {', '.join(PROJECTS)})")
+        docs = [n for n in names if n in DOC_PROJECTS]
+        if not docs:
+            raise ToolError(f"no docs indexed for: {', '.join(names)} "
+                            f"(projects with docs: {', '.join(sorted(DOC_PROJECTS))})")
+        return [f"{COLLECTION}-{n}" for n in docs], ", ".join(docs)
+    home = [n for n in HOME_PROJECTS if n in DOC_PROJECTS]
+    if home:
+        return [f"{COLLECTION}-{n}" for n in home], ", ".join(home) + " (auto)"
+    return [], "all"
+
 # --- tool schemas -------------------------------------------------------------------------------
 # One list, published by both adapters. `deprecated` entries still work (a caller written against an
 # older surface must not break) but point at their replacement.
@@ -70,7 +149,12 @@ TOOLS = [
          "q": {"type": "string", "description": "the question or terms"},
          "domain": {"type": "string", "enum": ["docs", "code", "both"],
                     "description": "what to search (default: both)"},
-         "scope": {"type": "string", "description": "qmd collection to search instead of the default"},
+         "project": {"type": "string",
+                     "description": "docs: which project(s) to search — a name from kb.projects.toml, "
+                                    "several comma-separated, or 'all'. Default: the project(s) of the "
+                                    "session's working directory, else all; an empty scoped search "
+                                    "widens to all by itself"},
+         "scope": {"type": "string", "description": "raw qmd collection to search instead (overrides project)"},
          "mode": {"type": "string", "enum": ["auto", "lex", "vec", "hybrid"],
                   "description": "docs retrieval mode; auto = hybrid with a keyword fallback"},
          "limit": {"type": "integer", "description": "max results (docs)"},
@@ -168,7 +252,7 @@ def warm_qmd() -> None:
     first real doc search — turns a >60s cold start into a ~2s warm call."""
     try:
         subprocess.Popen(
-            ["qmd", "query", "warmup", "-c", COLLECTION],
+            ["qmd", "query", "warmup"],
             cwd=KB, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
         )
     except Exception:  # noqa: BLE001
@@ -246,7 +330,9 @@ def _qmd_cmd(args: dict, query: str) -> list[str]:
     verb = {"lex": "search", "vec": "vsearch"}.get(mode, "query")
     if verb == "query":
         query = query_build.build(query)
-    cmd = [verb, query, "-c", args.get("scope") or COLLECTION]
+    cmd = [verb, query]
+    for c in resolve_collections(args)[0]:
+        cmd += ["-c", c]
     if args.get("limit"):
         cmd += ["-n", str(args["limit"])]
     if args.get("min_score") is not None:
@@ -265,13 +351,27 @@ def search_docs(args: dict) -> str:
         if expanded != q:
             note = f"[alias expansion: {q!r} -> {expanded!r}]\n\n"
             q = expanded
+    out = _docs_once(args, q)
+    label = resolve_collections(args)[1]
+    if _empty(out) and label.endswith("(auto)"):
+        # the session's own project had nothing — widen instead of returning empty
+        out = _docs_once({**args, "project": "all"}, q)
+        label = f"all (nothing in {label[:-7]})"
+    return note + f"[projects: {label}]\n\n" + out
+
+
+def _empty(out: str) -> bool:
+    return out in ("(no results)", "") or out.startswith("No results found")
+
+
+def _docs_once(args: dict, q: str) -> str:
     out = run(_qmd_cmd(args, q), cwd=KB, timeout=TIMEOUT_DOCS)
     if out == "(timed out)" and args.get("mode", "auto") == "auto":
         # cold start exceeded the budget — fall back to instant BM25 rather than returning nothing
         out = run(_qmd_cmd({**args, "mode": "lex"}, q), cwd=KB, timeout=TIMEOUT_GRAPH)
-        if out not in ("(timed out)", "(no results)"):
+        if out != "(timed out)" and not _empty(out):
             out = "[semantic search timed out — keyword (BM25) results below]\n\n" + out
-    return note + out
+    return out
 
 
 def search_code(args: dict) -> str:
@@ -320,4 +420,5 @@ def call_tool(name: str, args: dict) -> str:
 def version_info() -> dict:
     """Two axes, never merged: the repo release and the surface's contract."""
     return {"repo": VERSION, "api_contract": API_CONTRACT, "collection": COLLECTION,
+            "projects": list(PROJECTS), "session_projects": HOME_PROJECTS,
             "aliases": len(ALIASES)}

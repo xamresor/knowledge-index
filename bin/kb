@@ -52,7 +52,10 @@ PY
 stage_and_build() {
   local name="$1" code_csv="$2"
   local dest="$KB/repos/$name"
-  rm -rf "$dest"; mkdir -p "$dest"
+  # Keep repos/<name>/graphify-out/ between runs: its cache makes `graphify update` re-extract only
+  # changed files. Everything else (the staged sources) is re-copied; rsync -a keeps source mtimes.
+  mkdir -p "$dest"
+  find "$dest" -mindepth 1 -maxdepth 1 ! -name graphify-out -exec rm -rf {} +
   IFS=',' read -ra dirs <<< "$code_csv"
   for d in "${dirs[@]}"; do
     [ -d "$d" ] && rsync -a --exclude vendor --exclude node_modules --exclude storage \
@@ -214,29 +217,28 @@ build_kb() {
         -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/vendor/*' -print0 2>/dev/null \
         | xargs -0 -r "$PY" "$KB/bin/extract" --into "$DOCS_STAGE/$name" 2>&1 | sed 's/^/    /'
     fi
-    # Sanitize the staged copy to ASCII: qmd 0.3.2's chunker slices on byte offsets and
-    # panics on multibyte UTF-8 at a chunk boundary. Only this staged mirror is touched —
-    # the project's own docs are never modified.
-    "$PY" - "$DOCS_STAGE/$name" <<'PY'
-import sys, unicodedata, pathlib
-root = pathlib.Path(sys.argv[1])
-for p in root.rglob("*.md"):
-    s = p.read_text(encoding="utf-8", errors="ignore")
-    # decompose accents then drop anything outside ASCII (emoji, dashes, smart quotes)
-    clean = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
-    if clean != s:
-        p.write_text(clean, encoding="utf-8")
-PY
     echo "  [$name] staged $(find "$DOCS_STAGE/$name" -name '*.md' | wc -l) docs"
     staged=1
   done < <(read_projects)
   [ "$staged" = 1 ] || { echo "  (no docs configured)"; return; }
-  # point the single collection at the aggregated root; re-point only if it changed
-  local cur; cur="$(qmd collection show "$COLLECTION" 2>/dev/null | awk -F': *' '/Path:/{print $2; exit}')"
-  if [ "$cur" != "$DOCS_STAGE" ]; then
-    qmd collection remove "$COLLECTION" >/dev/null 2>&1 || true
-    qmd collection add "$DOCS_STAGE" --name "$COLLECTION" >/dev/null 2>&1 || true
-  fi
+  # One qmd collection per project ($COLLECTION-<project>), so a search can be scoped to one project
+  # and the rest of the network stays out of its results. Searching all projects = all collections.
+  # The pre-0.11 single aggregated collection "$COLLECTION" and collections of projects dropped from
+  # the config are removed here.
+  local want=() n
+  for n in "$DOCS_STAGE"/*/; do want+=("$COLLECTION-$(basename "$n")"); done
+  qmd collection remove "$COLLECTION" >/dev/null 2>&1 || true
+  while read -r n; do
+    [[ " ${want[*]} " == *" $n "* ]] || qmd collection remove "$n" >/dev/null 2>&1 || true
+  done < <(qmd collection list 2>/dev/null | awk -v p="$COLLECTION-" 'index($1,p)==1{print $1}')
+  for n in "$DOCS_STAGE"/*/; do
+    n="$(basename "$n")"
+    local cur; cur="$(qmd collection show "$COLLECTION-$n" 2>/dev/null | awk -F': *' '/Path:/{print $2; exit}' || true)"
+    if [ "$cur" != "$DOCS_STAGE/$n" ]; then
+      qmd collection remove "$COLLECTION-$n" >/dev/null 2>&1 || true
+      qmd collection add "$DOCS_STAGE/$n" --name "$COLLECTION-$n" >/dev/null 2>&1 || true
+    fi
+  done
   qmd update 2>/dev/null || true
   qmd_embed
   qmd status || true
@@ -252,7 +254,7 @@ case "${1:-build}" in
   build)  build_graph; build_kb ;;
   graph)  build_graph ;;
   kb)     build_kb ;;
-  update) build_graph; qmd update >/dev/null 2>&1 || true; qmd_embed; echo "refreshed" ;;
+  update) build_graph; build_kb >/dev/null; echo "refreshed" ;;
   qmd-backend) rm -f "$LOCAL_CFG"; unset QMD_BACKEND; echo "qmd backend set to: $(resolve_qmd_backend)" ;;
   label)  "$PY" "$KB/bin/label_namespaces.py" "$OUT/graph.json" "$OUT/.graphify_labels.json"
           graphify cluster-only "$KB" --no-label >/dev/null; echo "relabeled + report regenerated" ;;

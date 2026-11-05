@@ -82,6 +82,33 @@ class QmdCommandTest(unittest.TestCase):
         cmd = kb_core._qmd_cmd({"scope": "librarian"}, "q")
         self.assertIn("librarian", cmd)
 
+    def test_project_maps_to_its_collections(self):
+        old = (kb_core.PROJECTS, kb_core.DOC_PROJECTS, kb_core.HOME_PROJECTS)
+        try:
+            kb_core.PROJECTS = {"a": ["/x/a"], "b": ["/x/b"], "c": ["/x/c"]}
+            kb_core.DOC_PROJECTS = {"a", "b"}
+            kb_core.HOME_PROJECTS = []
+            cmd = kb_core._qmd_cmd({"project": "a,b"}, "q")
+            self.assertEqual(cmd.count("-c"), 2)
+            self.assertIn(f"{kb_core.COLLECTION}-a", cmd)
+            self.assertNotIn("-c", kb_core._qmd_cmd({"project": "all"}, "q"))
+            self.assertNotIn("-c", kb_core._qmd_cmd({}, "q"), "no home project = all")
+            with self.assertRaises(kb_core.ToolError):
+                kb_core._qmd_cmd({"project": "nope"}, "q")
+            with self.assertRaises(kb_core.ToolError):
+                kb_core._qmd_cmd({"project": "c"}, "q")   # code-only: no collection
+            kb_core.HOME_PROJECTS = ["b", "c"]
+            self.assertEqual(kb_core.resolve_collections({})[0], [f"{kb_core.COLLECTION}-b"])
+        finally:
+            kb_core.PROJECTS, kb_core.DOC_PROJECTS, kb_core.HOME_PROJECTS = old
+
+    def test_session_dir_picks_owning_projects(self):
+        p = {"api": ["/r/apps/api"], "web": ["/r/apps/web"], "other": ["/o"]}
+        self.assertEqual(kb_core.projects_for_dir("/r", p), ["api", "web"])
+        self.assertEqual(kb_core.projects_for_dir("/r/apps/web/src", p), ["web"])
+        self.assertEqual(kb_core.projects_for_dir("/", p), [], "parent of all = all")
+        self.assertEqual(kb_core.projects_for_dir("/elsewhere", p), [])
+
     def test_optional_flags_are_only_added_when_asked(self):
         plain = kb_core._qmd_cmd({}, "q")
         self.assertNotIn("-n", plain)

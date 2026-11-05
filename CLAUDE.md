@@ -8,7 +8,7 @@ backend can reach an external service):
 |---|---|---|
 | **Code connection graph** (incl. cross-repo API routes) | **graphify** | `graphify-out/graph.json` + `graph.html` + `GRAPH_REPORT.md` |
 | **Dashboard (graph + status)** | shell `web/` + data from `bin/render_viz.py` | `web/index.html` |
-| **Vectorized doc search** | **qmd** (MCP: `qmd`) | collection `kb` in `.qmd/` |
+| **Vectorized doc search** | **qmd** (MCP: `qmd`) | one collection per project, `kb-<project>`, in `.qmd/` |
 
 **`web/index.html`** is the primary visual: node **shape = type** (class=●, method=▲, db_table=■,
 template=★, controller=⬡, model=cylinder, interface/trait=◆, enum=▽) and node **color = domain**
@@ -35,7 +35,9 @@ route into the method's own usages. Communities are named by **namespace/domain*
 registered as the `kb` server in each consuming project's `.mcp.json`, so those project agents query
 the shared KB directly (restart the session to load it). Tools:
 `graph_query`, `graph_path`, `graph_explain`, `graph_affected` (over `graphify-out/graph.json`),
-and `docs_search`, `docs_get` (qmd `kb` collection). It wraps the `graphify`/`qmd` CLIs.
+and `docs_search`, `docs_get` (qmd `kb-<project>` collections). It wraps the `graphify`/`qmd` CLIs.
+`search` scopes docs to a project: `project: "renget-api"`, `"a,b"` or `"all"`; without it, the
+project(s) owning the session's directory, widening to all when they have no hit.
 
 ## How to answer questions
 
@@ -47,7 +49,7 @@ and `docs_search`, `docs_get` (qmd `kb` collection). It wraps the `graphify`/`qm
   - `graphify affected "<symbol>" --graph graphify-out/graph.json` — reverse impact.
   - Broad architecture → read `graphify-out/GRAPH_REPORT.md` or open `graphify-out/graph.html`.
 - **Docs / "where did we write about X"** → qmd MCP tools (`mcp__qmd__query` → `get` → answer with
-  citation), or CLI: `qmd query "<q>" -c kb` → `qmd get <path>`. Search by meaning, then
+  citation), or CLI (from this repo): `qmd query "<q>" -c kb-<project>` (repeat `-c`; none = all) → `qmd get <path>`. Search by meaning, then
   read the full doc before answering.
 
 ## Maintenance
