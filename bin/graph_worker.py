@@ -45,7 +45,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import access  # noqa: E402  (pure stdlib: filter_graph, strip_domains)
 
 MAX_FILES = int(os.environ.get("KB_GRAPH_CACHE_FILES", "2"))
-MAX_VIEWS = int(os.environ.get("KB_GRAPH_VIEWS", "4"))
+MAX_VIEWS = int(os.environ.get("KB_GRAPH_VIEWS", "8"))  # a project set takes 2: with and without domains
 
 _texts: "OrderedDict[str, tuple[tuple[float, int], str]]" = OrderedDict()  # path -> (ident, text)
 _parsed: dict[int, tuple[str, dict]] = {}                  # id(text) -> (text, parsed)
@@ -144,7 +144,10 @@ def node_link_graph(data, *args, **kwargs):
     hit = _graphs.get(key)
     if hit and hit[0] is nodes:
         return hit[1]
-    graph = _node_link_graph(data, *args, **kwargs)
+    # Each networkx graph gets its own `graph` attribute dict. node_link_graph keeps the one from the
+    # data, and views share it with the main graph; graphify caches its trigram index and IDF there,
+    # so one view's index answered another view's lookup (KeyError on a node it does not have).
+    graph = _node_link_graph({**data, "graph": dict(data.get("graph") or {})}, *args, **kwargs)
     _graphs[key] = (nodes, graph)
     return graph
 

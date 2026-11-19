@@ -470,7 +470,7 @@ of the token; the token is never logged.
 | `KB_CONTRACT_EDGES` | `1` | `0` hides other repos' endpoints of `http_request` edges |
 | `KB_USAGE_FILE` | `<data>/logs/usage.json` | tool usage counters (`kb-http usage` prints them with user names; the MCP tool `usage` without) |
 | `KB_WARM` | `1` | `0` = no long-lived graphify / qmd: one process per call, as before |
-| `KB_GRAPH_CACHE_FILES` / `KB_GRAPH_VIEWS` | `2` / `4` | graph files the graphify worker keeps parsed / caller project sets it keeps cut in memory |
+| `KB_GRAPH_CACHE_FILES` / `KB_GRAPH_VIEWS` | `2` / `8` | graph files the graphify worker keeps parsed / views it keeps cut in memory (two per caller project set) |
 | `KB_OAUTH` | `on` | `off` = no browser sign-in, bearer tokens only |
 | `KB_LOGIN_ENV` | `<data>/kb-login.env`, then `<data>/deploy/kb-login.env` | where the sign-in finds `KB_LOGIN_API` and the login paths |
 | `KB_OAUTH_TOKEN_TTL` | `28800` | `expires_in` reported to the client (the API decides the real lifetime) |
@@ -479,7 +479,7 @@ of the token; the token is never logged.
 with the graph already parsed (`bin/graph_worker.py`), and `qmd mcp` with the embedding model loaded.
 On a 23k-node graph a graph lookup drops from 1-6 s to a few milliseconds, a code search from ~6 s to
 0.1 s and a docs search from 4-7 s to 0.2 s. The first call for a caller's project set cuts that view from the
-parsed graph in memory (~0.1-0.5 s). A helper that fails or is missing falls back to the old one-process-per-call path.
+parsed graph in memory (~0.3-1.6 s on that graph; then milliseconds). A helper that fails or is missing falls back to the old one-process-per-call path.
 
 **Browser sign-in (MCP OAuth).** With `KB_LOGIN_API` and the login paths set, an MCP client signs in
 by itself: a 401 points it to `/.well-known/oauth-protected-resource`, it registers (dynamic client

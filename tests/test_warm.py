@@ -123,6 +123,12 @@ class RealGraphWorker(unittest.TestCase):
             self.assertNotIn("Secret", got)
         full = self.worker.run(["explain", "Svc", "--graph", self.graph])
         self.assertIn("Secret", full)  # the same worker still answers the unfiltered graph
+        # views must not share graphify's per-graph caches (its trigram index lives in G.graph)
+        for view in ({"allowed": ["admin", "api"]}, {"allowed": ["api"], "routes": True}, None,
+                     {"allowed": ["api"]}):
+            for argv in (["query", "Svc calls"], ["path", "Ctl", "Svc"], ["explain", "Auth"]):
+                out = self.worker.run([*argv, "--graph", self.graph], view)
+                self.assertNotIn("graph worker error", out, (argv, view))
 
     def test_only_lookup_commands(self):
         self.assertIn("not allowed", self.worker.run(["update", "/tmp"]))
