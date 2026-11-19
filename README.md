@@ -12,6 +12,8 @@ service.
 > **Using it on your own codebase?** It started on one Laravel API with Vue frontends, so other stacks will hit
 > rough edges. Fixes, new language plugins and pull requests are very welcome: open an issue or a PR.
 
+How to write project docs that the KB links to the code: [docs/documentation-guide.md](docs/documentation-guide.md).
+
 Built on two existing tools: [**graphify**](https://github.com/Graphify-Labs/graphify) (AST code graph)
 and [**qmd**](https://github.com/tobi/qmd) (on-device markdown vector search).
 

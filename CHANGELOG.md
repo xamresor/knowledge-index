@@ -14,6 +14,9 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+- **Docs: `docs/documentation-guide.md`** — how to write and keep project docs so the graph links them to
+  the code (domains, heads, plans apart, contract docs, links and names in backticks, checks with the KB).
+
 - **Added: local MCP over HTTP and local admin pages in `kb-api`** (`make serve`): `POST /mcp` speaks
   MCP JSON-RPC, `/admin` shows the status, index charts and the rebuild button without sign-in, only
   without a token on loopback; forms carry a per-process token and a cross-site `Origin` is refused.
