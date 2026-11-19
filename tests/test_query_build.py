@@ -7,7 +7,7 @@ MRR 0.59) — without patching qmd.
 
 The behaviours locked here are the ones that would silently undo that: stop words creeping back in
 (each surviving term is its own sub-query, so a stop word is its own noise source), compound tokens
-being split (`doc-search`, `renget-api` are the most discriminative words in the corpus), and a
+being split (`doc-search`, `shop-api` are the most discriminative words in the corpus), and a
 caller's hand-written query document being rewritten.
 """
 from __future__ import annotations
@@ -29,7 +29,7 @@ class TermsTest(unittest.TestCase):
         """Splitting these would throw away the words that actually discriminate."""
         for query, expected in [
             ("порт doc-search", ["порт", "doc-search"]),
-            ("репозиторий renget-api", ["репозиторий", "renget-api"]),
+            ("репозиторий shop-api", ["репозиторий", "shop-api"]),
             ("где graph.json", ["graph.json"]),
             ("в /srv/oldname лежит", ["srv/oldname", "лежит"]),
         ]:

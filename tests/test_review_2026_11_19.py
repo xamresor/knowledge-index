@@ -109,8 +109,8 @@ class SearchHint(unittest.TestCase):
         self.assertEqual(kb_core._budget({"budget": 10}), 300)
 
     def test_instructions_name_the_tools(self):
-        text = kb_core.instructions(["api", "bo2"])
-        for word in ("contracts_search", "graph_affected", "in_domain", "INFERRED", "api, bo2"):
+        text = kb_core.instructions(["api", "shop-web"])
+        for word in ("contracts_search", "graph_affected", "in_domain", "INFERRED", "api, shop-web"):
             self.assertIn(word, text)
 
 

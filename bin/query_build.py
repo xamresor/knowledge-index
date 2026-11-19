@@ -57,7 +57,7 @@ EN_STOP = {
 }
 STOP = RU_STOP | EN_STOP
 
-# Tokens keep dots, slashes and hyphens: `doc-search`, `renget-api`, `/srv/oldname`, `graph.json`
+# Tokens keep dots, slashes and hyphens: `doc-search`, `shop-api`, `/srv/oldname`, `graph.json`
 # are single terms, and splitting them would destroy the most discriminative words in the corpus.
 TOKEN = re.compile(r"[\w\-./]{2,}", re.UNICODE)
 

@@ -76,7 +76,7 @@ What is sent, which route, which auth, what comes back, who owns which side.
 ```
 
 `connections` lists them as the service map; `problems` reports a connection the code shows but no
-contract doc describes (for example `bo2 -> sw-api`), and a contract doc with missing fields. Write
+contract doc describes (for example `shop-web -> billing-api`), and a contract doc with missing fields. Write
 one when you add an outgoing call to another service.
 
 ## 5. Link and name things so the graph can follow

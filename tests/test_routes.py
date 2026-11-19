@@ -25,26 +25,26 @@ def fixture() -> dict:
 
     nodes = [n("api::Customer", "api", "model"), n("api::CustomerController.index()", "api", "method"),
              n("api::BridgeController.clients()", "api", "method"),
-             n("sw-api::HomeApiClient.clients()", "sw-api", "method"),
-             n("sw-api::TicketController", "sw-api", "controller"),
-             n("bo2::Clients.vue", "bo2", "template"),
+             n("billing-api::HomeApiClient.clients()", "billing-api", "method"),
+             n("billing-api::TicketController", "billing-api", "controller"),
+             n("shop-web::Clients.vue", "shop-web", "template"),
              n("api::Illuminate\\Response", "api", "class", src=False),
              n("admin::Secret", "admin"),
              n("domain::Customer", "domain", "domain")]
     links = [e("api::CustomerController.index()", "api::Customer", "references"),
-             e("bo2::Clients.vue", "api::CustomerController.index()", "http_request",
+             e("shop-web::Clients.vue", "api::CustomerController.index()", "http_request",
                http_method="GET", http_uri="v2/customers"),
              e("api::BridgeController.clients()", "api::Customer", "calls"),
-             e("sw-api::HomeApiClient.clients()", "api::BridgeController.clients()", "http_request",
+             e("billing-api::HomeApiClient.clients()", "api::BridgeController.clients()", "http_request",
                http_method="GET", http_uri="v1/sw-bridge/clients"),
-             e("sw-api::TicketController", "sw-api::HomeApiClient.clients()", "calls"),
+             e("billing-api::TicketController", "billing-api::HomeApiClient.clients()", "calls"),
              # shortcuts that must lose: a framework hub and the domain grouping
              e("api::Customer", "api::Illuminate\\Response", "references"),
-             e("sw-api::TicketController", "api::Illuminate\\Response", "references"),
+             e("billing-api::TicketController", "api::Illuminate\\Response", "references"),
              e("api::Customer", "domain::Customer", "in_domain"),
-             e("sw-api::TicketController", "domain::Customer", "in_domain"),
+             e("billing-api::TicketController", "domain::Customer", "in_domain"),
              e("admin::Secret", "api::Customer", "calls"),
-             e("admin::Secret", "sw-api::TicketController", "calls")]
+             e("admin::Secret", "billing-api::TicketController", "calls")]
     return {"directed": True, "multigraph": False, "graph": {}, "nodes": nodes, "links": links,
             "hyperedges": []}
 
@@ -58,7 +58,7 @@ class GraphRoutes(unittest.TestCase):
         with open(path, "w") as f:
             json.dump(fixture(), f)
         for target, name, value in ((kb_core, "GRAPH", path),
-                                    (kb_core, "PROJECTS", {"api": [], "sw-api": [], "bo2": [], "admin": []}),
+                                    (kb_core, "PROJECTS", {"api": [], "billing-api": [], "shop-web": [], "admin": []}),
                                     (warm, "ENABLED", False)):  # the one-shot path; the worker runs the same code
             p = mock.patch.object(target, name, value)
             p.start()
@@ -66,7 +66,7 @@ class GraphRoutes(unittest.TestCase):
 
     def test_real_chain_with_its_route_beats_the_shortcuts(self):
         out = kb_core.call_tool("graph_routes", {"from": "api:Customer", "to": "TicketController"},
-                                {"api", "sw-api", "bo2"})
+                                {"api", "billing-api", "shop-web"})
         first = out.split("Path 2")[0]
         self.assertIn("GET v1/sw-bridge/clients", first)
         self.assertIn("HomeApiClient.clients()", first)
@@ -75,7 +75,7 @@ class GraphRoutes(unittest.TestCase):
 
     def test_hidden_project_never_appears(self):
         out = kb_core.call_tool("graph_routes", {"from": "Customer", "to": "TicketController"},
-                                {"api", "sw-api", "bo2"})
+                                {"api", "billing-api", "shop-web"})
         self.assertNotIn("Secret", out)
         with self.assertRaises(kb_core.ToolError):
             kb_core.call_tool("graph_routes", {"from": "admin:Secret", "to": "Customer"}, {"api"})

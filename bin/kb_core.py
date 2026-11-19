@@ -118,8 +118,8 @@ def _has_docs(name: str, cfg=None) -> bool:
 def projects_for_dir(cwd: str, projects: dict[str, list[str]]) -> list[str]:
     """Projects that own `cwd`: one of their roots is inside it, or it is inside one of their roots.
 
-    /private/projects/rentget -> renget-api, renget-web, renget-knowledge (all live under it);
-    /private/projects/rentget/apps/web/src -> renget-web. A dir that owns nothing (or the shared
+    /srv/shop -> shop-api, shop-web, shop-docs (all live under it);
+    /srv/shop/apps/web/src -> shop-web. A dir that owns nothing (or the shared
     parent of every project) -> [], meaning: search everything."""
     cwd = os.path.normpath(cwd)
     def inside(a, b):
@@ -365,7 +365,7 @@ TOOLS = [
                     "routes each way crosses (frontend -> route -> controller, backend -> another "
                     "service). Calls and requests are cheap, imports dearer, busy hub classes dearest, "
                     "so a path reads like a real chain, not a shortcut through a framework class. Pin a "
-                    "project as 'api:Customer', 'sw-api:TicketController'.",
+                    "project as 'api:Customer', 'billing-api:TicketController'.",
      "inputSchema": {"type": "object", "properties": {
          "from": {"type": "string"}, "to": {"type": "string"},
          "k": {"type": "integer", "description": "how many different ways (default 3, max 6)"},

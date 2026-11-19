@@ -38,7 +38,7 @@ the shared KB directly (restart the session to load it). Tools:
 `graphify-out/graph.json`), `docs_get` (qmd `kb-<project>` collections), plus `contracts_search`, `connections`,
 `problems` (indexes built by `bin/contracts.py`). It wraps the `graphify`/`qmd` CLIs. A shared HTTP
 variant for a team, `bin/kb-http`, is off unless `KB_SERVER=on` (README, "Shared server").
-`search` scopes docs to a project: `project: "renget-api"`, `"a,b"` or `"all"`; without it, the
+`search` scopes docs to a project: `project: "shop-api"`, `"a,b"` or `"all"`; without it, the
 project(s) owning the session's directory, widening to all when they have no hit.
 
 ## How to answer questions

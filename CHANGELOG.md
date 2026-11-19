@@ -216,7 +216,7 @@ several-way path search. **Breaking:** tool contract 2 — `docs_search` and `gr
   badly (a row separated from its header is close to meaningless), which is a chunking fix — repeat the
   header per row-group, or project rows into records. Measured, unfixed. Not the parsers' job.
 
-- **Three surfaces, split by consumer** (framing fixed by Romans 2026-07-26 — the reason each exists,
+- **Three surfaces, split by consumer** (framing fixed 2026-07-26 — the reason each exists,
   which decides what each may require):
 
   | Surface | Consumer | Job | Requires |
@@ -338,9 +338,8 @@ partial graph**: the worst failure mode here, because nothing looks broken and e
 ## [0.8.0] — 2026-07-27
 
 **Non-markdown documents can be indexed, one plugin per format.** Reversing the non-goal written a few
-hours earlier the same day (Romans: «давай разберёмся с таблицами и сканами и pdf… можем сделать на
-каждый parsing свой файл/plugin чтобы не мешать в кучу»). The scope is deliberately narrower than
-"multimodality": **text extraction** through external CLIs, not layout reconstruction.
+hours earlier the same day: tables, scans and PDFs, one file or plugin per parser so they do not mix. The
+scope is deliberately narrower than "multimodality": **text extraction** through external CLIs, not layout reconstruction.
 
 The trigger was concrete: two ConnectPay PDFs sit in a corpus and were **invisible to search**, because
 the doc index only matches `**/*.md`. `pdftotext -layout` pulls 17k and 31k characters out of them.
@@ -459,7 +458,7 @@ else's fast-moving tool, and nothing that a `qmd` upgrade silently reverts.
 
 ### Added
 - **`bin/query_build.py`** — the query document builder: content-word extraction, stop words for
-  Russian and English, compound tokens kept whole (`doc-search`, `renget-api`, `graph.json`,
+  Russian and English, compound tokens kept whole (`doc-search`, `shop-api`, `graph.json`,
   `/srv/oldname` are the corpus's most discriminative words and splitting them destroys them), a cap
   of 12 terms, and a hand-written query document passed through untouched.
 - **`bin/install` + `make install` / `make check`** — first-run setup: verifies python ≥ 3.11

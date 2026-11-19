@@ -194,7 +194,7 @@ Restart the agent session to load it. It exposes `search`, `graph_routes`, `grap
 `graph_affected`, `docs_get`, `contracts_search`, `connections`, `problems`, `batch`, `run_code`, `version`.
 
 `graph_routes` gives several ways from one place to another with the HTTP routes on the way
-(`from: "bo2:Drivers.vue", to: "api:ObjectDriver"`). Every tool but `version` takes `page` and
+(`from: "shop-web:OrdersView.vue", to: "api:Order"`). Every tool but `version` takes `page` and
 `page_length`; a long answer ends with a `cursor` that serves its next pages for 10 minutes without
 running the query again.
 
