@@ -222,6 +222,19 @@ class Server:
         sep = "&" if "?" in txn["redirect_uri"] else "?"
         return txn["redirect_uri"] + sep + urllib.parse.urlencode(query)
 
+    def revoke(self, client_id: str) -> bool:
+        """Forget a client and its refresh tokens (admin page). False when there is no such client."""
+        with self.lock:
+            if client_id not in self.clients:
+                return False
+            del self.clients[client_id]
+            for rt in [rt for rt, v in self.refresh.items() if v["client_id"] == client_id]:
+                del self.refresh[rt]
+            for code in [c for c, v in self.codes.items() if v["client_id"] == client_id]:
+                del self.codes[code]
+            self._save_clients()
+        return True
+
     # ------------------------------------------------------------------ token
     def token(self, form: dict) -> dict:
         grant = form.get("grant_type")

@@ -312,6 +312,8 @@ def instructions(projects: list[str] | None = None) -> str:
         "Code knowledge base over several repos (a Laravel API and its frontends). " + seen +
         "Which tool: an endpoint and who calls it -> contracts_search (fast, the best first step); "
         "one symbol and its neighbours -> graph_explain; what breaks if X changes -> graph_affected; "
+        "several independent lookups -> batch; a lookup that needs the answer of another, or a "
+        "filter over a long answer -> run_code (a small JavaScript program calling kb(tool, args)); "
         "how A reaches B -> graph_routes (several ways, with the routes they cross) or graph_path (one shortest); a free question -> search (domain docs, code or both). "
         "Trust: edges marked EXTRACTED come from the syntax; INFERRED ones (http_request, eloquent, "
         "doc mentions) are matched by name and can be wrong. in_domain only groups a symbol with its "
@@ -320,6 +322,12 @@ def instructions(projects: list[str] | None = None) -> str:
 
 
 # --- tool schemas -------------------------------------------------------------------------------
+BATCH_MAX = int(os.environ.get("KB_BATCH_MAX", "10"))
+RUN_CALLS = int(os.environ.get("KB_RUN_CALLS", "30"))
+RUN_SECONDS = int(os.environ.get("KB_RUN_SECONDS", "20"))
+SANDBOX = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sandbox")
+NOT_IN_BATCH = {"batch", "run_code"}
+
 # One list, published by both adapters.
 TOOLS = [
     {"name": "search",
@@ -363,6 +371,34 @@ TOOLS = [
          "k": {"type": "integer", "description": "how many different ways (default 3, max 6)"},
          "project": {"type": "string", "description": "limit to these project(s): a name, several comma-separated, or 'all'. Default: all the caller may see"}},
                      "required": ["from", "to"]}},
+    {"name": "batch",
+     "description": "Several tool calls in one request, answered together in order: each call is "
+                    "{tool, args}, as if called on its own, with the same access. Use it when the next "
+                    "calls do not depend on each other's answers (look up three symbols, a route and its "
+                    f"docs at once). At most {BATCH_MAX} calls; `batch` cannot hold `batch`.",
+     "inputSchema": {"type": "object", "properties": {
+         "calls": {"type": "array", "description": f"1-{BATCH_MAX} calls: [{{\"tool\": \"graph_explain\", "
+                                                   "\"args\": {\"symbol\": \"Customer\"}}}, …]",
+                   "items": {"type": "object", "properties": {
+                       "tool": {"type": "string"}, "args": {"type": "object"}},
+                       "required": ["tool"]}}},
+                     "required": ["calls"]}},
+    {"name": "run_code",
+     "description": "Run a short TypeScript (or JavaScript) program that calls the other tools and returns "
+                    "only what you need, in one request: loops, filters, joins of several answers. The "
+                    "program is a function body with these globals: `declare function kb(tool: "
+                    "'search'|'graph_routes'|'graph_path'|'graph_explain'|'graph_affected'|'docs_get'|"
+                    "'contracts_search'|'connections'|'problems'|'version', args?: Record<string, unknown>): "
+                    "string` (the tool's text answer, same arguments as the tool; throws on an error) and "
+                    "`declare function print(...values: unknown[]): void`; `return` gives the result. Types "
+                    "are stripped (no enums or namespaces). The program runs in a sandbox (QuickJS in "
+                    "WebAssembly): no network, no files, "
+                    f"no timers; at most {RUN_CALLS} kb() calls and {RUN_SECONDS} s. The tools answer with "
+                    "your own access. Example: `const r = kb('contracts_search', {query: 'drivers'}); "
+                    "return r.split('\\n').filter(l => l.startsWith('GET')).join('\\n')`",
+     "inputSchema": {"type": "object", "properties": {
+         "code": {"type": "string", "description": "the body of a function: use `return` for the result"}},
+                     "required": ["code"]}},
     {"name": "graph_explain",
      "description": "Explain a symbol: its node, neighbours and relation types (calls, eloquent, fk, "
                     "sql, http_request, …).",
@@ -854,6 +890,13 @@ def call_tool(name: str, args: dict, allowed: set[str] | None = None, caller: st
     if length is not None and not PAGE_MIN <= length <= PAGE_MAX:
         raise ToolError(f"{name}: 'page_length' must be {PAGE_MIN}-{PAGE_MAX}")
     cursor = args.pop("cursor", None)
+    if name in ("batch", "run_code") and not cursor:
+        text = (batch(args["calls"], allowed, caller) if name == "batch"
+                else run_code(args["code"], allowed, caller))
+        first = paginate(text, page, length)
+        if "[page " not in first:
+            return first
+        return paginate(text, page, length, CURSORS.put(text, name, (caller, frozenset(allowed) if allowed is not None else None)))
     if name in UNPAGED:
         return _dispatch(name, args, allowed)
     owner = (caller, frozenset(allowed) if allowed is not None else None)
@@ -950,6 +993,97 @@ def paginate(text: str, page: int, size: int | None = None, cursor: str | None =
     else:
         nav += "]"
     return head + pages[page - 1] + nav
+
+
+def run_code(code: str, allowed: set[str] | None, caller: str | None) -> str:
+    """An agent's program in the sandbox (sandbox/runner.mjs): QuickJS in WebAssembly, inside a Node
+    process with the permission model on (read access to the sandbox folder only: no network, no
+    child processes, no workers, no writes). Each kb() call comes back here and runs through
+    call_tool with the caller's own rights; run_code and batch cannot be called from inside."""
+    import resource
+    import select
+
+    if not os.path.isdir(os.path.join(SANDBOX, "node_modules", "quickjs-emscripten")):
+        raise ToolError("run_code is not installed on this server (npm ci in sandbox/)")
+    if len(code) > 20_000:
+        raise ToolError("run_code: the program is longer than 20000 characters")
+
+    def limits():  # the Node process itself: CPU seconds and open files
+        resource.setrlimit(resource.RLIMIT_CPU, (RUN_SECONDS + 10, RUN_SECONDS + 10))
+        resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
+
+    proc = subprocess.Popen(
+        ["node", "--permission", f"--allow-fs-read={SANDBOX}", os.path.join(SANDBOX, "runner.mjs")],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=SANDBOX,
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "NODE_OPTIONS": ""}, preexec_fn=limits)
+    deadline = time.monotonic() + RUN_SECONDS + 15  # the script's own deadline + tool time
+    try:
+        assert proc.stdin and proc.stdout
+        proc.stdin.write(json.dumps({"code": code, "deadline_ms": RUN_SECONDS * 1000,
+                                     "max_calls": RUN_CALLS, "memory_mb": 64}) + "\n")
+        proc.stdin.flush()
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0 or not select.select([proc.stdout], [], [], left)[0]:
+                raise ToolError(f"run_code: stopped after {RUN_SECONDS + 15} s")
+            line = proc.stdout.readline()
+            if not line:
+                err = (proc.stderr.read() if proc.stderr else "")[-400:]
+                raise ToolError(f"run_code: the sandbox stopped ({err.strip() or 'no message'})")
+            msg = json.loads(line)
+            if msg.get("done"):
+                break
+            tool, args = str(msg.get("call", "")), msg.get("args") or {}
+            if tool in NOT_IN_BATCH:
+                reply = {"error": f"'{tool}' cannot be called from run_code"}
+            else:
+                try:
+                    reply = {"result": call_tool(tool, dict(args), allowed, caller)}
+                except ToolError as e:
+                    reply = {"error": str(e)}
+            proc.stdin.write(json.dumps(reply) + "\n")
+            proc.stdin.flush()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=5)
+        for pipe in (proc.stdin, proc.stdout, proc.stderr):
+            if pipe:
+                pipe.close()
+    parts = []
+    if msg.get("output"):
+        parts.append(msg["output"].rstrip())
+    if msg.get("error"):
+        parts.append(f"(error: {msg['error']})")
+    value = msg.get("value")
+    if value is not None:
+        parts.append(value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2))
+    parts.append(f"[run_code: {msg.get('calls', 0)} kb() call(s)]")
+    return "\n\n".join(parts)
+
+
+def batch(calls: list, allowed: set[str] | None, caller: str | None) -> str:
+    """Each call through call_tool with the caller's own rights, side by side; one failing call is
+    reported in its place and does not stop the others."""
+    if not 1 <= len(calls) <= BATCH_MAX:
+        raise ToolError(f"batch: 1-{BATCH_MAX} calls")
+    for c in calls:
+        if not isinstance(c, dict) or not isinstance(c.get("tool"), str):
+            raise ToolError("batch: every call is {tool, args}")
+        if c["tool"] in NOT_IN_BATCH:
+            raise ToolError(f"batch: '{c['tool']}' cannot be inside a batch")
+        if not isinstance(c.get("args", {}), dict):
+            raise ToolError("batch: args must be an object")
+
+    def one(c: dict) -> str:
+        try:
+            return call_tool(c["tool"], dict(c.get("args") or {}), allowed, caller)
+        except ToolError as e:
+            return f"(error: {e})"
+    with ThreadPoolExecutor(max_workers=min(4, len(calls))) as pool:
+        answers = list(pool.map(one, calls))
+    return "\n\n".join(f"=== [{i}] {c['tool']} {json.dumps(c.get('args') or {}, ensure_ascii=False)} ===\n{a}"
+                         for i, (c, a) in enumerate(zip(calls, answers), 1))
 
 
 def _dispatch(name: str, args: dict, allowed: set[str] | None) -> str:

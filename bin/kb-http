@@ -53,6 +53,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import admin  # noqa: E402
 import kb_core  # noqa: E402
 import oauth  # noqa: E402
 import warm  # noqa: E402
@@ -371,6 +372,9 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "kb-http/1.0"
     protocol_version = "HTTP/1.1"
     auth: Authenticator  # set on the subclass by make_server()
+    admins: set = set()
+    sessions = admin.Sessions()
+    logins = admin.Logins()
     oauth: "oauth.Server | None" = None
 
     def log_message(self, fmt: str, *args) -> None:  # request line only, never headers
@@ -458,8 +462,120 @@ class Handler(BaseHTTPRequestHandler):
     def _oauth_error(self, e: "oauth.OAuthError") -> None:
         self._send(e.status, {"error": e.error, "error_description": e.description})
 
+    # ------------------------------------------------------------------ admin (bin/admin.py)
+    def _cookie(self) -> str | None:
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == admin.COOKIE:
+                return v
+        return None
+
+    def _set_cookie(self, sid: str, max_age: int) -> dict:
+        secure = "; Secure" if (self.headers.get("X-Forwarded-Proto") or "") == "https" else ""
+        prefix = (self.headers.get("X-Forwarded-Prefix") or "").rstrip("/")
+        return {"Set-Cookie": f"{admin.COOKIE}={sid}; Path={prefix}/admin; HttpOnly; "
+                              f"SameSite=Strict; Max-Age={max_age}{secure}"}
+
+    def _admin(self, method: str, path: str) -> None:
+        if not self.admins or self.oauth is None:
+            self._send(404, {"error": "not found"})
+            return
+        base = self._base()
+        sid = self._cookie()
+        session = self.sessions.get(sid)
+        if path == "/admin/login":
+            if method == "GET":
+                self._send_page(200, admin.login_page(base))
+                return
+            self._admin_login(base)
+            return
+        if session is None:
+            self._redirect(f"{base}/admin/login")
+            return
+        if method == "POST":
+            form = self._form() or {}
+            if not secrets_compare(str(form.get("csrf", "")), session["csrf"]):
+                self._send_page(403, admin.page("KB admin", "<main><section>Form expired: reload the page.</section></main>"))
+                return
+            if path == "/admin/logout":
+                self.sessions.drop(sid)
+                self.send_response(302)
+                for k, v in {**self._set_cookie("", 0), "Location": f"{base}/admin/login"}.items():
+                    self.send_header(k, v)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if path == "/admin/rebuild":
+                log(f"admin: rebuild by {admin_name(session['user'])}")
+                self._send_page(200, admin.status_page(base, session["csrf"], admin.status(self.oauth),
+                                                       session["user"], admin.rebuild()))
+                return
+            if path == "/admin/clients/revoke":
+                cid = str(form.get("client_id", ""))
+                note = "Revoked." if self.oauth.revoke(cid) else "No such client."
+                log(f"admin: revoke {cid[:12]} by {admin_name(session['user'])}")
+                self._send_page(200, admin.clients_page(base, session["csrf"], self.oauth.clients, note))
+                return
+            self._send(404, {"error": "not found"})
+            return
+        if path == "/admin":
+            self._send_page(200, admin.status_page(base, session["csrf"], admin.status(self.oauth), session["user"]))
+        elif path == "/admin/usage":
+            report = USAGE.report(with_users=True) if USAGE else "(usage counting is off)"
+            self._send_page(200, admin.usage_page(base, session["csrf"], report))
+        elif path == "/admin/clients":
+            self._send_page(200, admin.clients_page(base, session["csrf"], self.oauth.clients))
+        elif path == "/admin/index":
+            self._send_page(200, admin.index_page(base, session["csrf"], USAGE))
+        else:
+            self._send(404, {"error": "not found"})
+
+    def _admin_login(self, base: str) -> None:
+        form = self._form() or {}
+        env = self.oauth.env
+        p, h = oauth.kb_login._paths(env), oauth.kb_login._extra_headers(env)
+        try:
+            if form.get("lid"):
+                challenge = self.logins.take(str(form["lid"]))
+                if not challenge:
+                    self._send_page(200, admin.login_page(base, error="The sign-in took too long: start again."))
+                    return
+                code = str(form.get("code", "")).strip()
+                body = {"challenge": challenge, ("code" if code.isdigit() and len(code) == 6 else "recovery_code"): code}
+                data = oauth.kb_login.post(env["KB_LOGIN_API"], p["2fa"], body, headers=h).get("data") or {}
+            else:
+                data = oauth.kb_login.post(env["KB_LOGIN_API"], p["login"],
+                                           {"username": str(form.get("username", "")),
+                                            "password": str(form.get("password", ""))}, headers=h).get("data") or {}
+                tf = data.get("two_factor") or {}
+                if tf.get("challenge"):
+                    self._send_page(200, admin.login_page(base, "code", self.logins.put(tf["challenge"])))
+                    return
+            token = data.get("token")
+            if not token:
+                raise oauth.kb_login.LoginError("the API answered without a token")
+            ident = self.auth.check(f"Bearer {token}")
+        except (oauth.kb_login.LoginError, AuthError) as e:
+            log(f"admin: sign-in refused: {str(e)[:120]}")
+            self._send_page(200, admin.login_page(base, error=str(e)))
+            return
+        if not admin.is_admin(ident.user, self.admins):
+            log(f"admin: {admin_name(ident.user)} is not an admin")
+            self._send_page(403, admin.login_page(base, error="This account is not a KB admin."))
+            return
+        sid = self.sessions.create(ident.user, token)
+        log(f"admin: signed in {admin_name(ident.user)}")
+        self.send_response(302)
+        for k, v in {**self._set_cookie(sid, admin.SESSION_TTL), "Location": f"{base}/admin"}.items():
+            self.send_header(k, v)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_GET(self) -> None:  # noqa: N802
         path, _, qs = self.path.partition("?")
+        if path == "/admin" or path.startswith("/admin/"):
+            self._admin("GET", path.rstrip("/") or "/admin")
+            return
         srv = self.oauth
         if srv is None:
             self._not_allowed()
@@ -520,6 +636,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?")[0]
+        if path == "/admin" or path.startswith("/admin/"):
+            self._admin("POST", path.rstrip("/"))
+            return
         if self.oauth is not None and path in ("/register", "/token", "/authorize"):
             self._oauth_post(path)
             return
@@ -560,8 +679,18 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, rpc_error(None, -32600, "invalid request"))
 
 
+def secrets_compare(a: str, b: str) -> bool:
+    import hmac
+    return hmac.compare_digest(a.encode(), b.encode())
+
+
+def admin_name(user: dict) -> str:
+    return next((str(user[k]) for k in admin.ID_FIELDS if user.get(k)), "?")
+
+
 def make_server(host: str = HOST, port: int = PORT, auth: Authenticator | None = None,
-                usage: Usage | None = None, oauth_env: dict | None = None) -> ThreadingHTTPServer:
+                usage: Usage | None = None, oauth_env: dict | None = None,
+                admins: set | None = None) -> ThreadingHTTPServer:
     global USAGE
     USAGE = usage
     auth = auth or Authenticator()
@@ -572,7 +701,9 @@ def make_server(host: str = HOST, port: int = PORT, auth: Authenticator | None =
 
     srv_oauth = oauth.Server(env, check, os.path.join(kb_core.KB, "logs", "oauth-clients.json")) \
         if env else None
-    handler = type("KbHandler", (Handler,), {"auth": auth, "oauth": srv_oauth})
+    handler = type("KbHandler", (Handler,), {"auth": auth, "oauth": srv_oauth,
+                                              "admins": admin.admins() if admins is None else admins,
+                                              "sessions": admin.Sessions(), "logins": admin.Logins()})
     srv = ThreadingHTTPServer((host, port), handler)
     srv.daemon_threads = True
     return srv

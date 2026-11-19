@@ -14,6 +14,22 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-11-19
+
+- **Added: `batch`** — up to 10 tool calls in one request, each with the caller's own rights; one failing
+  call is reported in its place.
+- **Added: `run_code`** — an agent's JavaScript program that calls the tools through `kb(tool, args)` and
+  returns only what it needs. Two walls: QuickJS compiled to WebAssembly (no `require`, `process`,
+  network, files or timers; 64 MB, a 20 s deadline, 30 calls), inside a Node process with the permission
+  model on (read access to `sandbox/` only, no network, no child processes, no writes), plus CPU and
+  open-file limits. `run_code` and `batch` cannot be called from inside. Needs `npm ci` in `sandbox/`
+  (`quickjs-emscripten` 0.32.0, pinned by the lock file). The program may be TypeScript: Node strips the
+  types before QuickJS runs it, and the tool description declares `kb()` and `print()` with types.
+- **Added: admin pages at `/admin`** for the users in `KB_ADMINS` or `<data>/admins.txt`: status with a
+  rebuild button, an index page with charts (graph make-up, storage, documents and chunks per project,
+  build times, answer time per tool, calls per day), usage, and sign-in clients with revoke. API login
+  with its second factor, an HttpOnly SameSite=Strict session cookie, CSRF tokens; no scripts.
+
 ## [0.11.0] — 2026-11-19
 
 The first outside users on a shared server (a developer team): browser sign-in, speed, paging and

@@ -189,12 +189,19 @@ zero-dependency stdio server (use the absolute path to this checkout):
 ```
 
 Restart the agent session to load it. It exposes `search`, `graph_routes`, `graph_path`, `graph_explain`,
-`graph_affected`, `docs_get`, `contracts_search`, `connections`, `problems`, `version`.
+`graph_affected`, `docs_get`, `contracts_search`, `connections`, `problems`, `batch`, `run_code`, `version`.
 
 `graph_routes` gives several ways from one place to another with the HTTP routes on the way
 (`from: "bo2:Drivers.vue", to: "api:ObjectDriver"`). Every tool but `version` takes `page` and
 `page_length`; a long answer ends with a `cursor` that serves its next pages for 10 minutes without
-running the query again. (This repo's own `.mcp.json` only registers `qmd`,
+running the query again.
+
+`batch` runs up to 10 calls in one request. `run_code` runs a short JavaScript program that calls the tools
+through `kb(tool, args)` and returns only what it needs (a filter over a long answer, a lookup that needs
+another's result). The program runs in QuickJS compiled to WebAssembly, inside a Node process started with
+the permission model (`--permission`, read access to `sandbox/` only): no network, no files, no child
+processes, at most 30 tool calls and 20 s. Install it once with `npm ci` in `sandbox/`; without it the
+tool answers that it is not installed. (This repo's own `.mcp.json` only registers `qmd`,
 which `kb-mcp` calls internally — projects do **not** need the `qmd` entry.)
 
 ### 2. The `kb` skill
@@ -489,6 +496,14 @@ with the graph already parsed (`bin/graph_worker.py`), and `qmd mcp` with the em
 On a 23k-node graph a graph lookup drops from 1-6 s to a few milliseconds, a code search from ~6 s to
 0.1 s and a docs search from 4-7 s to 0.2 s. The first call for a caller's project set cuts that view from the
 parsed graph in memory (~0.3-1.6 s on that graph; then milliseconds). A helper that fails or is missing falls back to the old one-process-per-call path.
+
+**Admin pages (`/admin`).** For the users named in `KB_ADMINS` (comma-separated) or in `<data>/admins.txt`
+(one per line), matched against the `uname`, `username`, `name`, `id` or `uid` the identity endpoint
+returns; nobody else gets more than a 404. Sign-in is the API's own login with its second factor, then
+an HttpOnly, SameSite=Strict session cookie (8 hours) and a CSRF token on every form. Pages: status
+(version, graph, the last builds, warm helpers, a rebuild button), index (charts: graph make-up,
+storage per index, documents and embedded chunks per project, build times, answer time per tool,
+calls per day), usage, and sign-in clients (revoke one). Plain HTML and server-drawn SVG, no scripts.
 
 **Browser sign-in (MCP OAuth).** With `KB_LOGIN_API` and the login paths set, an MCP client signs in
 by itself: a 401 points it to `/.well-known/oauth-protected-resource`, it registers (dynamic client

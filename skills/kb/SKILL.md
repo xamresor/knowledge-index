@@ -39,6 +39,8 @@ because it follows real edges (calls, eloquent, fk, sql, http_request) rather th
 | `search` | A free question. `domain: code` returns a scoped subgraph ("how does X work"), `docs` finds docs by meaning, `both` (default) does both at once. `budget` widens a truncated code answer. | `q`, `domain`, `project`, `budget` |
 | `graph_explain` | A specific symbol: its node, neighbours, relation types. | `symbol` (exact label) |
 | `graph_affected` | Reverse impact — what depends on / breaks if you change a symbol. | `symbol` (exact label) |
+| `batch` | Up to 10 independent calls in one request. | `calls: [{tool, args}]` |
+| `run_code` | A small JavaScript program: `kb(tool, args)` returns a tool's text, `return` gives the result. For a lookup that needs another's answer, or a filter over a long answer. Sandboxed: no network, no files, 30 calls, 20 s. | `code` |
 | `graph_routes` | Several ways from A to B, cheapest first, with the HTTP routes each way crosses (frontend → route → controller, backend → other service). Pin a project: `api:Customer`. | `from`, `to`, `k` |
 | `graph_path` | Shortest path between two symbols/files (crosses repos via `http_request`). | `from`, `to` |
 | `docs_get` | Fetch a full doc by the path returned from `search`. | `path` |
