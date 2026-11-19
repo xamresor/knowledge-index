@@ -36,12 +36,11 @@ because it follows real edges (calls, eloquent, fk, sql, http_request) rather th
 
 | Tool | Use for | Arg |
 |---|---|---|
-| `graph_query` | Open-ended "how does X work / what connects to Y". Returns a scoped subgraph. | `question` |
+| `search` | A free question. `domain: code` returns a scoped subgraph ("how does X work"), `docs` finds docs by meaning, `both` (default) does both at once. `budget` widens a truncated code answer. | `q`, `domain`, `project`, `budget` |
 | `graph_explain` | A specific symbol: its node, neighbours, relation types. | `symbol` (exact label) |
 | `graph_affected` | Reverse impact — what depends on / breaks if you change a symbol. | `symbol` (exact label) |
 | `graph_path` | Shortest path between two symbols/files (crosses repos via `http_request`). | `from`, `to` |
-| `docs_search` | Find docs by meaning. Returns snippets + paths. | `query` |
-| `docs_get` | Fetch a full doc by the path returned from `docs_search`. | `path` |
+| `docs_get` | Fetch a full doc by the path returned from `search`. | `path` |
 | `connections` | Which services talk to which, over what, and why. Start here for a cross-service question; read the named contract doc with `docs_get`. | `service` (optional) |
 | `problems` | Gaps the KB found (missing contract docs, calls to unknown routes). Check it before you finish work on a project. | `project` or kind (optional) |
 | `contracts_search` | An API endpoint: method, URI, controller action, middleware and the frontend files that call it. Words match all of them (`POST v2/users`, `UserController`). | `query` |
@@ -52,14 +51,14 @@ because it follows real edges (calls, eloquent, fk, sql, http_request) rather th
    node by substring, so a vague term (e.g. `User`) is **ambiguous** and fails with
    `No unique node match` — but the tool then **lists the matching exact labels** (model/file/
    method, ranked, with repo + path). Pick the precise one from that list and re-run, or run
-   `graph_query` first to discover it (e.g. a specific controller or `.index()` method).
+   `search` with `domain: code` first to discover it (e.g. a specific controller or `.index()` method).
 2. **Labels look like the graph emits them.** Methods are `.methodName()`, classes/files are bare
    names, frontend nodes carry a `src=...vue` path. Copy labels verbatim from prior tool output.
-3. **Results are budget-truncated.** `graph_query` caps output (~1800 tokens) and tells you how to
-   narrow (e.g. `context_filter=['call']`). If truncated, ask a tighter question rather than
-   re-running the same one.
+3. **Results are budget-truncated.** A code `search` caps output (1800 tokens by default). If it
+   says it was truncated, raise `budget` (up to 8000), narrow `project`, or ask `graph_explain`
+   about one symbol rather than re-running the same question.
 4. **Docs vs code.** Connection/architecture/impact → graph tools. "Where did we write about X" →
-   `docs_search` → `docs_get` the most relevant path, then answer **with the citation**.
+   `search` with `domain: docs` → `docs_get` the most relevant path, then answer **with the citation**.
 5. **Reach for the graph BEFORE grep — and before delegating.** A spawned `Explore`/general
    sub-agent defaults to text search and will *not* use these tools unless told. If you delegate a
    "how does X work" investigation, either run the graph query yourself first, or instruct the
@@ -69,7 +68,7 @@ because it follows real edges (calls, eloquent, fk, sql, http_request) rather th
    defer the `kb` tools behind a tool-search index — they won't appear in the live tool list and a
    direct call fails until their schemas are loaded. Pull them in first via the host's tool-search
    (e.g. a query like
-   `select:mcp__kb__graph_query,mcp__kb__graph_explain,mcp__kb__graph_affected,mcp__kb__graph_path,mcp__kb__docs_search,mcp__kb__contracts_search,mcp__kb__connections,mcp__kb__problems`),
+   `select:mcp__kb__search,mcp__kb__graph_explain,mcp__kb__graph_affected,mcp__kb__graph_path,mcp__kb__docs_get,mcp__kb__contracts_search,mcp__kb__connections,mcp__kb__problems`),
    then call them normally. Activating this skill is the cue to do that — not to fall back to grep.
 
 ## The dashboard (for a human, not for you)
@@ -89,7 +88,7 @@ use the tools above. Point the user to it when they want to *see* the architectu
 
 ## Known caveats
 
-- **`docs_search` (qmd) has a one-time cold start** (loading the embedding model). The server
+- **The docs half of `search` (qmd) has a one-time cold start** (loading the embedding model). The server
   warms it on startup and allows ~150s for the first call, and on timeout it auto-falls back to
   keyword (BM25) results flagged as such. Warm calls return in ~2s. For code questions the graph
   tools are sub-second; reach for docs only for prose/spec lookups.

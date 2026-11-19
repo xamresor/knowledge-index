@@ -34,8 +34,8 @@ route into the method's own usages. Communities are named by **namespace/domain*
 `bin/kb-mcp` is a zero-dependency stdio MCP server exposing the graph + docs to any agent. It is
 registered as the `kb` server in each consuming project's `.mcp.json`, so those project agents query
 the shared KB directly (restart the session to load it). Tools:
-`graph_query`, `graph_path`, `graph_explain`, `graph_affected` (over `graphify-out/graph.json`),
-and `docs_search`, `docs_get` (qmd `kb-<project>` collections), plus `contracts_search`, `connections`,
+`search` (docs, code or both), `graph_path`, `graph_explain`, `graph_affected` (over
+`graphify-out/graph.json`), `docs_get` (qmd `kb-<project>` collections), plus `contracts_search`, `connections`,
 `problems` (indexes built by `bin/contracts.py`). It wraps the `graphify`/`qmd` CLIs. A shared HTTP
 variant for a team, `bin/kb-http`, is off unless `KB_SERVER=on` (README, "Shared server").
 `search` scopes docs to a project: `project: "renget-api"`, `"a,b"` or `"all"`; without it, the

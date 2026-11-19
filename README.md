@@ -48,7 +48,7 @@ qmd query --help >/dev/null 2>&1 && echo "qmd: query CLI ok" || echo "qmd: WRONG
 
 > **qmd version compatibility.** This KB targets the modern qmd CLI (`query`/`search`/`vsearch`,
 > 2.5.3+). A divergent older lineage uses `qmd qsearch --no-rerank --no-expand` instead and lacks
-> `query`; `bin/kb-mcp`'s `docs_search` will fail against it. If you share one KB across several
+> `query`; the docs half of `search` will fail against it. If you share one KB across several
 > machines, **install the same qmd lineage on all of them** — a `query`-based checkout and a
 > `qsearch`-based checkout cannot both work from the same `bin/kb-mcp`.
 
@@ -184,8 +184,8 @@ zero-dependency stdio server (use the absolute path to this checkout):
 }
 ```
 
-Restart the agent session to load it. It exposes `graph_query`, `graph_path`, `graph_explain`,
-`graph_affected`, `docs_search`, `docs_get`. (This repo's own `.mcp.json` only registers `qmd`,
+Restart the agent session to load it. It exposes `search`, `graph_path`, `graph_explain`,
+`graph_affected`, `docs_get`, `contracts_search`, `connections`, `problems`, `version`. (This repo's own `.mcp.json` only registers `qmd`,
 which `kb-mcp` calls internally — projects do **not** need the `qmd` entry.)
 
 ### 2. The `kb` skill
@@ -262,7 +262,7 @@ test -f .claude/hooks/kb-reminder.py && echo "hook script: present"
 jq -e '.hooks.UserPromptSubmit' .claude/settings.json >/dev/null && echo "hook wired: YES"
 echo '{"prompt":"how does auth work"}' | python3 .claude/hooks/kb-reminder.py | jq -e .hookSpecificOutput >/dev/null && echo "hook fires: YES"
 
-# 4. qmd is the compatible lineage (kb-mcp's docs_search needs `qmd query`)
+# 4. qmd is the compatible lineage (the docs half of `search` needs `qmd query`)
 qmd query --help >/dev/null 2>&1 && echo "qmd query CLI: YES" || echo "qmd query CLI: NO — wrong qmd lineage"
 ```
 
@@ -431,8 +431,8 @@ curl -s -X POST localhost:8899/call \
 ```
 
 `search` takes `{q, domain: docs|code|both, scope, mode: auto|lex|vec|hybrid, limit, min_score,
-expand_aliases, explain}`. `docs_search` and `graph_query` still work and are marked deprecated —
-they translate to `search`, so there is one implementation rather than two.
+expand_aliases, explain, budget}`. The old names `docs_search` and `graph_query` were removed in tool
+contract 2 (`api_contract` in `version`); call `search` with `domain: docs` or `domain: code`.
 
 **Binding off loopback requires a token, and the server refuses to start without one.** The point of
 this project is that the corpus never leaves the machine; an index published to the network without

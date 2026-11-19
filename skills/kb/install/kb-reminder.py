@@ -57,8 +57,8 @@ TRIGGERS = [
 REMINDER = (
     "This prompt looks like a cross-codebase connection/architecture/impact "
     "question. Reach for the `kb` Code Knowledge Base FIRST, before grep/Explore: "
-    "invoke the `kb` skill and use its graph MCP tools (graph_query, "
-    "graph_explain, graph_affected, graph_path, docs_search). They follow real "
+    "invoke the `kb` skill and use its MCP tools (contracts_search, search, "
+    "graph_explain, graph_affected, graph_path). They follow real "
     "edges (calls, eloquent, fk, sql, cross-repo http_request frontend->controller) "
     "and are more precise than text search. If the kb tools are deferred behind a "
     "tool-search index, load their schemas first, then call them. If you delegate "

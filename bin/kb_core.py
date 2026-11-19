@@ -55,7 +55,7 @@ DOCS_MODE = os.environ.get("KB_DOCS_MODE", "full")
 # The surface's own contract number, bumped when a tool's shape changes in a breaking way.
 # Deliberately NOT the repo version: the repo can release many times without touching the contract,
 # and a caller pinning behaviour cares about this number only.
-API_CONTRACT = 1
+API_CONTRACT = 2  # 2: docs_search and graph_query removed (use search)
 
 
 def _read_version() -> str:
@@ -247,8 +247,7 @@ def instructions(projects: list[str] | None = None) -> str:
         "Code knowledge base over several repos (a Laravel API and its frontends). " + seen +
         "Which tool: an endpoint and who calls it -> contracts_search (fast, the best first step); "
         "one symbol and its neighbours -> graph_explain; what breaks if X changes -> graph_affected; "
-        "how A reaches B -> graph_path; a free question -> search (domain docs, code or both; "
-        "docs_search and graph_query are old names of search). "
+        "how A reaches B -> graph_path; a free question -> search (domain docs, code or both). "
         "Trust: edges marked EXTRACTED come from the syntax; INFERRED ones (http_request, eloquent, "
         "doc mentions) are matched by name and can be wrong. in_domain only groups a symbol with its "
         "domain, it is not a dependency. The index is rebuilt after each deploy and can lag the "
@@ -256,8 +255,7 @@ def instructions(projects: list[str] | None = None) -> str:
 
 
 # --- tool schemas -------------------------------------------------------------------------------
-# One list, published by both adapters. `deprecated` entries still work (a caller written against an
-# older surface must not break) but point at their replacement.
+# One list, published by both adapters.
 TOOLS = [
     {"name": "search",
      "description": "Search the knowledge base. `domain` picks what is searched: docs (qmd hybrid "
@@ -327,17 +325,6 @@ TOOLS = [
     {"name": "version",
      "description": "Repo version and the surface's own contract number — separate axes.",
      "inputSchema": {"type": "object", "properties": {}}},
-    # --- deprecated: superseded by `search`, kept so older callers keep working -------------------
-    {"name": "docs_search", "deprecated": True,
-     "description": "DEPRECATED — use search({q, domain:'docs'}). Hybrid vector + keyword search "
-                    "over the indexed docs.",
-     "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}},
-                     "required": ["query"]}},
-    {"name": "graph_query", "deprecated": True,
-     "description": "DEPRECATED — use search({q, domain:'code'}). Semantic search over the merged "
-                    "cross-repo code graph.",
-     "inputSchema": {"type": "object", "properties": {"question": {"type": "string"}},
-                     "required": ["question"]}},
 ]
 
 TOOLS_BY_NAME = {t["name"]: t for t in TOOLS}
@@ -652,11 +639,6 @@ def call_tool(name: str, args: dict, allowed: set[str] | None = None) -> str:
             info["projects"] = sorted(set(info["projects"]) & allowed)
             info["session_projects"] = []
         return json.dumps(info, indent=2)
-    # deprecated shims: translate to `search` so there is one implementation, not two
-    if name == "docs_search":
-        return search({"q": args["query"], "domain": "docs"}, allowed)
-    if name == "graph_query":
-        return search({"q": args["question"], "domain": "code"}, allowed)
     raise ToolError(f"unknown tool: {name}")  # unreachable: validate() already checked
 
 

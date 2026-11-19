@@ -231,7 +231,7 @@ class FilterTests(unittest.TestCase):
         with self.assertRaises(kb_core.ToolError):
             kb_core.call_tool("graph_explain", {"symbol": "--graph=/x"}, {"api"})
         with self.assertRaises(kb_core.ToolError):
-            kb_core.call_tool("docs_search", {"query": 5}, {"api"})
+            kb_core.call_tool("search", {"q": 5}, {"api"})
 
     def test_graph_tools_get_the_filtered_graph(self):
         seen = []

@@ -74,7 +74,7 @@ USAGE_TOP_ARGS = 200  # most frequent arguments kept per tool
 
 GRAPH_JOBS = threading.BoundedSemaphore(int(os.environ.get("KB_MAX_GRAPH_JOBS", "3")))
 DOCS_JOBS = threading.BoundedSemaphore(int(os.environ.get("KB_MAX_DOCS_JOBS", "1")))
-DOCS_TOOLS = {"search", "docs_search", "docs_get"}  # qmd loads a model: fewer of these at once
+DOCS_TOOLS = {"search", "docs_get"}  # qmd loads a model: fewer of these at once
 NAME_FIELDS = ("name", "uname", "username", "id", "uid")
 
 

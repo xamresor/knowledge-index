@@ -8,8 +8,7 @@ cannot drift apart without deleting code.
 Plug into any agent via .mcp.json:
     { "mcpServers": { "kb": { "command": "/path/to/kb/bin/kb-mcp" } } }
 
-Tools: see `kb_core.TOOLS` (or call `tools/list`). `search` is the front door; `docs_search` and
-`graph_query` still work and are marked deprecated.
+Tools: see `kb_core.TOOLS` (or call `tools/list`). `search` is the front door (docs, code or both).
 """
 from __future__ import annotations
 

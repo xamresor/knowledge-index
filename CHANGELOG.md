@@ -14,6 +14,10 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+- **Removed (breaking, tool contract 2): `docs_search` and `graph_query`.** They were aliases of
+  `search` and confused new users and their skills. Use `search` with `domain: docs` or
+  `domain: code`. `version` reports `api_contract: 2`.
+
 - **Changed: `kb-login` keeps the token in a private file, not in a project's `.mcp.json`.** That
   file is often in git, and the server then worked in one project only. The token goes to
   `~/.claude/kb/token` (owner-only); `--add-to-claude` registers the server once in Claude Code's user

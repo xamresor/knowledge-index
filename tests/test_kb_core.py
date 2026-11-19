@@ -2,7 +2,7 @@
 
 What matters here is not the subprocess calls (those are graphify/qmd), but the contract around
 them: the schema list both adapters publish, the shallow validation that replaces a jsonschema
-dependency, the routing of `search` by domain, and the deprecated shims translating to `search`
+dependency, the routing of `search` by domain, and the removal of the old tool names
 rather than duplicating it.
 """
 from __future__ import annotations
@@ -16,11 +16,11 @@ import kb_core
 
 
 class SchemaTest(unittest.TestCase):
-    def test_search_is_the_front_door_and_old_names_are_marked_deprecated(self):
+    def test_search_is_the_front_door_and_old_names_are_gone(self):
         names = [t["name"] for t in kb_core.TOOLS]
         self.assertEqual(names[0], "search", "the generic entry point comes first")
-        deprecated = {t["name"] for t in kb_core.TOOLS if t.get("deprecated")}
-        self.assertEqual(deprecated, {"docs_search", "graph_query"})
+        self.assertFalse({"docs_search", "graph_query"} & set(names))  # removed in contract 2
+        self.assertFalse([t for t in kb_core.TOOLS if t.get("deprecated")])
 
     def test_every_tool_has_a_description_and_schema(self):
         for tool in kb_core.TOOLS:
@@ -144,13 +144,12 @@ class RoutingTest(unittest.TestCase):
         self.assertIn("DOCS", out)
         self.assertIn("CODE", out)
 
-    def test_deprecated_docs_search_delegates_to_search(self):
-        self.assertEqual(kb_core.call_tool("docs_search", {"query": "x"}), "DOCS")
-        self.docs.assert_called_once()
-
-    def test_deprecated_graph_query_delegates_to_search(self):
-        self.assertEqual(kb_core.call_tool("graph_query", {"question": "x"}), "CODE")
-        self.code.assert_called_once()
+    def test_old_tool_names_are_unknown(self):
+        for name, args in (("docs_search", {"query": "x"}), ("graph_query", {"question": "x"})):
+            with self.assertRaises(kb_core.ToolError):
+                kb_core.call_tool(name, args)
+        self.docs.assert_not_called()
+        self.code.assert_not_called()
 
     def test_call_tool_validates_before_running_anything(self):
         with self.assertRaises(kb_core.ToolError):
