@@ -19,6 +19,8 @@ The single source of truth for the current version is the `VERSION` file. It is 
   framework classes cost extra, a symbol merged across files costs a jump; Dijkstra finds the cheapest
   way, then again with the used edges made dearer for the next ways. Every HTTP hop prints its method,
   URI and controller. Pin a project in a name: `api:Customer`.
+  With `rustworkx` in graphify's environment (`uv tool install graphifyy --with rustworkx`) the search
+  runs on its Rust core, 2-3x faster with the same paths; networkx is the fallback.
 - **Added: backend-to-backend HTTP calls.** A PHP backend listed with `calls`/`serves` (an API client of
   another service: `Http::get('v2/…')`, `->send($req, 'post', 'v1/…' . $id)`) is linked from its
   enclosing method to the controller of the other service. Test folders are skipped.

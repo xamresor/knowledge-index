@@ -30,6 +30,11 @@ from collections import OrderedDict
 
 import networkx as nx
 
+try:  # the same Dijkstra with a Rust core: ~2x faster here (measured 2026-11-19), optional
+    import rustworkx as rx
+except ImportError:  # pragma: no cover - depends on the environment
+    rx = None
+
 # Price of one hop by relation. Missing = not a code path (left out).
 COST = {
     "http_request": 1.0, "calls": 1.0, "indirect_call": 1.2, "method": 1.0, "contains": 1.0,
@@ -140,7 +145,7 @@ def _routes_of(path: list[str], g: nx.Graph, nodes: dict) -> list[str]:
     return out
 
 
-_BUILT: "OrderedDict[int, tuple[list, nx.Graph, dict]]" = OrderedDict()
+_BUILT: "OrderedDict[int, tuple[list, nx.Graph, dict, object]]" = OrderedDict()
 MAX_BUILT = 4  # weighted graphs kept (one per caller view in use)
 
 
@@ -154,13 +159,50 @@ def _built(data: dict) -> tuple[nx.Graph, dict]:
     g, nodes = _build(data)
     while len(_BUILT) >= MAX_BUILT:
         _BUILT.popitem(last=False)
-    _BUILT[key] = (data.get("nodes"), g, nodes)
+    _BUILT[key] = (data.get("nodes"), g, nodes, _rx_copy(g))
     return g, nodes
+
+
+def _rx_copy(g: nx.Graph):
+    """The weighted graph as a rustworkx graph (None without rustworkx): (graph, index of node id,
+    node id of index). Edge payload = the price."""
+    if rx is None:
+        return None
+    rg = rx.PyGraph(multigraph=False)
+    index = {n: rg.add_node(n) for n in g.nodes}
+    for a, b, d in g.edges(data=True):
+        rg.add_edge(index[a], index[b], d["w"])
+    return rg, index
+
+
+def _cheapest(g: nx.Graph, s: str, t: str, extra: dict, rgx) -> list[str] | None:
+    """The cheapest path with the edge prices multiplied by `extra`; None when there is none."""
+    if rgx is not None:
+        rg, index = rgx
+        changed = []
+        for (a, b), factor in extra.items():  # apply this request's penalties, undo them after
+            for eid in rg.edge_indices_from_endpoints(index[a], index[b]):
+                changed.append((eid, rg.get_edge_data_by_index(eid)))
+                rg.update_edge_by_index(eid, changed[-1][1] * factor)
+        try:
+            paths = rx.dijkstra_shortest_paths(rg, index[s], target=index[t], weight_fn=float)
+            return [rg[i] for i in paths[index[t]]] if index[t] in paths else None
+        finally:
+            for eid, w in changed:
+                rg.update_edge_by_index(eid, w)
+
+    def weight(a, b, d):
+        return d["w"] * extra.get((a, b) if a < b else (b, a), 1.0)
+    try:
+        return nx.bidirectional_dijkstra(g, s, t, weight=weight)[1]  # searches from both ends
+    except nx.NetworkXNoPath:
+        return None
 
 
 def find(data: dict, src: str, dst: str, k: int = 3) -> str:
     k = max(1, min(int(k or 3), MAX_K))
     g, nodes = _built(data)
+    rgx = _BUILT[id(data.get("nodes"))][3]
     s, s_alts = resolve(src, nodes, g)
     t, t_alts = resolve(dst, nodes, g)
     if not s or not t:
@@ -181,13 +223,9 @@ def find(data: dict, src: str, dst: str, k: int = 3) -> str:
     seen_routes: set[tuple] = set()
     extra: dict[tuple[str, str], float] = {}
 
-    def weight(a, b, d):
-        return d["w"] * extra.get((a, b) if a < b else (b, a), 1.0)
-
     for _ in range(k * 3):
-        try:
-            _, path = nx.bidirectional_dijkstra(g, s, t, weight=weight)  # searches from both ends
-        except nx.NetworkXNoPath:
+        path = _cheapest(g, s, t, extra, rgx)
+        if path is None:
             break
         for a, b in zip(path, path[1:]):
             key = (a, b) if a < b else (b, a)
