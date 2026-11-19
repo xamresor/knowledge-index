@@ -110,7 +110,9 @@ def resolve(term: str, nodes: dict, g: nx.Graph) -> tuple[str | None, list[dict]
     def score(n: dict) -> tuple:
         label = n.get("label", "").lower().strip("()").lstrip(".")
         bare = re.sub(r"\.(php|vue|ts|js|tsx)$", "", label)
-        exact = 0 if low in (label, bare) else 1 if re.search(rf"\b{re.escape(low)}\b", label) else 2
+        raw = re.sub(r"\.(php|vue|ts|js|tsx)$", "", n.get("label", ""))
+        exact = (0 if name == raw else 1 if low in (label, bare)  # the name as typed, case and all
+                 else 2 if re.search(rf"\b{re.escape(low)}\b", label) else 3)
         return (exact, TYPE_RANK.get(n.get("type", ""), 5), -g.degree(n["id"]), len(label))
 
     hits = sorted((n for n in cands if low in n.get("label", "").lower()), key=score)
