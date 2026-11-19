@@ -39,6 +39,7 @@ because it follows real edges (calls, eloquent, fk, sql, http_request) rather th
 | `search` | A free question. `domain: code` returns a scoped subgraph ("how does X work"), `docs` finds docs by meaning, `both` (default) does both at once. `budget` widens a truncated code answer. | `q`, `domain`, `project`, `budget` |
 | `graph_explain` | A specific symbol: its node, neighbours, relation types. | `symbol` (exact label) |
 | `graph_affected` | Reverse impact — what depends on / breaks if you change a symbol. | `symbol` (exact label) |
+| `graph_routes` | Several ways from A to B, cheapest first, with the HTTP routes each way crosses (frontend → route → controller, backend → other service). Pin a project: `api:Customer`. | `from`, `to`, `k` |
 | `graph_path` | Shortest path between two symbols/files (crosses repos via `http_request`). | `from`, `to` |
 | `docs_get` | Fetch a full doc by the path returned from `search`. | `path` |
 | `connections` | Which services talk to which, over what, and why. Start here for a cross-service question; read the named contract doc with `docs_get`. | `service` (optional) |
@@ -46,6 +47,9 @@ because it follows real edges (calls, eloquent, fk, sql, http_request) rather th
 | `contracts_search` | An API endpoint: method, URI, controller action, middleware and the frontend files that call it. Words match all of them (`POST v2/users`, `UserController`). | `query` |
 
 ## How to use it well
+
+0. **Long answers come in pages.** Every tool but `version` takes `page` and `page_length`. A long answer
+   ends with a `cursor`: pass it with `page: 2` to get the next page of the same answer (10 minutes).
 
 1. **Start broad, then drill down.** `graph_explain` / `graph_affected` / `graph_path` match a
    node by substring, so a vague term (e.g. `User`) is **ambiguous** and fails with

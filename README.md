@@ -188,8 +188,13 @@ zero-dependency stdio server (use the absolute path to this checkout):
 }
 ```
 
-Restart the agent session to load it. It exposes `search`, `graph_path`, `graph_explain`,
-`graph_affected`, `docs_get`, `contracts_search`, `connections`, `problems`, `version`. (This repo's own `.mcp.json` only registers `qmd`,
+Restart the agent session to load it. It exposes `search`, `graph_routes`, `graph_path`, `graph_explain`,
+`graph_affected`, `docs_get`, `contracts_search`, `connections`, `problems`, `version`.
+
+`graph_routes` gives several ways from one place to another with the HTTP routes on the way
+(`from: "bo2:Drivers.vue", to: "api:ObjectDriver"`). Every tool but `version` takes `page` and
+`page_length`; a long answer ends with a `cursor` that serves its next pages for 10 minutes without
+running the query again. (This repo's own `.mcp.json` only registers `qmd`,
 which `kb-mcp` calls internally — projects do **not** need the `qmd` entry.)
 
 ### 2. The `kb` skill

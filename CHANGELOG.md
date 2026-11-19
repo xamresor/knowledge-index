@@ -14,6 +14,12 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-11-19
+
+The first outside users on a shared server (a developer team): browser sign-in, speed, paging and
+several-way path search. **Breaking:** tool contract 2 — `docs_search` and `graph_query` are gone, use
+`search` with `domain: docs` or `domain: code`.
+
 - **Fixed: code search walked the domain anchors.** 2-7 of ~50 shown nodes were empty domain nodes, and a
   search could start from one; `search` with `domain: code` now runs on the graph without them, like
   path search and impact.
