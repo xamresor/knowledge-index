@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
-"""Get a token for a shared KB server (bin/kb-http) and write it into an agent's .mcp.json.
+"""Get a token for a shared KB server (bin/kb-http) and connect Claude Code to it.
 
 kb-http does not issue tokens: it asks your identity endpoint who a token belongs to. This helper
-logs in to *your* API to get such a token, then writes the `kb` server entry for the agent:
+logs in to *your* API to get such a token, keeps it in a private file and registers the `kb` server
+in Claude Code's user scope:
 
-    { "mcpServers": { "kb": { "type": "http", "url": "<kb url>",
-                               "headers": { "Authorization": "Bearer <token>" } } } }
+    { "kb": { "type": "http", "url": "<kb url>",
+              "headersHelper": "<python> kb-login --headers --token-file ~/.claude/kb/token" } }
 
 Nothing here has a default address — the API, the KB URL and the login paths are yours.
 
 Usage:
-  kb-login --api https://api.example.com --kb-url https://kb.example.com/mcp --mcp-json .mcp.json
-  KB_LOGIN_API=... KB_URL=... kb-login --username jdoe
+  kb-login --env-file deploy/kb-login.env --add-to-claude      first time: login + register the server
+  kb-login --env-file deploy/kb-login.env                      later: refresh the token only
+  kb-login --headers                                           what Claude Code's headersHelper runs
+
+The token goes to ~/.claude/kb/token (owner-only), not into a project's .mcp.json: that file is
+often in git, and the server would work in one project only. The server entry in Claude Code's
+user scope reads the file through `headersHelper` on every connection.
 
 Login contract (adjust the paths and headers with env to match your API):
   POST {api}{KB_LOGIN_PATH} {"username", "password"}
@@ -162,20 +168,87 @@ def write_mcp_json(path: str, token: str, kb_url: str, name: str = "kb") -> None
         os.chmod(path, 0o600)  # it holds a token
 
 
+DEFAULT_TOKEN_FILE = os.path.join("~", ".claude", "kb", "token")
+
+
+def load_env_file(path: str, env: dict | None = None) -> None:
+    """KEY=VALUE lines (a `deploy/kb-login.env`) into the environment, without a shell: on Windows
+    `set -a; . file` is not available. Quotes around a value are dropped; `#` lines are skipped."""
+    env = os.environ if env is None else env
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+                value = value[1:-1]
+            env.setdefault(key.strip(), value)
+
+
+def save_token(path: str, token: str) -> None:
+    """The token alone, readable by its owner only (written to a temp file, then moved)."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = f"{path}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(token + "\n")
+    os.replace(tmp, path)
+
+
+def headers_json(path: str) -> str:
+    """What an MCP client's `headersHelper` prints: the Authorization header from the token file."""
+    with open(path, encoding="utf-8") as f:
+        token = f.read().strip()
+    if not token:
+        raise LoginError(f"{path} is empty")
+    return json.dumps({"Authorization": f"Bearer {token}"})
+
+
+def server_entry(kb_url: str, token_file: str) -> dict:
+    """The `kb` entry for Claude Code's user scope. The token is not in it: `headersHelper` reads the
+    token file on each connection, so a new login needs no config change and nothing lands in git."""
+    helper = f'"{sys.executable}" "{os.path.abspath(__file__)}" --headers --token-file "{token_file}"'
+    return {"type": "http", "url": kb_url, "headersHelper": helper}
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Log in to your API and get a token for a shared KB.")
-    ap.add_argument("--api", default=os.environ.get("KB_LOGIN_API", ""),
-                    help="API base URL (env KB_LOGIN_API)")
+    ap.add_argument("--env-file", help="read KB_LOGIN_* and KB_URL from this KEY=VALUE file")
+    ap.add_argument("--api", help="API base URL (env KB_LOGIN_API)")
     ap.add_argument("--username", help="API user name")
-    ap.add_argument("--mcp-json", help="write the kb server entry into this .mcp.json")
-    ap.add_argument("--kb-url", default=os.environ.get("KB_URL", ""),
-                    help="KB MCP endpoint for .mcp.json (env KB_URL)")
-    ap.add_argument("--name", default="kb", help="server name in .mcp.json (default kb)")
+    ap.add_argument("--kb-url", help="KB MCP endpoint (env KB_URL)")
+    ap.add_argument("--name", default="kb", help="MCP server name (default kb)")
+    ap.add_argument("--token-file", default=DEFAULT_TOKEN_FILE,
+                    help=f"where the token is kept (default {DEFAULT_TOKEN_FILE})")
+    ap.add_argument("--headers", action="store_true",
+                    help="print the Authorization header from the token file (for headersHelper)")
+    ap.add_argument("--add-to-claude", action="store_true",
+                    help="also register the server in Claude Code's user scope (claude mcp add-json)")
+    ap.add_argument("--mcp-json", help="old way: write the token into this .mcp.json instead "
+                                       "(never one that git tracks)")
     args = ap.parse_args(argv)
+    token_file = os.path.expanduser(args.token_file)
 
-    api = args.api or input("API base URL: ").strip()
+    if args.headers:
+        try:
+            print(headers_json(token_file))
+        except (OSError, LoginError) as e:
+            print(f"No KB token ({e}). Run kb-login again.", file=sys.stderr)
+            return 1
+        return 0
+
+    if args.env_file:
+        try:
+            load_env_file(os.path.expanduser(args.env_file))
+        except OSError as e:
+            print(f"Cannot read {args.env_file}: {e}", file=sys.stderr)
+            return 2
+    api = args.api or os.environ.get("KB_LOGIN_API", "") or input("API base URL: ").strip()
+    kb_url = args.kb_url or os.environ.get("KB_URL", "")
     if not api:
-        print("No API base URL (--api or KB_LOGIN_API).", file=sys.stderr)
+        print("No API base URL (--api, KB_LOGIN_API or --env-file).", file=sys.stderr)
         return 2
     username = args.username or input("Username: ").strip()
     password = getpass.getpass("Password: ")
@@ -185,21 +258,46 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Login failed: {e}", file=sys.stderr)
         return 1
 
-    print(f"\nToken (keep it secret):\n{token}\n")
-    path = args.mcp_json
-    if path is None and sys.stdin.isatty():
-        path = input("Write it to an .mcp.json? Path, or Enter to skip: ").strip() or None
-    if path:
-        path = os.path.expanduser(path)
+    if args.mcp_json:
+        path = os.path.expanduser(args.mcp_json)
+        if in_git_and_not_ignored(path):
+            print(f"Refused: {path} is tracked or trackable by git, and the token would land in a "
+                  "commit. Run without --mcp-json: the token goes to a private file instead.",
+                  file=sys.stderr)
+            return 1
         try:
-            write_mcp_json(path, token, args.kb_url, args.name)
+            write_mcp_json(path, token, kb_url, args.name)
         except (LoginError, ValueError, OSError) as e:
             print(f"Could not update {path}: {e}", file=sys.stderr)
             return 1
         print(f"Wrote the '{args.name}' server to {path}. Restart the agent session to load it.")
-        if in_git_and_not_ignored(path):
-            print(f"WARNING: {path} is tracked or trackable by git. Do not commit the token: "
-                  "add the file to .gitignore or use a private settings file.", file=sys.stderr)
+        return 0
+
+    try:
+        save_token(token_file, token)
+    except OSError as e:
+        print(f"Could not save the token to {token_file}: {e}", file=sys.stderr)
+        return 1
+    print(f"Token saved to {token_file} (readable by you only).")
+    if not kb_url:
+        print("No KB URL (--kb-url, KB_URL or --env-file): add the server by hand.")
+        return 0
+    entry = json.dumps(server_entry(kb_url, token_file))
+    if args.add_to_claude:
+        cmd = ["claude", "mcp", "add-json", args.name, entry, "--scope", "user"]
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError) as e:
+            print(f"Could not run claude ({e}). Add the server by hand, see below.", file=sys.stderr)
+        else:
+            if p.returncode == 0:
+                print(f"Added the '{args.name}' server to Claude Code (user scope). "
+                      "Restart the session to load it. Next time only the login is needed.")
+                return 0
+            print((p.stderr or p.stdout).strip(), file=sys.stderr)
+    print("\nRegister the server once (all projects, nothing in git):\n")
+    print(f"  claude mcp add-json {args.name} '{entry}' --scope user\n")
+    print("Later logins only refresh the token file; the server entry stays as it is.")
     return 0
 
 

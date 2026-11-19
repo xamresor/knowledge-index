@@ -19,7 +19,7 @@ import sys
 
 import graph
 import lang
-from lang import js_ts
+from lang import js_ts, php_laravel
 
 VERBS = js_ts.VERBS
 
@@ -69,16 +69,25 @@ def load_routes(path: str) -> dict[tuple[str, str], tuple[str, str | None]]:
 
 
 def match_route(routes, verb: str, path: str):
-    """Exact (verb, path); else a route whose uri ends with `/<path>` for the same verb —
-    the frontend omits a base prefix the base-URL supplies (Laravel `api/`, an API version, …).
-    Pick the shortest such uri (fewest extra prefix segments) for a deterministic choice."""
+    """Exact (verb, path); else a route whose uri is `<base prefix>/<path>` for the same verb —
+    the frontend omits the base prefix its base URL supplies (Laravel `api/`, an API version).
+
+    A prefix of base segments only (`api`, `v1`, …) is that case: the shortest one wins. Any other
+    prefix means the call site lost part of its own path (`${baseUrl.value}/send` -> `send`): then
+    only a single candidate counts. Two (`…/csdd/send` and `…/road-markup/send`) is no match —
+    picking the shortest once linked a road-markup editor to the CSDD controller."""
     hit = routes.get((verb, path))
     if hit:
         return hit
     if not path:
         return None
     cands = sorted((u for (v, u) in routes if v == verb and u.endswith("/" + path)), key=len)
-    return routes[(verb, cands[0])] if cands else None
+    based = [u for u in cands
+             if all(php_laravel.BASE_SEGMENT.match(seg) for seg in u[:-len(path) - 1].split("/"))]
+    if based:
+        return routes[(verb, based[0])]
+    targets = {routes[(verb, u)] for u in cands}
+    return targets.pop() if len(targets) == 1 else None
 
 
 def main() -> int:

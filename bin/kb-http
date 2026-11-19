@@ -62,6 +62,12 @@ AUTH_TIMEOUT = float(os.environ.get("KB_AUTH_TIMEOUT", "10"))
 MAX_BODY = 1024 * 1024
 SUPPORTED_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 
+# Told to a caller without a valid token: how to get one. The server has no OAuth, so an MCP client
+# that tries its OAuth discovery after a 401 fails with a bare "could not connect".
+AUTH_HINT = os.environ.get(
+    "KB_AUTH_HINT",
+    "This server takes a bearer token of your API, not OAuth. Get one with bin/kb-login "
+    "(github.com/xamresor/knowledge-index) and pass it as 'Authorization: Bearer <token>'.")
 USAGE_FILE = os.environ.get("KB_USAGE_FILE", os.path.join(kb_core.KB, "logs", "usage.json"))
 USAGE_DAYS = 90       # per-day counters older than this are dropped
 USAGE_TOP_ARGS = 200  # most frequent arguments kept per tool
@@ -309,8 +315,7 @@ def handle_message(msg: dict, ident: Identity) -> dict | None:
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "kb", "version": kb_core.VERSION,
                            "apiContract": kb_core.API_CONTRACT},
-            "instructions": "Code knowledge base. Projects you can see: "
-                            + ", ".join(sorted(ident.projects)) + "."})
+            "instructions": kb_core.instructions(sorted(ident.projects))})
     if method == "ping":
         return rpc_result(mid, {})
     if method == "tools/list":
@@ -387,7 +392,10 @@ class Handler(BaseHTTPRequestHandler):
             ident = self.auth.check(self.headers.get("Authorization"))
         except AuthError as e:
             extra = {"WWW-Authenticate": 'Bearer realm="kb"'} if e.status == 401 else {}
-            self._send(e.status, {"error": e.message}, extra)
+            body = {"error": e.message}
+            if e.status == 401 and AUTH_HINT:
+                body["hint"] = AUTH_HINT
+            self._send(e.status, body, extra)
             return
         try:
             length = int(self.headers.get("Content-Length") or 0)

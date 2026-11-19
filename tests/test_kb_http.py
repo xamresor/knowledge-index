@@ -565,9 +565,10 @@ class HttpTests(unittest.TestCase):
             return e.code, dict(e.headers), json.loads(raw) if raw else None
 
     def test_no_token_401(self):
-        status, headers, _ = self.req(body={"jsonrpc": "2.0", "id": 1, "method": "ping"}, token=None)
+        status, headers, body = self.req(body={"jsonrpc": "2.0", "id": 1, "method": "ping"}, token=None)
         self.assertEqual(status, 401)
         self.assertTrue(headers.get("WWW-Authenticate", "").startswith("Bearer"))
+        self.assertIn("kb-login", body.get("hint", ""))  # how to get a token: the server has no OAuth
 
     def test_forbidden_403(self):
         self.assertEqual(self.req(body={"jsonrpc": "2.0", "id": 1, "method": "ping"},

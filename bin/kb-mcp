@@ -44,7 +44,8 @@ def main() -> None:
                 "protocolVersion": req.get("params", {}).get("protocolVersion", PROTO),
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "kb", "version": kb_core.VERSION,
-                               "apiContract": kb_core.API_CONTRACT}}})
+                               "apiContract": kb_core.API_CONTRACT},
+                "instructions": kb_core.instructions()}})
         elif method == "tools/list":
             send({"jsonrpc": "2.0", "id": mid, "result": {"tools": kb_core.TOOLS}})
         elif method == "tools/call":

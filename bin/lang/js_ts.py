@@ -42,6 +42,18 @@ CALL_RE = re.compile(r"\bapi\.(" + "|".join(VERBS) + r")\(\s*[`'\"]([^`'\"]+)", 
 WRAPPER_RE = re.compile(
     r"(?<![\w.])(\$api|apiFetch|apiUpload|apiDownload|fetch)(?:<.*?>)?\(\s*[`'\"]([^`'\"]+)")
 METHOD_RE = re.compile(r"\bmethod\s*:\s*['\"](" + "|".join(VERBS) + r")['\"]", re.IGNORECASE)
+#: A versioned API path handed to any other function — a list or export composable, a store helper:
+#:   usePaginatedList(() => `v2/customers/${id}/drivers`, {…})     exportTable(`v2/…/export`, {…})
+#: The path may start the next line after `name(`. Only `v<digits>/…` counts: a bare string is too
+#: often not a URL. The verb comes from a nearby `method:`, else GET.
+VERSIONED_RE = re.compile(r"(?<![\w.$<])([A-Za-z_]\w*)(?:<.*?>)?\(\s*(?:\(\)\s*=>\s*)?[`'\"](/?v\d+/[^`'\"]*)")
+OPEN_CALL_RE = re.compile(r"(?<![\w.$<])([A-Za-z_]\w*)(?:<.*?>)?\(\s*$")
+NEXT_ARG_RE = re.compile(r"^\s*(?:\(\)\s*=>\s*)?[`'\"](/?v\d+/[^`'\"]*)")
+#: Names the patterns above already cover, and language words that take a string.
+NOT_A_CLIENT = frozenset({"api", "apiFetch", "apiUpload", "apiDownload", "fetch", "if", "for",
+                          "while", "switch", "return", "t", "$t", "i18n", "console", "require",
+                          "import", "includes", "startsWith", "endsWith", "indexOf", "replace",
+                          "split", "match", "test"})
 METHOD_WINDOW = 3          # lines after the call to look for `method:`
 
 
@@ -56,9 +68,33 @@ def iter_calls(lines: list[str]):
             # `fetch('/static/x')` or `fetch(url)` is not a backend API call.
             if name == "fetch" and not raw.startswith("${"):
                 continue
-            window = line[match.end():] + "\n" + "\n".join(lines[i:i + METHOD_WINDOW])
-            verb_match = METHOD_RE.search(window)
-            yield i, (verb_match.group(1).lower() if verb_match else "get"), raw
+            yield i, _verb(line[match.end():], lines, i), raw
+        for name, raw, end in _versioned(line, lines, i):
+            if name not in NOT_A_CLIENT:
+                yield i, _verb(line[end:], lines, i), raw
+
+
+def _verb(rest: str, lines: list[str], i: int) -> str:
+    """The `method:` of this call: on the rest of its line or the next few, but never past the
+    start of the next call (a `method: 'POST'` two lines down may belong to it)."""
+    window = [rest]
+    for nxt in lines[i:i + METHOD_WINDOW]:
+        if CALL_RE.search(nxt) or WRAPPER_RE.search(nxt) or VERSIONED_RE.search(nxt):
+            break
+        window.append(nxt)
+    m = METHOD_RE.search("\n".join(window))
+    return m.group(1).lower() if m else "get"
+
+
+def _versioned(line: str, lines: list[str], i: int):
+    """(function name, path, end offset in `line`) for a versioned path passed to a function."""
+    for m in VERSIONED_RE.finditer(line):
+        yield m.group(1), m.group(2), m.end()
+    opened = OPEN_CALL_RE.search(line)
+    if opened and i < len(lines):
+        nxt = NEXT_ARG_RE.match(lines[i])
+        if nxt:
+            yield opened.group(1), nxt.group(1), len(line)
 
 
 def prune(dirs: list[str]) -> list[str]:

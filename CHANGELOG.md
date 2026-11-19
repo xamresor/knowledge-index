@@ -14,6 +14,25 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+- **Changed: `kb-login` keeps the token in a private file, not in a project's `.mcp.json`.** That
+  file is often in git, and the server then worked in one project only. The token goes to
+  `~/.claude/kb/token` (owner-only); `--add-to-claude` registers the server once in Claude Code's user
+  scope with a `headersHelper` (`kb-login --headers`) that reads the file, so a new login changes no
+  config. `--env-file` reads the settings without a shell (Windows). `--mcp-json` still exists and
+  refuses a file that git tracks.
+- **Fixed: `graph_affected` stopped at "ambiguous label" for a model named like its domain anchor**
+  (`ObjectDriver`). It now runs on the graph without anchors, like `graph_path`.
+- **Fixed: a call site that lost its path prefix was linked to the wrong controller.**
+  `${baseUrl.value}/send` matched the shortest route ending in `/send`. A suffix match now needs a
+  base-only prefix (`api`, `v1`) or a single candidate.
+- **Added: versioned API paths handed to list and export helpers count as calls**
+  (`usePaginatedList(() => \`v2/…\`)`, `exportTable('v2/…')`). The `method:` of a call is no longer
+  taken from the next call a few lines down.
+- **Changed: `search` runs its docs and code halves in parallel, takes `budget` for the code half, and
+  its truncation note names options that exist over MCP** (graphify's note pointed at CLI flags).
+- **Added: server `instructions` say which tool answers which question and how far to trust an edge;
+  a 401 answer carries a `hint` on how to get a token** (the server has no OAuth).
+
 - **Fixed: a failed build left a half-built graph in place.** `graph.json` is rewritten step by step,
   so a build that died half-way (seen on a server: 104 failed builds in a row) served a graph with no
   `http_request` edges and no domains. The previous graph is now kept aside and put back when the build

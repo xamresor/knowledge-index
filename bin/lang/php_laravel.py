@@ -33,6 +33,9 @@ CONTRIBUTES = {
     "patterns": ["class declaration", "$table", "Eloquent relations", "schema/FK", "query builder"],
 }
 
+#: A route prefix segment that a frontend's base URL supplies: Laravel's `api`, an API version.
+BASE_SEGMENT = re.compile(r"^(api|v\d+)$")
+
 #: Laravel's architectural suffixes. Stripping them yields the *entity* a class is about
 #: (`BookingController` → `Booking`), which is what the domain clustering groups on.
 LAYER_SUFFIX = re.compile(

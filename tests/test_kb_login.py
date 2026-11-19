@@ -9,10 +9,12 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import subprocess
 import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 
 BIN = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin")
 loader = importlib.machinery.SourceFileLoader("kb_login", os.path.join(BIN, "kb-login"))
@@ -153,6 +155,45 @@ class KbLoginTests(unittest.TestCase):
             p = os.path.join(d, ".mcp.json")
             kb_login.write_mcp_json(p, "1|abc", "https://kb.example.com/mcp")
             self.assertEqual(os.stat(p).st_mode & 0o777, 0o600)
+
+    def test_env_file_without_a_shell(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "kb-login.env")
+            with open(p, "w") as f:
+                f.write("# comment\nKB_LOGIN_API=https://api.example.com\n"
+                        "KB_LOGIN_HEADERS='{\"app\":\"dev\"}'\nKB_URL=\"https://kb.example.com/mcp\"\n")
+            env = {"KB_URL": "keep-me"}
+            kb_login.load_env_file(p, env)
+            self.assertEqual(env["KB_LOGIN_API"], "https://api.example.com")
+            self.assertEqual(env["KB_LOGIN_HEADERS"], '{"app":"dev"}')
+            self.assertEqual(env["KB_URL"], "keep-me")  # the environment wins over the file
+
+    def test_token_file_is_private_and_feeds_headers_helper(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "kb", "token")
+            kb_login.save_token(p, "1|abc")
+            self.assertEqual(os.stat(p).st_mode & 0o777, 0o600)
+            self.assertEqual(json.loads(kb_login.headers_json(p)), {"Authorization": "Bearer 1|abc"})
+            entry = kb_login.server_entry("https://kb.example.com/mcp", p)
+            self.assertEqual(entry["type"], "http")
+            self.assertNotIn("headers", entry)          # no token in the client config
+            self.assertIn("--headers", entry["headersHelper"])
+            self.assertIn(p, entry["headersHelper"])
+
+    def test_headers_without_a_token_fails_cleanly(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(kb_login.main(["--headers", "--token-file", os.path.join(d, "none")]), 1)
+
+    def test_mcp_json_in_git_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            subprocess.run(["git", "init", "-q", d], check=True)
+            p = os.path.join(d, ".mcp.json")
+            with mock.patch.object(kb_login, "login", return_value="1|abc"), \
+                    mock.patch.object(kb_login.getpass, "getpass", return_value="pw"):
+                rc = kb_login.main(["--api", "https://api.example.com", "--username", "u",
+                                    "--kb-url", "https://kb.example.com/mcp", "--mcp-json", p])
+            self.assertEqual(rc, 1)
+            self.assertFalse(os.path.exists(p))
 
 
 if __name__ == "__main__":

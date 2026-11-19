@@ -28,6 +28,7 @@ import json
 import os
 import re
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 
 import access
 import contracts
@@ -194,16 +195,19 @@ def graph_call(cmd: list[str], args: dict, allowed: set[str] | None, *terms: str
     that finds nothing widens to everything the caller may see, like the docs search does."""
     def graph_of(projects: set[str] | None) -> str:
         graph = graph_for(projects)
-        if cmd[1] != "path":
+        if cmd[1] not in ("path", "affected"):
             return graph
-        try:  # path search: the same graph minus the domain anchors (see access.path_graph)
+        # path and impact: the same graph minus the domain anchors (see access.path_graph). Neither
+        # walks `in_domain`, and an anchor shares its label with the model it is named after, so
+        # with anchors `graph_affected ObjectDriver` stopped at "ambiguous label".
+        try:
             return access.path_graph(graph)
         except access.Denied as e:
             raise ToolError(str(e)) from None
 
     projects, label, auto = scope_projects(args, allowed)
     graph = graph_of(projects)
-    extra = ["--budget", "1800"] if cmd[1] == "query" else []
+    extra = ["--budget", str(_budget(args))] if cmd[1] == "query" else []
     if cmd[1] == "affected":
         extra = [x for r in AFFECTED_RELATIONS for x in ("--relation", r)]
     out = run([*cmd, "--graph", graph, *extra])
@@ -213,7 +217,42 @@ def graph_call(cmd: list[str], args: dict, allowed: set[str] | None, *terms: str
         label = f"all (nothing in {label[:-7]})"
     if terms:
         out = with_suggestions(out, *terms, graph=graph)
+    if cmd[1] == "query":
+        out = _mcp_hint(out)
     return f"[projects: {label}]\n\n{out}"
+
+
+CODE_BUDGET, CODE_BUDGET_MAX = 1800, 8000
+# graphify's own advice names CLI options and tools this server does not have.
+_CLI_HINT = re.compile(r"Narrow with context_filter=\[[^\]]*\] or use get_node for a specific symbol")
+
+
+def _budget(args: dict) -> int:
+    try:
+        return max(300, min(int(args.get("budget") or CODE_BUDGET), CODE_BUDGET_MAX))
+    except (TypeError, ValueError):
+        return CODE_BUDGET
+
+
+def _mcp_hint(out: str) -> str:
+    return _CLI_HINT.sub(f"Raise `budget` (max {CODE_BUDGET_MAX}), narrow `project`, or ask "
+                         "graph_explain about one symbol", out)
+
+
+def instructions(projects: list[str] | None = None) -> str:
+    """The `instructions` an MCP client shows the model in every session: which tool for which
+    question, and how far to trust an answer. Short on purpose — it is paid for on every turn."""
+    seen = f"Projects you can see: {', '.join(projects)}. " if projects else ""
+    return (
+        "Code knowledge base over several repos (a Laravel API and its frontends). " + seen +
+        "Which tool: an endpoint and who calls it -> contracts_search (fast, the best first step); "
+        "one symbol and its neighbours -> graph_explain; what breaks if X changes -> graph_affected; "
+        "how A reaches B -> graph_path; a free question -> search (domain docs, code or both; "
+        "docs_search and graph_query are old names of search). "
+        "Trust: edges marked EXTRACTED come from the syntax; INFERRED ones (http_request, eloquent, "
+        "doc mentions) are matched by name and can be wrong. in_domain only groups a symbol with its "
+        "domain, it is not a dependency. The index is rebuilt after each deploy and can lag the "
+        "code: check a claim against the file before you rely on it.")
 
 
 # --- tool schemas -------------------------------------------------------------------------------
@@ -240,7 +279,9 @@ TOOLS = [
          "limit": {"type": "integer", "description": "max results (docs)"},
          "min_score": {"type": "number", "description": "drop docs results below this score"},
          "expand_aliases": {"type": "boolean", "description": "apply the alias table (default true)"},
-         "explain": {"type": "boolean", "description": "include retrieval score traces"}},
+         "explain": {"type": "boolean", "description": "include retrieval score traces"},
+         "budget": {"type": "integer", "description": "code: answer size in tokens (default 1800, "
+                                                     "max 8000); raise it when the result says it was truncated"}},
          "required": ["q"]}},
     {"name": "graph_path",
      "description": "Shortest path between two symbols/files in the code graph, traversing real "
@@ -530,8 +571,11 @@ def search(args: dict, allowed: set[str] | None = None) -> str:
         return search_docs(args, allowed)
     if domain == "code":
         return search_code(args, allowed)
-    return (f"=== docs ===\n{search_docs(args, allowed)}\n\n"
-            f"=== code ===\n{search_code(args, allowed)}")
+    # The halves are independent subprocesses (qmd, graphify): run them side by side, not in turn.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        docs = pool.submit(search_docs, args, allowed)
+        code = pool.submit(search_code, args, allowed)
+        return f"=== docs ===\n{docs.result()}\n\n=== code ===\n{code.result()}"
 
 
 def graph_for(allowed: set[str] | None) -> str:
