@@ -141,7 +141,9 @@ def _routes_of(path: list[str], g: nx.Graph, nodes: dict) -> list[str]:
         e = g.edges[a, b]["edge"]
         if e.get("relation") == "http_request" and e.get("http_uri"):
             ctl = nodes[e["target"]]
-            out.append(f"{e.get('http_method', '?')} {e['http_uri']} -> {ctl.get('label')} ({ctl.get('repo')})")
+            line = f"{e.get('http_method', '?')} {e['http_uri']} -> {ctl.get('label')} ({ctl.get('repo')})"
+            if not out or out[-1] != line:  # in to an endpoint and out to another caller: one route
+                out.append(line)
     return out
 
 
