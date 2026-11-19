@@ -14,6 +14,13 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+- **Added: cursors for long answers.** An answer longer than one page ends with a `cursor`; the next
+  pages come from that same answer (`cursor` + `page`, no other arguments) for 10 minutes
+  (`KB_CURSOR_TTL`, at most `KB_CURSOR_MAX` = 500 kept). Pages stay consistent even if the index is
+  rebuilt meanwhile, and the query does not run again. A cursor works only for the tool, the caller and
+  the project set that made it. `search` keeps a widened first answer (4x the hits and the code budget)
+  behind its cursor; `search` with `page` and no cursor still pages by running again.
+
 - **Added: `graph_routes` — several ways between two places, with the routes they cross.** Hops are
   priced by kind (calls and requests cheap, imports dearer, inheritance dearest), busy hubs and
   framework classes cost extra, a symbol merged across files costs a jump; Dijkstra finds the cheapest

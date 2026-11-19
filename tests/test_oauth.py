@@ -100,7 +100,7 @@ class OAuthFlow(unittest.TestCase):
         env = {"KB_LOGIN_API": api, "KB_LOGIN_PATH": "/v1/login",
                "KB_LOGIN_2FA_PATH": "/v1/login/two-factor", "KB_LOGIN_HEADERS": '{"app":"dev"}'}
         cls.patches = [mock.patch.object(kb_core, "KB", cls.tmp.name),
-                       mock.patch.object(kb_core, "call_tool", lambda n, a, allowed=None: "ok"),
+                       mock.patch.object(kb_core, "call_tool", lambda n, a, allowed=None, caller=None: "ok"),
                        mock.patch.object(kb_core, "warm_qmd", lambda: None)]
         for p in cls.patches:
             p.start()

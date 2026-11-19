@@ -27,6 +27,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
+import time
+from collections import OrderedDict
 import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -412,6 +415,10 @@ for _t in TOOLS:
         _t["inputSchema"].setdefault("properties", {})["page"] = {
             "type": "integer", "description": "page of a long answer, 1-based (default 1); an answer "
                                               "with more says so at its end"}
+        _t["inputSchema"]["properties"]["cursor"] = {
+            "type": "string", "description": "the cursor a long answer ends with: the next pages come "
+                                             "from that same answer (kept 10 minutes), the other "
+                                             "arguments are not needed again"}
         _t["inputSchema"]["properties"]["page_length"] = {
             "type": "integer", "description": f"characters per page (default {PAGE_CHARS}, "
                                               f"{PAGE_MIN}-{PAGE_MAX}); for search: the size of the code "
@@ -440,7 +447,7 @@ class ToolError(ValueError):
     """Bad request: unknown tool, missing argument, wrong type, value outside an enum."""
 
 
-def validate(name: str, args: dict) -> None:
+def validate(name: str, args: dict, require: bool = True) -> None:
     """Validate arguments against the tool's own schema — no `jsonschema` dependency.
 
     Deliberately shallow: required keys, primitive types, enum membership. That is what the surface
@@ -451,7 +458,7 @@ def validate(name: str, args: dict) -> None:
         raise ToolError(f"unknown tool: {name}")
     schema = tool.get("inputSchema", {})
     props = schema.get("properties", {})
-    for key in schema.get("required", []):
+    for key in schema.get("required", []) if require else ():
         if args.get(key) in (None, ""):
             raise ToolError(f"{name}: '{key}' is required")
     for key, value in args.items():
@@ -829,12 +836,13 @@ def _index(fn, *a):
         raise ToolError(str(e)) from None
 
 
-def call_tool(name: str, args: dict, allowed: set[str] | None = None) -> str:
+def call_tool(name: str, args: dict, allowed: set[str] | None = None, caller: str | None = None) -> str:
     """Dispatch a validated tool call. Every adapter goes through here — that is the whole point.
 
-    `allowed` = the projects the caller may see; None = everything (local use)."""
+    `allowed` = the projects the caller may see; None = everything (local use). `caller` names who
+    asks (the shared server's user): a cursor is only valid for the caller and the projects that made it."""
     args = dict(args or {})
-    validate(name, args)
+    validate(name, args, require=not args.get("cursor"))  # a cursor stands for the original arguments
     _no_options(name, args)
     if allowed is not None:
         allowed = set(allowed)
@@ -845,16 +853,71 @@ def call_tool(name: str, args: dict, allowed: set[str] | None = None) -> str:
     length = args.pop("page_length", None)
     if length is not None and not PAGE_MIN <= length <= PAGE_MAX:
         raise ToolError(f"{name}: 'page_length' must be {PAGE_MIN}-{PAGE_MAX}")
+    cursor = args.pop("cursor", None)
     if name in UNPAGED:
         return _dispatch(name, args, allowed)
+    owner = (caller, frozenset(allowed) if allowed is not None else None)
+    if cursor:
+        text = CURSORS.get(cursor, name, owner)
+        return paginate(text, page, length, cursor)
     if name in SELF_PAGED:
         if length and "budget" not in args:  # ~4 characters per token
             args["budget"] = max(300, min(length // 4, CODE_BUDGET_MAX))
-        return _dispatch(name, {**args, "_page": page}, allowed)
-    return paginate(_dispatch(name, args, allowed), page, length)
+        if page > 1:  # without a cursor: page by hits and nodes, run again
+            return _dispatch(name, {**args, "_page": page}, allowed)
+        # page 1 keeps a longer answer (4x the hits and the code budget) behind a cursor
+        want = int(args.get("limit") or 5)
+        args = {**args, "limit": want * CURSOR_WIDEN,
+                "budget": min(_budget(args) * CURSOR_WIDEN, CODE_BUDGET_MAX * CURSOR_WIDEN)}
+    text = _dispatch(name, args, allowed)
+    first = paginate(text, page, length)
+    if "[page " not in first:
+        return first
+    token = CURSORS.put(text, name, owner)
+    return paginate(text, page, length, token)
 
 
-def paginate(text: str, page: int, size: int | None = None) -> str:
+class Cursors:
+    """Answers kept for their next pages: a random token -> (text, tool, owner, expiry). In memory, per
+    process; at most CURSOR_MAX of them and CURSOR_TTL seconds each. A token works only for the tool,
+    the caller and the projects that made it: another caller gets "expired", not someone's answer."""
+
+    def __init__(self, ttl: float, cap: int):
+        self.ttl, self.cap = ttl, cap
+        self.items: "OrderedDict[str, tuple[str, str, tuple, float]]" = OrderedDict()
+        self.lock = threading.Lock()
+
+    def put(self, text: str, tool: str, owner: tuple) -> str:
+        token = "c_" + secrets.token_urlsafe(12)
+        with self.lock:
+            self._expire()
+            while len(self.items) >= self.cap:
+                self.items.popitem(last=False)
+            self.items[token] = (text, tool, owner, time.monotonic() + self.ttl)
+        return token
+
+    def get(self, token: str, tool: str, owner: tuple) -> str:
+        with self.lock:
+            self._expire()
+            hit = self.items.get(token)
+        if not hit or hit[1] != tool or hit[2] != owner:
+            raise ToolError("cursor expired or unknown: run the query again (cursors live "
+                            f"{int(self.ttl // 60)} minutes)")
+        return hit[0]
+
+    def _expire(self) -> None:
+        now = time.monotonic()
+        for k in [k for k, v in self.items.items() if v[3] < now]:
+            del self.items[k]
+
+
+CURSOR_TTL = float(os.environ.get("KB_CURSOR_TTL", "600"))
+CURSOR_MAX = int(os.environ.get("KB_CURSOR_MAX", "500"))
+CURSOR_WIDEN = 4
+CURSORS = Cursors(CURSOR_TTL, CURSOR_MAX)
+
+
+def paginate(text: str, page: int, size: int | None = None, cursor: str | None = None) -> str:
     """Page `page` of `text`. A leading `[projects: …]` line is repeated on every page; the cut falls on
     a blank line when it can, else on a line end."""
     size = size or PAGE_CHARS
@@ -880,7 +943,12 @@ def paginate(text: str, page: int, size: int | None = None) -> str:
     if len(pages) == 1:
         return head + pages[0]
     nav = f"\n\n[page {page} of {len(pages)}"
-    nav += f" — call again with page: {page + 1} for the rest]" if page < len(pages) else "]"
+    if page < len(pages):
+        nav += f" — next: page: {page + 1}"
+        nav += f', cursor: "{cursor}" (kept {int(CURSOR_TTL // 60)} min, no other arguments needed)]' \
+            if cursor else " for the rest]"
+    else:
+        nav += "]"
     return head + pages[page - 1] + nav
 
 

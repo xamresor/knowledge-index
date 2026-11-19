@@ -2,6 +2,7 @@
 """Paging: every tool but `version` takes `page`, long answers are cut at line ends, nothing is lost."""
 from __future__ import annotations
 
+import re
 import unittest
 from unittest import mock
 
@@ -46,7 +47,7 @@ class Paginate(unittest.TestCase):
             self.assertTrue(out.startswith("[projects: api]\n\n"))
             body = out.split("\n\n", 1)[1]
             pages.append(body.split("\n\n[page ")[0])
-            if "call again with page" not in out:
+            if "next: page" not in out:
                 break
             n += 1
         self.assertGreater(n, 5)
@@ -54,6 +55,31 @@ class Paginate(unittest.TestCase):
         for i in range(400):
             self.assertIn(f"- line {i} ", joined)
         self.assertIn("no page", kb_core.paginate(text, n + 1, size=2000))
+
+    def test_cursor_serves_the_same_answer_to_its_owner_only(self):
+        calls = []
+
+        def produce(fn, *a):
+            calls.append(1)
+            return "\n".join("row %d" % i for i in range(3000))
+        with mock.patch.object(kb_core, "_index", produce):
+            first = kb_core.call_tool("contracts_search", {"query": "x"}, {"api"}, "ann")
+            token = re.search(r'cursor: "([^"]+)"', first).group(1)
+            second = kb_core.call_tool("contracts_search", {"cursor": token, "page": 2}, {"api"}, "ann")
+            self.assertEqual(len(calls), 1)            # page 2 did not run the query again
+            self.assertIn("row 1000", second + kb_core.call_tool(
+                "contracts_search", {"cursor": token, "page": 3}, {"api"}, "ann"))
+            for who, projects, tool in (("bob", {"api"}, "contracts_search"),
+                                        ("ann", {"api", "web"}, "contracts_search"),
+                                        ("ann", {"api"}, "connections")):
+                with self.assertRaises(kb_core.ToolError):
+                    kb_core.call_tool(tool, {"cursor": token, "page": 2}, projects, who)
+
+    def test_cursor_expires(self):
+        store = kb_core.Cursors(ttl=0.0, cap=10)
+        token = store.put("x", "search", (None, None))
+        with self.assertRaises(kb_core.ToolError):
+            store.get(token, "search", (None, None))
 
     def test_short_answer_has_no_page_note(self):
         self.assertEqual(kb_core.paginate("short", 1), "short")
@@ -63,7 +89,7 @@ class Paginate(unittest.TestCase):
         with mock.patch.object(kb_core, "_index", lambda fn, *a: long_text):
             first = kb_core.call_tool("contracts_search", {"query": "x"})
             second = kb_core.call_tool("contracts_search", {"query": "x", "page": 2})
-        self.assertIn("call again with page: 2", first)
+        self.assertIn("next: page: 2", first)
         self.assertNotEqual(first, second)
         with self.assertRaises(kb_core.ToolError):
             kb_core.call_tool("contracts_search", {"query": "x", "page": 0})

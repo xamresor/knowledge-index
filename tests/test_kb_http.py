@@ -260,7 +260,7 @@ class DocsFilterTests(unittest.TestCase):
         self.assertNotIn("qmd://kb-api/auth.md", out)
         self.assertNotIn("Other collection", out)
         self.assertNotIn("-c", cmds[0])        # every collection is searched, then filtered
-        self.assertIn("25", cmds[0])           # 5x the shown hits are asked for
+        self.assertIn("100", cmds[0])          # 5x the hits of a widened page 1 (4x 5) are asked for
 
     def test_nothing_allowed(self):
         with mock.patch.object(kb_core, "run", lambda cmd, **kw: self.OUT):
@@ -531,7 +531,7 @@ class HttpTests(unittest.TestCase):
         cls.base = f"http://127.0.0.1:{cls.srv.server_address[1]}"
         cls.seen = []
 
-        def fake_call(name, args, allowed=None):
+        def fake_call(name, args, allowed=None, caller=None):
             cls.seen.append((name, args, allowed))
             if args.get("symbol", "").startswith("-"):
                 raise kb_core.ToolError("bad")

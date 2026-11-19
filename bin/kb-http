@@ -352,7 +352,7 @@ def handle_message(msg: dict, ident: Identity) -> dict | None:
         t0 = time.monotonic()
         try:
             with sem:
-                text = kb_core.call_tool(name, args, ident.projects)
+                text = kb_core.call_tool(name, args, ident.projects, ident.name)
             err = False
         except kb_core.ToolError as e:
             text, err = f"(error: {e})", True
