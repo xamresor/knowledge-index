@@ -417,7 +417,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; "
-                                                    "form-action 'self'; frame-ancestors 'none'")
+                                                    "form-action 'self' http://localhost:* http://127.0.0.1:* http://[::1]:*; "
+                                                    "frame-ancestors 'none'")
+        # form-action also governs where a submitted form may be redirected: with 'self' alone the
+        # browser blocked the final 302 to the MCP client's loopback callback after a good sign-in.
         for k, v in (headers or {}).items():
             self.send_header(k, v)
         self.end_headers()

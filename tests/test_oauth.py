@@ -181,6 +181,8 @@ class OAuthFlow(unittest.TestCase):
         status, headers = self.sign_in(client, v)
         self.assertEqual(status, 302)
         loc = urllib.parse.urlsplit(headers["Location"])
+        _, page_headers, _ = self.call("GET", "/authorize?client_id=x")
+        self.assertIn("http://localhost:*", page_headers["Content-Security-Policy"])  # the 302 may land
         q = dict(urllib.parse.parse_qsl(loc.query))
         self.assertEqual(q["state"], "s1")
         status, _, text = self.call("POST", "/token", {
