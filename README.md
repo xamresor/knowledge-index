@@ -8,6 +8,10 @@ index** over the projects' docs. By default everything runs **on-device with no 
 `none` and `llama` embedding backends); only the optional `other` backend can reach an external
 service.
 
+> [!TIP]
+> **Using it on your own codebase?** It started on one Laravel API with Vue frontends, so other stacks will hit
+> rough edges. Fixes, new language plugins and pull requests are very welcome: open an issue or a PR.
+
 Built on two existing tools: [**graphify**](https://github.com/Graphify-Labs/graphify) (AST code graph)
 and [**qmd**](https://github.com/tobi/qmd) (on-device markdown vector search).
 
