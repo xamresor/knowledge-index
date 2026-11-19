@@ -179,15 +179,37 @@ def _no_match(out: str) -> bool:
     return "no node matching" in low or "no matching nodes" in low or "no unique node match" in low
 
 
+# What `graph_affected` walks backwards. graphify's own default list stops at the repo boundary and
+# knows nothing of the relations this project adds, so a controller showed no frontend callers and a
+# table no models. Never `in_domain`: sharing a domain is not a dependency.
+AFFECTED_RELATIONS = (
+    "calls", "indirect_call", "references", "imports", "imports_from", "re_exports", "inherits",
+    "extends", "implements", "uses", "mixes_in", "embeds",
+    "http_request", "eloquent", "fk", "sql", "defines_table", "documents",
+)
+
+
 def graph_call(cmd: list[str], args: dict, allowed: set[str] | None, *terms: str) -> str:
     """Run a graphify command on the graph of the call's projects. An automatic (session) scope
     that finds nothing widens to everything the caller may see, like the docs search does."""
+    def graph_of(projects: set[str] | None) -> str:
+        graph = graph_for(projects)
+        if cmd[1] != "path":
+            return graph
+        try:  # path search: the same graph minus the domain anchors (see access.path_graph)
+            return access.path_graph(graph)
+        except access.Denied as e:
+            raise ToolError(str(e)) from None
+
     projects, label, auto = scope_projects(args, allowed)
-    graph = graph_for(projects)
-    out = run([*cmd, "--graph", graph] + (["--budget", "1800"] if cmd[1] == "query" else []))
+    graph = graph_of(projects)
+    extra = ["--budget", "1800"] if cmd[1] == "query" else []
+    if cmd[1] == "affected":
+        extra = [x for r in AFFECTED_RELATIONS for x in ("--relation", r)]
+    out = run([*cmd, "--graph", graph, *extra])
     if auto and _no_match(out):
-        projects, graph = allowed, graph_for(allowed)
-        out = run([*cmd, "--graph", graph] + (["--budget", "1800"] if cmd[1] == "query" else []))
+        projects, graph = allowed, graph_of(allowed)
+        out = run([*cmd, "--graph", graph, *extra])
         label = f"all (nothing in {label[:-7]})"
     if terms:
         out = with_suggestions(out, *terms, graph=graph)

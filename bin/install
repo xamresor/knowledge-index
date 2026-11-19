@@ -48,7 +48,10 @@ else
 fi
 
 # graphify builds the code half. The floor is a real one: cross-repo edge fields we rely on.
-if command -v graphify >/dev/null 2>&1; then
+if command -v graphify >/dev/null 2>&1 && ! graphify --version >/dev/null 2>&1; then
+  # Typical after a system Python upgrade: the tool's venv still points at the old interpreter.
+  bad "graphify is installed but does not start — reinstall it (uv tool install graphifyy --reinstall)"; MISSING=1
+elif command -v graphify >/dev/null 2>&1; then
   GV="$(graphify --version 2>&1 | head -1)"
   if python3 - "$GV" <<'PY'
 import re, sys

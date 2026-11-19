@@ -14,6 +14,20 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+- **Fixed: `graph_path` reported symbols as connected when they only shared a domain.** Path search
+  walked the `in_domain` edges, so any two members of a domain were two hops apart through the anchor.
+  On the author's graph (5386 nodes) 21 of 105 found paths had no real route at all. Path search now
+  runs on a copy of the caller's graph without the domain anchors (`access.path_graph`), cut after the
+  access filter. `explain`, the code search and the dashboard still see the anchors.
+- **Fixed: `graph_affected` stopped at the repo boundary.** graphify's default relation list does not
+  include the relations this project adds, so a controller method showed no frontend callers and a
+  table no models. The tool now also walks `http_request`, `eloquent`, `fk`, `sql`, `defines_table`
+  and `documents`.
+- **Fixed: `bin/install` took a graphify that does not start for an old one.** After a system Python
+  upgrade the tool's environment can point at a missing interpreter; this is now reported as such.
+- **Tests: `tests/test_graph_routes.py`** — access guards for the graph tools and a run against the
+  real graphify (skipped when it is absent), which the stubbed tests could not catch.
+
 - **Fixed: deleted code stayed in the graph.** With graphify's cache kept between builds, `graphify
   update` refused to overwrite a project graph that would shrink. The staged copy is the truth, so the
   build now passes `--force`.

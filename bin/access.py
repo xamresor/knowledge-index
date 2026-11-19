@@ -17,7 +17,11 @@ never by parsing their text output:
     the interfaces between services; they stay visible to every caller, whatever the filter
     (`KB_CONTRACT_EDGES=0` hides the edges too).
 
-CLI: `access.py filter <graph.json> <out.json> <project>...` (what graph_for runs).
+  * **path search** runs on a second copy without the domain anchors (`path_graph`). It is always
+    cut from the graph the caller already may see, so it can only hold fewer nodes, never more.
+
+CLI: `access.py filter <graph.json> <out.json> <project>...` (what graph_for runs),
+     `access.py routes <graph.json> <out.json>` (what path_graph runs).
 """
 from __future__ import annotations
 
@@ -142,6 +146,59 @@ def graph_for(allowed: set[str] | None, known: list[str] | set[str]) -> str:
     return path
 
 
+def strip_domains(g: dict) -> dict:
+    """Graph `g` without domain anchors and their `in_domain` edges.
+
+    An anchor links every member of a domain to one hub. That is right for the dashboard and for
+    `explain`, and wrong for path search: two symbols that only share a domain look two hops apart.
+    """
+    ek = "links" if "links" in g else "edges"
+    anchors = {n["id"] for n in g.get("nodes", [])
+               if n.get("type") == "domain" or n.get("repo") == "domain"}
+    out = {k: v for k, v in g.items() if k not in ("nodes", ek)}
+    out["nodes"] = [n for n in g.get("nodes", []) if n["id"] not in anchors]
+    out[ek] = [e for e in g.get(ek, [])
+               if e.get("relation") != "in_domain"
+               and e.get("source") not in anchors and e.get("target") not in anchors]
+    return out
+
+
+def path_graph(graph: str) -> str:
+    """Path of the copy of `graph` used for path search (cached next to the filtered copies).
+
+    `graph` is what graph_for returned for this caller: the main graph or a filtered copy. The
+    result is derived from that file only, so the access filter is already applied.
+    """
+    if os.path.abspath(graph) == os.path.abspath(GRAPH):
+        path = f"{FILTERED_DIR}/_routes/graph.json"
+    else:
+        path = os.path.join(os.path.dirname(graph), "routes.json")
+    with _filter_lock:
+        try:
+            fresh = os.path.getmtime(path) >= os.path.getmtime(graph)
+        except OSError:
+            fresh = False
+        if not fresh:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = f"{path}.tmp.{os.getpid()}"
+            p = subprocess.run([sys.executable, os.path.abspath(__file__), "routes", graph, tmp],
+                               capture_output=True, text=True, timeout=300)
+            if p.returncode != 0:
+                raise Denied(f"path graph failed: {p.stderr.strip()[:300]}")
+            os.replace(tmp, path)
+    return path
+
+
+def _main_routes(argv: list[str]) -> int:
+    src, dst = argv
+    with open(src, encoding="utf-8") as f:
+        out = strip_domains(json.load(f))
+    with open(dst, "w", encoding="utf-8") as f:
+        json.dump(out, f)
+    print(f"{len(out['nodes'])} nodes, {len(out.get('links', out.get('edges', [])))} edges")
+    return 0
+
+
 def _main_filter(argv: list[str]) -> int:
     src, dst, *projects = argv
     with open(src, encoding="utf-8") as f:
@@ -156,5 +213,8 @@ def _main_filter(argv: list[str]) -> int:
 if __name__ == "__main__":
     if len(sys.argv) >= 4 and sys.argv[1] == "filter":
         sys.exit(_main_filter(sys.argv[2:]))
-    print("usage: access.py filter <graph.json> <out.json> <project>...", file=sys.stderr)
+    if len(sys.argv) == 4 and sys.argv[1] == "routes":
+        sys.exit(_main_routes(sys.argv[2:]))
+    print("usage: access.py filter <graph.json> <out.json> <project>...\n"
+          "       access.py routes <graph.json> <out.json>", file=sys.stderr)
     sys.exit(2)
