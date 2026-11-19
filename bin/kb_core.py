@@ -201,7 +201,7 @@ def graph_call(cmd: list[str], args: dict, allowed: set[str] | None, *terms: str
     that finds nothing widens to everything the caller may see, like the docs search does."""
     def graph_of(projects: set[str] | None) -> str:
         graph = graph_for(projects)
-        if cmd[1] not in ("path", "affected"):
+        if cmd[1] not in ("path", "affected", "query"):
             return graph
         # path and impact: the same graph minus the domain anchors (see access.path_graph). Neither
         # walks `in_domain`, and an anchor shares its label with the model it is named after, so
@@ -222,7 +222,7 @@ def graph_call(cmd: list[str], args: dict, allowed: set[str] | None, *terms: str
         if worker is not None and os.path.exists(GRAPH):
             full = projects is None or set(PROJECTS) <= set(projects)
             view = {"allowed": None if full else sorted(projects),
-                    "routes": cmd[1] in ("path", "affected")}
+                    "routes": cmd[1] in ("path", "affected", "query")}
             out = worker.run([*cmd[1:], "--graph", GRAPH, *extra], view)  # cmd[0] is "graphify"
             if out is not None:
                 out = out.strip()

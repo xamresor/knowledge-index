@@ -14,6 +14,10 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+- **Fixed: code search walked the domain anchors.** 2-7 of ~50 shown nodes were empty domain nodes, and a
+  search could start from one; `search` with `domain: code` now runs on the graph without them, like
+  path search and impact.
+
 - **Added: cursors for long answers.** An answer longer than one page ends with a `cursor`; the next
   pages come from that same answer (`cursor` + `page`, no other arguments) for 10 minutes
   (`KB_CURSOR_TTL`, at most `KB_CURSOR_MAX` = 500 kept). Pages stay consistent even if the index is
