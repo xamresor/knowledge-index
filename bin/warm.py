@@ -47,9 +47,11 @@ class _Proc:
         self.lock = threading.Lock()
 
     def _start(self) -> None:
+        import addons
+        env = {**os.environ, "KB_FAST_ROUTES": "1" if addons.on("fast-routes") else "0"}
         self.proc = subprocess.Popen(
             self.argv, cwd=self.cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, text=True, bufsize=1, start_new_session=True)
+            stderr=subprocess.DEVNULL, text=True, bufsize=1, start_new_session=True, env=env)
 
     def _alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -152,9 +154,11 @@ def graph_once(argv: list[str], view: dict | None = None, timeout: float = 120.0
     message: dict = {"argv": argv}
     if view:
         message["view"] = view
+    import addons
+    env = {**os.environ, "KB_FAST_ROUTES": "1" if addons.on("fast-routes") else "0"}
     try:
         p = subprocess.run([py, os.path.join(HERE, "graph_worker.py")], input=json.dumps(message) + "\n",
-                           capture_output=True, text=True, timeout=timeout)
+                           capture_output=True, text=True, timeout=timeout, env=env)
         return str(json.loads(p.stdout.strip().splitlines()[-1]).get("out", ""))
     except (OSError, subprocess.SubprocessError, ValueError, IndexError):
         return None

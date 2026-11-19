@@ -3,9 +3,9 @@
 The KB reads every `docs/` folder listed in `kb.projects.toml` (`docs = "…"`). Each Markdown file
 becomes a node of the code graph, next to the classes and files. Three kinds of edges come out of a doc:
 
-- **`links_to`**: a relative Markdown link (`[app switcher](app-switcher.md)`) or a `[[wikilink]]` to
+- **`links_to`**: a relative Markdown link (`[refunds](refunds.md)`) or a `[[wikilink]]` to
   another doc. Exact, taken from the text.
-- **`documents`**: a class, method or file named in backticks (`` `AppSwitcherController` ``) that exists
+- **`documents`**: a class, method or file named in backticks (`` `InvoiceController` ``) that exists
   in the code. Matched by name, so it is marked INFERRED.
 - **contracts**: a file in `docs/contracts/` with `from`/`to` front matter becomes one line of the
   service map (`connections`) and is checked by `problems`.
@@ -27,7 +27,7 @@ when it needs them:
 docs/
   README.md                 index: one table row per domain
   auth/README.md            sign-in, second factor, tokens
-  auth/app-switcher.md      one feature of the domain, when the overview gets long
+  billing/refunds.md        one feature of the domain, when the overview gets long
   billing/README.md
   contracts/                one file per connection to another service (section 4)
   plans/                    the future only (section 3)
@@ -39,9 +39,9 @@ domain, with the words people will search for. Detail lives in the domain's own 
 ## 2. The head of each doc says what it is about
 
 ```markdown
-# App switcher and handoff login
+# Refunds
 
-> **Domain:** `auth` · **Component:** `app/Components/AppSwitcher` · **Ticket:** SM-3046
+> **Domain:** `billing` · **Component:** `app/Billing/Refunds` · **Ticket:** SHOP-142
 ```
 
 Then: what it does (plain words first), the flow, the rules, the endpoints, and at the end an
@@ -81,11 +81,11 @@ one when you add an outgoing call to another service.
 
 ## 5. Link and name things so the graph can follow
 
-- Link related docs with relative links: `[the handoff login](../auth/app-switcher.md)`. A link the
+- Link related docs with relative links: `[refunds](../billing/refunds.md)`. A link the
   reader can click is also an edge the agent can walk.
-- Name classes, methods and files exactly, in backticks: `` `HandoffCodeStore` ``, `` `.consume()` ``,
-  `` `app/Components/AppSwitcher/` ``. A paraphrase ("the code store") links nothing.
-- Name routes as the API declares them: `POST v1/login/handoff`. `contracts_search` and the doc
+- Name classes, methods and files exactly, in backticks: `` `RefundService` ``, `` `.approve()` ``,
+  `` `app/Billing/Refunds/` ``. A paraphrase ("the code store") links nothing.
+- Name routes as the API declares them: `POST v1/orders/{order}/refunds`. `contracts_search` and the doc
   meet on that string.
 
 ## 6. Small habits

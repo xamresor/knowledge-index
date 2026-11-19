@@ -28,8 +28,14 @@ export GRAPHIFY_VIZ_NODE_LIMIT="${GRAPHIFY_VIZ_NODE_LIMIT:-20000}"
 
 # Set while build_graph rewrites graph.json; on a failed exit the previous graph comes back.
 GRAPH_PREV=""
+BUILD_START=""
+BUILD_KIND=""
 keep_graph() {
   local rc=$?
+  if [ -n "$BUILD_START" ]; then  # one line per build: when, exit, seconds, which build (admin charts)
+    mkdir -p "$KB_DATA/logs"
+    echo "$(date '+%F %T') exit=$rc $(( $(date +%s) - BUILD_START ))s $BUILD_KIND" >>"$KB_DATA/logs/builds.log"
+  fi
   if [ "$rc" -ne 0 ] && [ -n "$GRAPH_PREV" ] && [ -f "$GRAPH_PREV" ]; then
     mv -f "$GRAPH_PREV" "$OUT/graph.json"
     touch "$OUT/graph.json"   # newer than any per-caller copy cut from the half-built graph
@@ -73,8 +79,10 @@ stage_and_build() {
   find "$dest" -mindepth 1 -maxdepth 1 ! -name graphify-out -exec rm -rf {} +
   IFS=',' read -ra dirs <<< "$code_csv"
   for d in "${dirs[@]}"; do
+    # Build output and caches are not source: `.next` of a Next.js app alone was 2.1 GB per build.
     [ -d "$d" ] && rsync -a --exclude vendor --exclude node_modules --exclude storage \
-      --exclude dist --exclude build \
+      --exclude dist --exclude build --exclude .next --exclude .nuxt --exclude .output \
+      --exclude coverage --exclude .turbo --exclude .cache \
       --exclude tests --exclude '*.png' --exclude '*.svg' --exclude '*.jpg' --exclude '*.jpeg' \
       --exclude '*.gif' --exclude '*.ico' --exclude '*.webp' "$d" "$dest/" 2>/dev/null || true
   done
@@ -318,6 +326,43 @@ build_kb() {
   qmd status || true
 }
 
+# Optional add-ons, named by what they do (bin/addons.py has the list). `install` fetches what one needs
+# and switches it on; `remove` switches it off (and deletes what it fetched). Off = no tool, no page.
+addon() {
+  local action="$1" name="$2" sb="$KB_DATA/sandbox" gpy gver
+  gpy="$(head -1 "$(readlink -f "$(command -v graphify 2>/dev/null || echo /nonexistent)")" 2>/dev/null | sed 's/^#!//')"
+  gver="$(graphify --version 2>/dev/null | awk '{print $2}')"
+  case "$action" in
+    list) "$PY" "$KB/bin/addons.py" list ;;
+    install)
+      case "$name" in
+        code-mode)
+          command -v node >/dev/null && command -v npm >/dev/null || { echo "code-mode needs Node 22+ and npm" >&2; exit 1; }
+          mkdir -p "$sb"
+          if [ "$(cd "$sb" && pwd -P)" != "$(cd "$KB_PACKAGE/sandbox" && pwd -P)" ]; then  # a checkout installs in place
+            cp "$KB_PACKAGE/sandbox/package.json" "$KB_PACKAGE/sandbox/package-lock.json" "$KB_PACKAGE/sandbox/runner.mjs" "$sb/"
+          fi
+          (cd "$sb" && npm ci --ignore-scripts --no-audit --no-fund) ;;
+        fast-routes)
+          if [ -n "$gpy" ] && "$gpy" -c "import rustworkx" 2>/dev/null; then :
+          elif command -v uv >/dev/null && uv tool list 2>/dev/null | grep -q '^graphifyy'; then
+            uv tool install "graphifyy==$gver" --with rustworkx --reinstall
+          elif command -v pipx >/dev/null; then pipx inject graphifyy rustworkx
+          else echo "install rustworkx into graphify's environment: $gpy -m pip install rustworkx" >&2; exit 1; fi ;;
+        tool-multicall|metrics|admin) : ;;   # nothing to fetch
+        *) echo "kb addon install <name>: $(sed -n 's/^    "\([a-z-]*\)": .*/\1/p' "$KB/bin/addons.py" | tr '\n' ' ')" >&2; exit 1 ;;
+      esac
+      "$PY" "$KB/bin/addons.py" on "$name" && echo "$name: on (restart the KB server to load it)"
+      if [ "$name" = admin ] && [ -z "${KB_ADMINS:-}" ] && [ ! -f "$KB_DATA/admins.txt" ]; then
+        echo "  the shared server also needs the admin names: KB_ADMINS=<names> or admins.txt (local kb-api needs none)"
+      fi ;;
+    remove)
+      "$PY" "$KB/bin/addons.py" off "$name" && echo "$name: off"
+      if [ "$name" = code-mode ]; then rm -rf "$sb/node_modules" && echo "  sandbox packages removed from $sb"; fi ;;
+    *) echo "kb addon {list|install <name>|remove <name>}" >&2; exit 1 ;;
+  esac
+}
+
 case "${1:-build}" in
   --version|-V|version)
           echo "knowledge-index $KB_VERSION"
@@ -325,10 +370,10 @@ case "${1:-build}" in
           echo "  qmd:      $(qmd --version 2>/dev/null || echo 'not found')"
           "$PY" "$KB/bin/paths.py" | sed 's/^/  /'
           ;;
-  build)  build_graph; build_kb ;;
-  graph)  build_graph ;;
+  build)  BUILD_START=$(date +%s); BUILD_KIND=build; build_graph; build_kb ;;
+  graph)  BUILD_START=$(date +%s); BUILD_KIND=graph; build_graph ;;
   kb)     build_kb ;;
-  update) build_graph; build_kb >/dev/null; echo "refreshed" ;;
+  update) BUILD_START=$(date +%s); BUILD_KIND=update; build_graph; build_kb >/dev/null; echo "refreshed" ;;
   qmd-backend) rm -f "$LOCAL_CFG"; unset QMD_BACKEND; echo "qmd backend set to: $(resolve_qmd_backend)" ;;
   label)  "$PY" "$KB/bin/label_namespaces.py" "$OUT/graph.json" "$OUT/.graphify_labels.json"
           graphify cluster-only "$KB_DATA" --no-label >/dev/null; echo "relabeled + report regenerated" ;;
@@ -340,5 +385,6 @@ case "${1:-build}" in
   open)   W="$KB_WEB"; [ -f "$W/index.html" ] || "$PY" -c "import sys;sys.path.insert(0,'$KB/bin');import paths;paths.stage_web()"
           xdg-open "$W/index.html" 2>/dev/null || echo "open $W/index.html" ;;
   status) graphify diagnose multigraph --graph "$OUT/graph.json" | head -8; echo; qmd status ;;
-  *) echo "usage: kb {build|graph|kb|update|label|status|open|vendor|qmd-backend|--version}"; exit 1 ;;
+  addon) addon "${2:-list}" "${3:-}" ;;
+  *) echo "usage: kb {build|graph|kb|update|label|status|open|vendor|qmd-backend|addon|--version}"; exit 1 ;;
 esac

@@ -10,6 +10,18 @@ from _kbtest import BIN  # noqa: F401
 import kb_core
 
 
+class AddonOff(unittest.TestCase):
+    def test_an_addon_that_is_off_has_no_tool(self):
+        with mock.patch.dict("os.environ", {"KB_ADDONS": "none"}):
+            names = [t["name"] for t in kb_core.tools()]
+            self.assertNotIn("batch", names)
+            self.assertNotIn("run_code", names)
+            self.assertIn("search", names)
+            with self.assertRaises(kb_core.ToolError) as e:
+                kb_core.call_tool("batch", {"calls": [{"tool": "version"}]})
+            self.assertIn("kb addon install tool-multicall", str(e.exception))
+
+
 class Batch(unittest.TestCase):
     def setUp(self):
         self.seen = []

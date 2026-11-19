@@ -41,3 +41,6 @@ web/vendor/
 # Server logs and usage counters (bin/kb-refresh, bin/kb-http)
 /logs/
 sandbox/node_modules/
+
+# Add-ons switched on locally (kb addon install)
+/addons.json

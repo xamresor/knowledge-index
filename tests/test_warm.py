@@ -25,10 +25,10 @@ class Formatting(unittest.TestCase):
 
     def test_searches_follow_the_mode(self):
         self.assertEqual(kb_core._searches({"mode": "lex"}, "a b")[0], [{"type": "lex", "query": "a b"}])
-        searches, intent = kb_core._searches({}, "violation status buttons")
-        self.assertIn({"type": "vec", "query": "violation status buttons"}, searches)
-        self.assertIn({"type": "lex", "query": "violation"}, searches)
-        self.assertEqual(intent, "violation status buttons")
+        searches, intent = kb_core._searches({}, "order status buttons")
+        self.assertIn({"type": "vec", "query": "order status buttons"}, searches)
+        self.assertIn({"type": "lex", "query": "order"}, searches)
+        self.assertEqual(intent, "order status buttons")
 
 
 class Fallback(unittest.TestCase):

@@ -5,7 +5,7 @@ Templates for running `bin/kb-http` on a server for a team. Replace the placehol
 
 | File | What |
 |---|---|
-| `kb-http.service` | systemd unit: `KB_SERVER=on`, the identity endpoint, memory limits |
+| `kb-http.service` | systemd unit: `KB_SERVER=on`, the two webhooks, memory limits |
 | `nginx-kb.conf` | TLS in front of `127.0.0.1:8790`, only `POST /mcp` passes |
 | `crontab.txt` | `bin/kb-refresh` every minute + a nightly forced rebuild |
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fixes from the first outside users' review of the shared server (2026-11-19).
 
-- graph_affected for a model named like its domain anchor (`ObjectDriver`) stopped at "ambiguous".
+- graph_affected for a model named like its domain anchor (`Order`) stopped at "ambiguous".
 - A call site that lost its path prefix (`${baseUrl.value}/send`) was linked to the shortest route
   ending in `/send`, i.e. to the wrong controller.
 - List and export composables (`usePaginatedList(() => \`v2/…\`)`) were not seen as API callers.
@@ -61,8 +61,8 @@ class AffectedSkipsDomainAnchors(unittest.TestCase):
 
 
 class AmbiguousSuffix(unittest.TestCase):
-    routes = {("post", "v1/ems/violations/{}/csdd/send"): ("Csdd.php", "send"),
-              ("post", "v1/objects/{}/cameras/{}/road-markup/send"): ("RoadMarkup.php", "send"),
+    routes = {("post", "v1/invoices/{}/send"): ("Invoice.php", "send"),
+              ("post", "v1/orders/{}/receipts/{}/send"): ("Receipt.php", "send"),
               ("get", "v2/drivers"): ("Drivers.php", "index"),
               ("get", "v2/customers/{}/drivers"): ("Drivers.php", "byCustomer")}
 

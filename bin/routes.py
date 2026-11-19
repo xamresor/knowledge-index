@@ -25,15 +25,18 @@ graph; networkx comes from graphify's environment.
 from __future__ import annotations
 
 import math
+import os
 import re
 from collections import OrderedDict
 
 import networkx as nx
 
-try:  # the same Dijkstra with a Rust core: ~2x faster here (measured 2026-11-19), optional
-    import rustworkx as rx
-except ImportError:  # pragma: no cover - depends on the environment
-    rx = None
+rx = None
+if os.environ.get("KB_FAST_ROUTES", "0") == "1":  # the fast-routes add-on (bin/addons.py)
+    try:  # the same Dijkstra with a Rust core: 2-3x faster here (measured 2026-11-19)
+        import rustworkx as rx
+    except ImportError:  # pragma: no cover - depends on the environment
+        rx = None
 
 # Price of one hop by relation. Missing = not a code path (left out).
 COST = {

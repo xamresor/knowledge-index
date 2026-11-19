@@ -3,9 +3,9 @@
 
 Without it a developer runs bin/kb-login in a terminal and a client that tries OAuth after a 401
 fails with "could not connect". With it, `/mcp` -> `kb` -> Authenticate opens a login page; the
-person types the user name, password and authenticator code of *your* API; the client gets the API's
-own dev token as its access token. kb-http checks that token exactly as before (the identity
-endpoint), so access rules do not change.
+person types the user name, password and code; the login webhook (access protocol v1) checks them and
+gives the token, which the client keeps as its access token. kb-http checks it with the permission
+webhook, so access rules do not change.
 
 What it implements (MCP authorization spec 2025-06-18):
 
@@ -78,7 +78,7 @@ class Server:
     """State and logic; the HTTP adapter in kb-http turns requests into calls to `handle`."""
 
     def __init__(self, login_env: dict, check_token, clients_file: str = "", now=time.time):
-        self.env = login_env                 # KB_LOGIN_API, KB_LOGIN_PATH, … (bin/kb-login's names)
+        self.env = login_env                 # KB_LOGIN_URL, KB_HOOK_HEADERS (docs/access-protocol.md)
         self.check_token = check_token       # token -> raises when the API no longer accepts it
         self.clients_file = clients_file
         self.now = now
@@ -171,18 +171,13 @@ class Server:
         return txn
 
     def password_step(self, txn_id: str, username: str, password: str) -> tuple[str, str | None]:
-        """-> ("code", None) when a 2FA code is needed next, ("done", redirect URL) when signed in."""
+        """-> ("code", None) when a code is needed next, ("done", redirect URL) when signed in."""
         txn = self._txn(txn_id)
-        p, h = kb_login._paths(self.env), kb_login._extra_headers(self.env)
-        data = kb_login.post(self.env["KB_LOGIN_API"], p["login"],
-                             {"username": username, "password": password}, headers=h).get("data") or {}
-        tf = data.get("two_factor") or {}
-        if tf.get("challenge"):
-            if tf.get("type") == "enroll":
-                raise kb_login.LoginError(
-                    "this account has no authenticator yet: set it up once in the app or with "
-                    "bin/kb-login, then sign in here")
-            txn["api_challenge"] = tf["challenge"]
+        data = kb_login.post(self.env["KB_LOGIN_URL"], {"username": username, "password": password},
+                             headers=kb_login.hook_headers(self.env))
+        challenge = (data.get("two_factor") or {}).get("challenge")
+        if challenge:
+            txn["api_challenge"] = challenge
             return "code", None
         return "done", self._finish(txn_id, data.get("token"))
 
@@ -190,11 +185,8 @@ class Server:
         txn = self._txn(txn_id)
         if not txn.get("api_challenge"):
             raise OAuthError(400, "invalid_request", "no second step pending")
-        p, h = kb_login._paths(self.env), kb_login._extra_headers(self.env)
-        body = {"challenge": txn["api_challenge"]}
-        code = code.strip()
-        body["code" if code.isdigit() and len(code) == 6 else "recovery_code"] = code
-        data = kb_login.post(self.env["KB_LOGIN_API"], p["2fa"], body, headers=h).get("data") or {}
+        data = kb_login.post(self.env["KB_LOGIN_URL"], {"challenge": txn["api_challenge"], "code": code.strip()},
+                             headers=kb_login.hook_headers(self.env))
         return self._finish(txn_id, data.get("token"))
 
     def _txn(self, txn_id: str) -> dict:

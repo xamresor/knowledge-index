@@ -13,6 +13,7 @@ Tools: see `kb_core.TOOLS` (or call `tools/list`). `search` is the front door (d
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 # `bin/` is already sys.path[0] for a directly executed script, so the sibling module imports
@@ -30,6 +31,8 @@ def send(msg: dict) -> None:
 
 def main() -> None:
     warm.enable()  # long-lived graphify and qmd: no cold start per call (bin/warm.py)
+    from usage import Usage  # count local calls for the admin pages (kb-api /admin)
+    kb_core.LOCAL_USAGE = Usage(os.path.join(kb_core.KB, "logs", "usage-local.json"))
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -48,7 +51,7 @@ def main() -> None:
                                "apiContract": kb_core.API_CONTRACT},
                 "instructions": kb_core.instructions()}})
         elif method == "tools/list":
-            send({"jsonrpc": "2.0", "id": mid, "result": {"tools": kb_core.TOOLS}})
+            send({"jsonrpc": "2.0", "id": mid, "result": {"tools": kb_core.tools()}})
         elif method == "tools/call":
             p = req.get("params", {})
             try:

@@ -74,8 +74,8 @@ def match_route(routes, verb: str, path: str):
 
     A prefix of base segments only (`api`, `v1`, …) is that case: the shortest one wins. Any other
     prefix means the call site lost part of its own path (`${baseUrl.value}/send` -> `send`): then
-    only a single candidate counts. Two (`…/csdd/send` and `…/road-markup/send`) is no match —
-    picking the shortest once linked a road-markup editor to the CSDD controller."""
+    only a single candidate counts. Two (`…/invoices/{}/send` and `…/receipts/{}/send`) is no match —
+    picking the shortest once linked a receipt editor to the invoice controller."""
     hit = routes.get((verb, path))
     if hit:
         return hit

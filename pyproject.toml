@@ -57,8 +57,11 @@ include = [
   "kb.projects.toml.example",
   "aliases.toml.example",
   "kb.hubs.txt",
+  "sandbox/package.json",
+  "sandbox/package-lock.json",
+  "sandbox/runner.mjs",
 ]
-exclude = ["web/vendor", "**/__pycache__"]
+exclude = ["web/vendor", "sandbox/node_modules", "**/__pycache__"]
 
 [tool.hatch.build.targets.wheel.force-include]
 bin = "bin"
@@ -67,8 +70,12 @@ VERSION = "VERSION"
 "kb.projects.toml.example" = "kb.projects.toml.example"
 "aliases.toml.example" = "aliases.toml.example"
 "kb.hubs.txt" = "kb.hubs.txt"
+"sandbox/package.json" = "sandbox/package.json"
+"sandbox/package-lock.json" = "sandbox/package-lock.json"
+"sandbox/runner.mjs" = "sandbox/runner.mjs"
 
 [tool.hatch.build.targets.sdist]
 include = ["bin", "web", "tests", "knowledge_index", "VERSION", "Makefile", "README.md",
-           "CHANGELOG.md", "LICENSE", "*.example", "kb.hubs.txt"]
-exclude = ["web/vendor", "graphify-out", "repos", ".docs", "**/__pycache__"]
+           "CHANGELOG.md", "LICENSE", "*.example", "kb.hubs.txt", "docs", "skills", "examples",
+           "sandbox/package.json", "sandbox/package-lock.json", "sandbox/runner.mjs"]
+exclude = ["web/vendor", "graphify-out", "repos", ".docs", "sandbox/node_modules", "**/__pycache__"]

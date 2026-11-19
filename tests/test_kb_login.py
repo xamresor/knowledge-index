@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
-"""Dry-run tests for bin/kb-login against a fake login API (no real credentials, no real API).
-
-The fake API uses its own paths and a custom header, configured through env exactly as a real
-deployment would, so the tests also prove that nothing in kb-login is tied to one API."""
+"""Dry-run tests for bin/kb-login against a fake login webhook of access protocol v1 (no real
+credentials, no real API). The webhook URL and an extra header come from env, as in a deployment."""
 from __future__ import annotations
 
 import importlib.machinery
@@ -22,15 +20,13 @@ spec = importlib.util.spec_from_loader(loader.name, loader)
 kb_login = importlib.util.module_from_spec(spec)
 loader.exec_module(kb_login)
 
-ENV = {"KB_LOGIN_PATH": "/v1/login", "KB_LOGIN_2FA_PATH": "/v1/login/two-factor",
-       "KB_LOGIN_2FA_SETUP_PATH": "/v1/login/two-factor/setup",
-       "KB_LOGIN_HEADERS": '{"X-Client": "dev"}'}
+ENV = {"KB_HOOK_HEADERS": '{"X-Client": "dev"}'}
 
-# username -> what the first step answers
+# username -> what the first step answers (access protocol v1: top-level JSON)
 USERS = {
-    "plain": {"data": {"token": "1|plain", "user": {"uid": 1}}},
-    "verify": {"data": {"two_factor": {"challenge": "ch-v", "type": "verify", "expires_in": 300}}},
-    "enroll": {"data": {"two_factor": {"challenge": "ch-e", "type": "enroll", "expires_in": 300}}},
+    "plain": {"token": "1|plain", "user": {"uid": 1}},
+    "verify": {"two_factor": {"challenge": "ch-v"}},
+    "notoken": {"user": {"uid": 3}},
 }
 
 
@@ -55,22 +51,17 @@ class FakeLogin(BaseHTTPRequestHandler):
         FakeLogin.seen.append((self.path, body, self.headers.get("X-Client", "")))
         if self.headers.get("X-Client") != "dev":
             return self.reply(400, {"message": "client header missing"})
-        if self.path == "/v1/login":
-            if body.get("username") == "locked":
-                return self.reply(429, {"message": "Too many attempts."}, {"Retry-After": "60"})
-            if body.get("password") != "secret" or body.get("username") not in USERS:
-                return self.reply(401, {"message": "These credentials do not match our records."})
-            return self.reply(200, USERS[body["username"]])
-        if self.path == "/v1/login/two-factor/setup":
-            return self.reply(200, {"data": {"secret": "ABC", "otpauth_uri": "otpauth://totp/x"}})
-        if self.path == "/v1/login/two-factor":
-            if body.get("code") == "123456" or body.get("recovery_code") == "rec-1":
-                out = {"token": f"2|{body['challenge']}", "user": {"uid": 2}}
-                if body["challenge"] == "ch-e":
-                    out["recovery_codes"] = ["r1", "r2"]
-                return self.reply(200, {"data": out})
-            return self.reply(400, {"message": "The code is wrong.", "errors": {"code": ["wrong"]}})
-        return self.reply(404, {"message": "not found"})
+        if self.path != "/hooks/login" or body.get("protocol") != 1:
+            return self.reply(404, {"message": "not found"})
+        if "challenge" in body:
+            if body.get("code") in ("123456", "rec-1"):
+                return self.reply(200, {"token": f"2|{body['challenge']}"})
+            return self.reply(401, {"message": "The code is wrong."})
+        if body.get("username") == "locked":
+            return self.reply(429, {"message": "Too many attempts."}, {"Retry-After": "60"})
+        if body.get("password") != "secret" or body.get("username") not in USERS:
+            return self.reply(401, {"message": "These credentials do not match our records."})
+        return self.reply(200, USERS[body["username"]])
 
 
 class KbLoginTests(unittest.TestCase):
@@ -78,7 +69,7 @@ class KbLoginTests(unittest.TestCase):
     def setUpClass(cls):
         cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), FakeLogin)
         threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
-        cls.api = f"http://127.0.0.1:{cls.srv.server_address[1]}"
+        cls.url = f"http://127.0.0.1:{cls.srv.server_address[1]}/hooks/login"
 
     @classmethod
     def tearDownClass(cls):
@@ -87,48 +78,41 @@ class KbLoginTests(unittest.TestCase):
 
     def setUp(self):
         FakeLogin.seen.clear()
-        self.said = []
 
     def login(self, user, password="secret", answer=""):
-        return kb_login.login(self.api, user, password, ask=lambda _p: answer,
-                              say=self.said.append, env=ENV)
+        return kb_login.login(self.url, user, password, ask=lambda _p: answer, env=ENV)
 
     def test_plain_login(self):
         self.assertEqual(self.login("plain"), "1|plain")
         path, body, app = FakeLogin.seen[0]
-        self.assertEqual((path, app), ("/v1/login", "dev"))  # paths and header came from env
-        self.assertEqual(body, {"username": "plain", "password": "secret"})
+        self.assertEqual((path, app), ("/hooks/login", "dev"))  # one URL, header from env
+        self.assertEqual(body, {"protocol": 1, "username": "plain", "password": "secret"})
 
     def test_two_factor_code(self):
         self.assertEqual(self.login("verify", answer="123456"), "2|ch-v")
-        self.assertEqual(FakeLogin.seen[1][1], {"challenge": "ch-v", "code": "123456"})
+        self.assertEqual(FakeLogin.seen[1][1], {"protocol": 1, "challenge": "ch-v", "code": "123456"})
 
-    def test_two_factor_recovery_code(self):
-        self.assertEqual(self.login("verify", answer="rec-1"), "2|ch-v")
-        self.assertEqual(FakeLogin.seen[1][1], {"challenge": "ch-v", "recovery_code": "rec-1"})
-
-    def test_enroll(self):
-        self.assertEqual(self.login("enroll", answer="123456"), "2|ch-e")
-        self.assertEqual([s[0] for s in FakeLogin.seen],
-                         ["/v1/login", "/v1/login/two-factor/setup", "/v1/login/two-factor"])
-        self.assertTrue(any("otpauth://totp/x" in s for s in self.said))
-        self.assertIn("  r1", self.said)
+    def test_recovery_code_is_just_a_code(self):
+        self.assertEqual(self.login("verify", answer=" rec-1 "), "2|ch-v")
+        self.assertEqual(FakeLogin.seen[1][1]["code"], "rec-1")
 
     def test_errors(self):
         with self.assertRaisesRegex(kb_login.LoginError, "HTTP 401"):
             self.login("plain", password="wrong")
         with self.assertRaisesRegex(kb_login.LoginError, "retry after 60"):
             self.login("locked")
-        with self.assertRaisesRegex(kb_login.LoginError, "HTTP 400.*wrong"):
+        with self.assertRaisesRegex(kb_login.LoginError, "HTTP 401.*wrong"):
             self.login("verify", answer="000000")
+        with self.assertRaisesRegex(kb_login.LoginError, "without a token"):
+            self.login("notoken")
         with self.assertRaisesRegex(kb_login.LoginError, "cannot reach"):
-            kb_login.login("http://127.0.0.1:9", "plain", "secret", env=ENV)
+            kb_login.login("http://127.0.0.1:9/login", "plain", "secret", env=ENV)
 
-    def test_defaults_and_bad_headers(self):
-        self.assertEqual(kb_login._paths({})["login"], "/login")
-        self.assertEqual(kb_login._extra_headers({}), {})
+    def test_hook_headers(self):
+        self.assertEqual(kb_login.hook_headers({}), {})
+        self.assertEqual(kb_login.hook_headers(ENV), {"X-Client": "dev"})
         with self.assertRaises(kb_login.LoginError):
-            kb_login._extra_headers({"KB_LOGIN_HEADERS": "[1]"})
+            kb_login.hook_headers({"KB_HOOK_HEADERS": "[1]"})
 
     def test_write_mcp_json_keeps_other_servers(self):
         with tempfile.TemporaryDirectory() as d:
@@ -160,12 +144,12 @@ class KbLoginTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "kb-login.env")
             with open(p, "w") as f:
-                f.write("# comment\nKB_LOGIN_API=https://api.example.com\n"
-                        "KB_LOGIN_HEADERS='{\"app\":\"dev\"}'\nKB_URL=\"https://kb.example.com/mcp\"\n")
+                f.write("# comment\nKB_LOGIN_URL=https://api.example.com/kb/login\n"
+                        "KB_HOOK_HEADERS='{\"app\":\"dev\"}'\nKB_URL=\"https://kb.example.com/mcp\"\n")
             env = {"KB_URL": "keep-me"}
             kb_login.load_env_file(p, env)
-            self.assertEqual(env["KB_LOGIN_API"], "https://api.example.com")
-            self.assertEqual(env["KB_LOGIN_HEADERS"], '{"app":"dev"}')
+            self.assertEqual(env["KB_LOGIN_URL"], "https://api.example.com/kb/login")
+            self.assertEqual(env["KB_HOOK_HEADERS"], '{"app":"dev"}')
             self.assertEqual(env["KB_URL"], "keep-me")  # the environment wins over the file
 
     def test_token_file_is_private_and_feeds_headers_helper(self):
@@ -190,7 +174,7 @@ class KbLoginTests(unittest.TestCase):
             p = os.path.join(d, ".mcp.json")
             with mock.patch.object(kb_login, "login", return_value="1|abc"), \
                     mock.patch.object(kb_login.getpass, "getpass", return_value="pw"):
-                rc = kb_login.main(["--api", "https://api.example.com", "--username", "u",
+                rc = kb_login.main(["--login-url", "https://api.example.com/kb/login", "--username", "u",
                                     "--kb-url", "https://kb.example.com/mcp", "--mcp-json", p])
             self.assertEqual(rc, 1)
             self.assertFalse(os.path.exists(p))

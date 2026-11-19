@@ -35,6 +35,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import access
+import addons
 import contracts
 import paths
 import query_build
@@ -205,7 +206,7 @@ def graph_call(cmd: list[str], args: dict, allowed: set[str] | None, *terms: str
             return graph
         # path and impact: the same graph minus the domain anchors (see access.path_graph). Neither
         # walks `in_domain`, and an anchor shares its label with the model it is named after, so
-        # with anchors `graph_affected ObjectDriver` stopped at "ambiguous label".
+        # with anchors `graph_affected Order` stopped at "ambiguous label".
         try:
             return access.path_graph(graph)
         except access.Denied as e:
@@ -312,8 +313,9 @@ def instructions(projects: list[str] | None = None) -> str:
         "Code knowledge base over several repos (a Laravel API and its frontends). " + seen +
         "Which tool: an endpoint and who calls it -> contracts_search (fast, the best first step); "
         "one symbol and its neighbours -> graph_explain; what breaks if X changes -> graph_affected; "
-        "several independent lookups -> batch; a lookup that needs the answer of another, or a "
-        "filter over a long answer -> run_code (a small JavaScript program calling kb(tool, args)); "
+        + ("several independent lookups -> batch; " if addons.on("tool-multicall") else "")
+        + ("a lookup that needs the answer of another, or a filter over a long answer -> run_code "
+           "(a small program calling kb(tool, args)); " if addons.on("code-mode") else "") +
         "how A reaches B -> graph_routes (several ways, with the routes they cross) or graph_path (one shortest); a free question -> search (domain docs, code or both). "
         "Trust: edges marked EXTRACTED come from the syntax; INFERRED ones (http_request, eloquent, "
         "doc mentions) are matched by name and can be wrong. in_domain only groups a symbol with its "
@@ -325,7 +327,11 @@ def instructions(projects: list[str] | None = None) -> str:
 BATCH_MAX = int(os.environ.get("KB_BATCH_MAX", "10"))
 RUN_CALLS = int(os.environ.get("KB_RUN_CALLS", "30"))
 RUN_SECONDS = int(os.environ.get("KB_RUN_SECONDS", "20"))
-SANDBOX = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sandbox")
+# run_code's sandbox: installed by `kb addon install sandbox` into the data folder (a tool install keeps
+# its package read-only); a checkout may also have it in place (`npm ci` in sandbox/).
+_SANDBOX_PKG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sandbox")
+_SANDBOX_DATA = os.path.join(str(paths.data_home()), "sandbox")
+SANDBOX = _SANDBOX_DATA if os.path.isdir(os.path.join(_SANDBOX_DATA, "node_modules")) else _SANDBOX_PKG
 NOT_IN_BATCH = {"batch", "run_code"}
 
 # One list, published by both adapters.
@@ -474,6 +480,11 @@ for _t in TOOLS:
         _props["page"]["default"] = 1
         _props["page_length"]["default"] = PAGE_CHARS
 TOOLS_BY_NAME = {t["name"]: t for t in TOOLS}
+
+
+def tools() -> list[dict]:
+    """The tools this server publishes: the core ones and those of the add-ons that are on."""
+    return [t for t in TOOLS if addons.tool_on(t["name"])]
 
 _JSON_TYPES = {"string": str, "integer": int, "number": (int, float), "boolean": bool,
                "object": dict, "array": list}
@@ -872,12 +883,32 @@ def _index(fn, *a):
         raise ToolError(str(e)) from None
 
 
+# A local server (kb-mcp, kb-api) sets this to count its calls; kb-http counts its own (with the user).
+LOCAL_USAGE = None
+
+
 def call_tool(name: str, args: dict, allowed: set[str] | None = None, caller: str | None = None) -> str:
+    """Count the call when this process is a local server, then run it (see _call_tool)."""
+    if LOCAL_USAGE is None or caller is not None:
+        return _call_tool(name, args, allowed, caller)
+    start, ok = time.monotonic(), False
+    try:
+        out = _call_tool(name, args, allowed, caller)
+        ok = True
+        return out
+    finally:
+        LOCAL_USAGE.record(name, "local", dict(args or {}), ok, time.monotonic() - start)
+
+
+def _call_tool(name: str, args: dict, allowed: set[str] | None = None, caller: str | None = None) -> str:
     """Dispatch a validated tool call. Every adapter goes through here — that is the whole point.
 
     `allowed` = the projects the caller may see; None = everything (local use). `caller` names who
     asks (the shared server's user): a cursor is only valid for the caller and the projects that made it."""
     args = dict(args or {})
+    if name in TOOLS_BY_NAME and not addons.tool_on(name):
+        raise ToolError(f"unknown tool: {name} (the '{addons.TOOLS[name]}' add-on is off: kb addon install "
+                        f"{addons.TOOLS[name]})")
     validate(name, args, require=not args.get("cursor"))  # a cursor stands for the original arguments
     _no_options(name, args)
     if allowed is not None:
@@ -1004,7 +1035,7 @@ def run_code(code: str, allowed: set[str] | None, caller: str | None) -> str:
     import select
 
     if not os.path.isdir(os.path.join(SANDBOX, "node_modules", "quickjs-emscripten")):
-        raise ToolError("run_code is not installed on this server (npm ci in sandbox/)")
+        raise ToolError("run_code: the sandbox is not installed (kb addon install code-mode)")
     if len(code) > 20_000:
         raise ToolError("run_code: the program is longer than 20000 characters")
 

@@ -15,7 +15,8 @@ WorkingDirectory=/srv/kb
 Environment=PATH=/srv/kb/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=/srv/kb
 Environment=KB_SERVER=on
-Environment=KB_AUTH_URL=https://api.example.com/kb/me
+Environment=KB_PERMISSION_URL=https://api.example.com/kb/permissions
+Environment=KB_LOGIN_URL=https://api.example.com/kb/login
 Environment=KB_HTTP_HOST=127.0.0.1
 Environment=KB_HTTP_PORT=8790
 Environment=KB_DOCS_MODE=light

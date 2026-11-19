@@ -2,7 +2,7 @@
 """Tests for the shared server: bin/kb-http (auth, cache, usage, MCP over HTTP), the access filter
 (bin/access.py, through kb_core.call_tool) and the contract layer (bin/contracts.py).
 
-Standard library only. No graphify, qmd or real identity endpoint: a fake endpoint on loopback
+Standard library only. No graphify, qmd or real permission webhook: a fake webhook on loopback
 answers per token, and the graphify/qmd calls are stubbed.
 """
 from __future__ import annotations
@@ -37,26 +37,37 @@ def load_script(name: str):
 
 kb_http = load_script("kb-http")
 
-# token -> (status, body) of the fake identity endpoint
+# token -> (status, body) of the fake permission webhook (access protocol v1)
 FAKE_ME = {
     "all": (200, {"user": {"id": 1, "name": "ann"}, "projects": ["api", "admin", "web"]}),
     "fe": (200, {"user": {"id": 2, "name": "bob"}, "projects": ["web"]}),
     "none": (200, {"user": {"id": 3, "name": "cid"}, "projects": []}),
     "bad-shape": (200, {"user": {"id": 4}}),
+    "star": (200, {"user": {"id": 5, "name": "eve"}, "projects": "*"}),
+    "extra": (200, {"user": {"id": 6, "name": "fay"}, "projects": ["web", "secret-other"]}),
     "noaccess": (403, {"message": "forbidden"}),
     "gone": (404, {"message": "not found"}),
     "boom": (500, {"message": "error"}),
 }
 
 
+KNOWN = {"api": [], "admin": [], "web": []}   # kb_core.PROJECTS while these tests run
+
+
 class FakeIdentity(BaseHTTPRequestHandler):
+    asked: list = []
+
     def log_message(self, *a):  # quiet
         pass
 
-    def do_GET(self):  # noqa: N802
+    def do_POST(self):  # noqa: N802
+        question = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        FakeIdentity.asked.append(question)
         auth = self.headers.get("Authorization", "")
         token = auth[7:] if auth.startswith("Bearer ") else ""
         status, body = FAKE_ME.get(token, (401, {"message": "Unauthenticated."}))
+        if question.get("protocol") != 1:
+            status, body = 400, {"message": "protocol 1 expected"}
         data = json.dumps(body).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -73,15 +84,15 @@ def serve(srv):
 class OffByDefaultTests(unittest.TestCase):
     def test_refuses_without_switch_and_auth_url(self):
         self.assertIn("KB_SERVER=on", kb_http.refuse_reason({}))
-        self.assertIn("KB_SERVER=on", kb_http.refuse_reason({"KB_AUTH_URL": "http://x"}))
-        self.assertIn("KB_AUTH_URL", kb_http.refuse_reason({"KB_SERVER": "on"}))
-        self.assertIsNone(kb_http.refuse_reason({"KB_SERVER": "on", "KB_AUTH_URL": "http://x"}))
+        self.assertIn("KB_SERVER=on", kb_http.refuse_reason({"KB_PERMISSION_URL": "http://x"}))
+        self.assertIn("KB_PERMISSION_URL", kb_http.refuse_reason({"KB_SERVER": "on"}))
+        self.assertIsNone(kb_http.refuse_reason({"KB_SERVER": "on", "KB_PERMISSION_URL": "http://x"}))
 
-    def test_no_default_auth_url(self):
-        self.assertEqual(kb_http.Authenticator(url="").url, kb_http.AUTH_URL)
+    def test_no_default_permission_url(self):
+        self.assertEqual(kb_http.Authenticator(url="").url, kb_http.PERMISSION_URL)
         with mock.patch.dict(os.environ, {}, clear=True):
             mod = load_script("kb-http")
-        self.assertEqual(mod.AUTH_URL, "")
+        self.assertEqual(mod.PERMISSION_URL, "")
 
 
 class AuthTests(unittest.TestCase):
@@ -89,9 +100,12 @@ class AuthTests(unittest.TestCase):
     def setUpClass(cls):
         cls.idp = serve(ThreadingHTTPServer(("127.0.0.1", 0), FakeIdentity))
         cls.url = f"http://127.0.0.1:{cls.idp.server_address[1]}/me"
+        cls.known = mock.patch.object(kb_core, "PROJECTS", KNOWN)
+        cls.known.start()
 
     @classmethod
     def tearDownClass(cls):
+        cls.known.stop()
         cls.idp.shutdown()
         cls.idp.server_close()
 
@@ -130,6 +144,11 @@ class AuthTests(unittest.TestCase):
         ident = self.auth().check("Bearer fe")
         self.assertEqual(ident.projects, {"web"})
         self.assertEqual(ident.name, "bob")
+        self.assertEqual(FakeIdentity.asked[-1], {"protocol": 1, "projects": ["admin", "api", "web"]})
+
+    def test_star_means_every_project_and_unknown_names_drop(self):
+        self.assertEqual(self.auth().check("Bearer star").projects, {"api", "admin", "web"})
+        self.assertEqual(self.auth().check("Bearer extra").projects, {"web"})
 
     def test_cache_per_token_hash(self):
         a = self.auth(ttl=60)
@@ -537,6 +556,7 @@ class HttpTests(unittest.TestCase):
                 raise kb_core.ToolError("bad")
             return f"{name} ok"
         cls.patches = [mock.patch.object(kb_core, "call_tool", fake_call),
+                       mock.patch.object(kb_core, "PROJECTS", KNOWN),
                        mock.patch.object(kb_core, "warm_qmd", lambda: None)]
         for p in cls.patches:
             p.start()

@@ -105,8 +105,8 @@ class DispatchTest(unittest.TestCase):
 
     def test_tools_publishes_the_same_list_mcp_does(self):
         payload = kb_api.dispatch("GET", "/tools", {}, {})
-        self.assertIs(payload["tools"], kb_core.TOOLS,
-                      "identity by construction: the same object, not a copy")
+        self.assertEqual(payload["tools"], kb_core.tools(),
+                         "the same list the MCP servers publish (the core plus the add-ons that are on)")
 
     def test_generic_call_is_the_mcp_shape(self):
         out = kb_api.dispatch("POST", "/call", {}, {"name": "search", "arguments": {"q": "x"}})

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """bin/oauth.py through bin/kb-http: the browser sign-in an MCP client runs by itself.
 
-A fake API answers the login (password, then a TOTP challenge) and the identity endpoint; the test
+A fake API answers both webhooks of access protocol v1 (login: password, then a code; permissions); the test
 walks the client's side of the flow: discovery, registration, the login page, the code, the token,
 a tool call with it, a refresh, and the ways it must refuse.
 """
@@ -50,25 +50,25 @@ class FakeApi(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def do_GET(self):  # noqa: N802 — the identity endpoint
-        ok = self.headers.get("Authorization") == f"Bearer {TOKEN}" and STATE["valid"]
-        self._json(200, {"user": {"uname": "adel"}, "projects": ["api"]}) if ok \
-            else self._json(401, {"message": "Unauthenticated."})
-
     def do_POST(self):  # noqa: N802
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        if self.headers.get("app") != "dev":
+        if body.get("protocol") != 1:
+            self._json(400, {"message": "protocol 1 expected"})
+        elif self.path == "/permissions":    # the permission webhook
+            ok = self.headers.get("Authorization") == f"Bearer {TOKEN}" and STATE["valid"]
+            self._json(200, {"user": {"uname": "ann"}, "projects": ["api"]}) if ok \
+                else self._json(401, {"message": "Unauthenticated."})
+        elif self.headers.get("app") != "dev":
             self._json(403, {"message": "wrong app"})
-        elif self.path == "/v1/login":
-            if body == {"username": "adel", "password": "pw"}:
-                self._json(200, {"data": {"two_factor": {"challenge": "ch1", "type": "verify"}}})
+        elif self.path == "/login":          # the login webhook, both steps
+            if body == {"protocol": 1, "username": "ann", "password": "pw"}:
+                self._json(200, {"two_factor": {"challenge": "ch1"}})
+            elif body == {"protocol": 1, "challenge": "ch1", "code": "123456"}:
+                self._json(200, {"token": TOKEN})
+            elif "challenge" in body:
+                self._json(422, {"message": "Wrong code."})
             else:
                 self._json(422, {"message": "Wrong user name or password."})
-        elif self.path == "/v1/login/two-factor":
-            if body == {"challenge": "ch1", "code": "123456"}:
-                self._json(200, {"data": {"token": TOKEN}})
-            else:
-                self._json(422, {"message": "Wrong code."})
         else:
             self._json(404, {"message": "not found"})
 
@@ -97,14 +97,14 @@ class OAuthFlow(unittest.TestCase):
         cls.api = serve(ThreadingHTTPServer(("127.0.0.1", 0), FakeApi))
         api = f"http://127.0.0.1:{cls.api.server_address[1]}"
         cls.tmp = tempfile.TemporaryDirectory()
-        env = {"KB_LOGIN_API": api, "KB_LOGIN_PATH": "/v1/login",
-               "KB_LOGIN_2FA_PATH": "/v1/login/two-factor", "KB_LOGIN_HEADERS": '{"app":"dev"}'}
+        env = {"KB_LOGIN_URL": f"{api}/login", "KB_HOOK_HEADERS": '{"app":"dev"}'}
         cls.patches = [mock.patch.object(kb_core, "KB", cls.tmp.name),
                        mock.patch.object(kb_core, "call_tool", lambda n, a, allowed=None, caller=None: "ok"),
+                       mock.patch.object(kb_core, "PROJECTS", {"api": [], "web": []}),
                        mock.patch.object(kb_core, "warm_qmd", lambda: None)]
         for p in cls.patches:
             p.start()
-        cls.srv = serve(kb_http.make_server("127.0.0.1", 0, kb_http.Authenticator(url=f"{api}/me", ttl=0),
+        cls.srv = serve(kb_http.make_server("127.0.0.1", 0, kb_http.Authenticator(url=f"{api}/permissions", ttl=0),
                                             None, oauth_env=env))
         cls.base = f"http://127.0.0.1:{cls.srv.server_address[1]}"
 
@@ -152,7 +152,7 @@ class OAuthFlow(unittest.TestCase):
         self.assertEqual(status, 200, page)
         txn = html.unescape(re.search(r'name="txn" value="([^"]+)"', page).group(1))
         status, _, page = self.call("POST", "/authorize", {"txn": txn, "step": "password",
-                                                           "username": "adel", "password": "pw"}, form=True)
+                                                           "username": "ann", "password": "pw"}, form=True)
         self.assertIn('name="code"', page)
         status, headers, _ = self.call("POST", "/authorize", {"txn": txn, "step": "code", "code": code},
                                        form=True)
@@ -258,8 +258,8 @@ class Off(unittest.TestCase):
     def test_off_without_login_settings(self):
         with mock.patch.object(kb_core, "KB", tempfile.gettempdir()):
             self.assertEqual(kb_http.login_env({}), {})
-            self.assertEqual(kb_http.login_env({"KB_LOGIN_API": "https://a", "KB_OAUTH": "off"}), {})
-            self.assertEqual(kb_http.login_env({"KB_LOGIN_API": "https://a"})["KB_LOGIN_API"], "https://a")
+            self.assertEqual(kb_http.login_env({"KB_LOGIN_URL": "https://a", "KB_OAUTH": "off"}), {})
+            self.assertEqual(kb_http.login_env({"KB_LOGIN_URL": "https://a"})["KB_LOGIN_URL"], "https://a")
 
 
 if __name__ == "__main__":

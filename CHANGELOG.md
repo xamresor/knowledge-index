@@ -14,6 +14,42 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-11-20
+
+- **Breaking: access protocol v1 is the only sign-in and access path** ([docs/access-protocol.md](docs/access-protocol.md)).
+  Two webhooks: `KB_LOGIN_URL` (POST user name and password, then the code → `{token}` or
+  `{two_factor: {challenge}}`) and `KB_PERMISSION_URL` (POST with the token and the KB's project names
+  → `{user, projects: [...] | "*"}`), extra headers in `KB_HOOK_HEADERS`. Every request carries
+  `"protocol": 1`. Removed: `KB_AUTH_URL` (GET identity endpoint), `KB_LOGIN_API`, `KB_LOGIN_PATH`,
+  `KB_LOGIN_2FA_PATH`, `KB_LOGIN_2FA_SETUP_PATH`, `KB_LOGIN_HEADERS`, the `{data: …}` answer wrapper,
+  the separate recovery-code field and the authenticator set-up step in `kb-login` (set it up in your
+  own app). `kb-login --api` is now `--login-url`. **Upgrade:** add the two webhooks to your API and
+  set `KB_PERMISSION_URL` and `KB_LOGIN_URL`; `kb-http` refuses to start without `KB_PERMISSION_URL`.
+
+- **Changed: the README is a short start page** (94 lines instead of 646): what it is, the demo, five
+  install steps, what the agent gets, the optional parts. The details moved to `docs/install.md`,
+  `docs/server.md` and `docs/design.md`.
+- **Added: add-ons, named by what they do** (`bin/addons.py`, `kb addon list|install|remove <name>`):
+  `tool-multicall` (batch), `code-mode` (run_code and its sandbox, installed into the data folder),
+  `fast-routes` (rustworkx), `metrics`, `admin`. Off by default; an add-on that is off publishes no tool,
+  page or route, and only `kb addon install` fetches its pieces. State in `<data>/addons.json` or
+  `KB_ADDONS`. **Upgrade note:** `batch` and `run_code` need `kb addon install tool-multicall` /
+  `code-mode` now.
+- **Added: the `metrics` add-on serves `GET /metrics`** (`KB_METRICS=on` works too) in the Prometheus text format (graph, docs, storage,
+  builds, tool calls, errors, time, p95, memory) for Prometheus or PMM; loopback without a token,
+  otherwise `KB_METRICS_TOKEN` as bearer or basic-auth password. No dependency, off by default.
+- **Changed: the admin pages, redesigned** (Codex mockups, PMM style): tiles with sparklines from the KB's
+  own history, build time and calls per day, graph, docs, storage and answer-time panels; the usage page
+  is a Query-Analytics-style table per tool (calls sparkline, rate, mean, errors, p95) with filters by
+  project, tool and user. Light and dark.
+- **Added: usage is counted by every server** (`bin/usage.py`): kb-mcp and kb-api too (as user `local`),
+  with hourly history, per-project counts and recent durations for p95.
+- **Added: every build logs its time** (`logs/builds.log`, written by `bin/kb` whatever started it).
+- **Fixed: build output was staged as code.** `.next` of a Next.js app (2.1 GB) and other build or cache
+  folders (`.nuxt`, `.output`, `coverage`, `.turbo`, `.cache`) are no longer copied.
+
+- **Added: the `doc-organization` skill** (`skills/doc-organization/SKILL.md`): the guide below as a
+  checklist agents follow when they write, move or tidy docs.
 - **Docs: `docs/documentation-guide.md`** — how to write and keep project docs so the graph links them to
   the code (domains, heads, plans apart, contract docs, links and names in backticks, checks with the KB).
 
@@ -101,7 +137,7 @@ several-way path search. **Breaking:** tool contract 2 — `docs_search` and `gr
   config. `--env-file` reads the settings without a shell (Windows). `--mcp-json` still exists and
   refuses a file that git tracks.
 - **Fixed: `graph_affected` stopped at "ambiguous label" for a model named like its domain anchor**
-  (`ObjectDriver`). It now runs on the graph without anchors, like `graph_path`.
+  (`Order`). It now runs on the graph without anchors, like `graph_path`.
 - **Fixed: a call site that lost its path prefix was linked to the wrong controller.**
   `${baseUrl.value}/send` matched the shortest route ending in `/send`. A suffix match now needs a
   base-only prefix (`api`, `v1`) or a single candidate.

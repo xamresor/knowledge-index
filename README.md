@@ -1,640 +1,96 @@
 <img width="1469" height="842" alt="Screenshot from 2026-07-09 22-06-41" src="https://github.com/user-attachments/assets/88c10be3-36cc-4173-b298-07163019cf17" />
 # Code Knowledge Base
 
-A standalone, read-only knowledge layer over a set of related code projects (for example a Laravel
-API and a Vue frontend). It builds **one merged code-connection graph** — including cross-repo edges
-that link frontend API calls to the Laravel controllers that serve them — and a **vectorized search
-index** over the projects' docs. By default everything runs **on-device with no API keys** (the
-`none` and `llama` embedding backends); only the optional `other` backend can reach an external
-service.
+A read-only knowledge layer over a set of related code projects (for example a Laravel API and its
+Vue frontends) for AI agents. It builds **one code graph across the repositories**, with every
+frontend API call linked to the controller that serves it, and an **on-device search** over the
+projects' docs. Agents ask it over MCP: which route a page calls and what it touches, what breaks if a
+class changes, which ways lead from A to B. Everything runs on your machine, no API keys.
+
+Built on [**graphify**](https://github.com/Graphify-Labs/graphify) (AST code graph) and
+[**qmd**](https://github.com/tobi/qmd) (on-device Markdown search).
 
 > [!TIP]
 > **Using it on your own codebase?** It started on one Laravel API with Vue frontends, so other stacks will hit
 > rough edges. Fixes, new language plugins and pull requests are very welcome: open an issue or a PR.
 
-How to write project docs that the KB links to the code: [docs/documentation-guide.md](docs/documentation-guide.md).
-
-Built on two existing tools: [**graphify**](https://github.com/Graphify-Labs/graphify) (AST code graph)
-and [**qmd**](https://github.com/tobi/qmd) (on-device markdown vector search).
-
 ## See it first: the demo
 
-A small built graph ships with the repo, so you can look at the dashboard before configuring anything.
-It indexes a fictional shop in [`examples/demo/src/`](examples/demo/src/) — a Laravel-style API and a
-Vue frontend — not anyone's real code.
+A small built graph of a made-up shop ships with the repo:
 
 ```bash
-make demo         # open the demo dashboard in a browser (python3 only, nothing to build)
-make demo-build   # rebuild the demo graph from examples/demo/src (graphify + php)
+make demo         # open the demo dashboard (python3 only, nothing to build)
 ```
 
 Red edges are routes: a Vue view's `api.get('/orders')` linked to the controller method that serves it.
-Double-click a domain to open it. See [`examples/demo/README.md`](examples/demo/README.md).
-
-## Requirements
-
-These are external dependencies — not vendored. Install them and make sure they're on your `PATH`
-before running a build:
-
-| Tool                  | Version (tested) | Used for |
-|-----------------------|---|---|
-| [**graphify**](https://github.com/Graphify-Labs/graphify) | `>= 0.9.25` | AST code graph (`update`, `merge-graphs`, `cluster-only`, `query`, `path`, `explain`, `affected`). The build and `bin/kb-mcp` shell out to it. |
-| **qmd**               | `>= 2.5.3` (the `query`/`search`/`vsearch` CLI) | On-device markdown vector + BM25 doc search. **Must be the modern lineage**: `bin/kb-mcp` and the docs use `qmd query`. The older `qsearch` lineage (e.g. 0.3.x) has an incompatible command set and will break doc search — see the note below. |
-| **python3**           | `>= 3.11` | The scripts in `bin/` — standard library only, no packages. 3.11 is the floor because the config and alias table are read with `tomllib`. |
-| **rsync**             | any recent | Code-only staging of the indexed projects into `repos/`. |
-| **php** + **artisan** | the indexed app's version | Only needed if a project sets `routes` — `bin/kb` runs `php artisan route:list --json` to build cross-repo `http_request` edges. |
-
-By default everything runs **on-device with no API keys** (see the embedding-backend choice under
-Configuration). Check what's installed:
-
-```bash
-graphify --version && qmd --version && python3 --version
-qmd query --help >/dev/null 2>&1 && echo "qmd: query CLI ok" || echo "qmd: WRONG lineage (no 'query' command)"
-```
-
-> **qmd version compatibility.** This KB targets the modern qmd CLI (`query`/`search`/`vsearch`,
-> 2.5.3+). A divergent older lineage uses `qmd qsearch --no-rerank --no-expand` instead and lacks
-> `query`; the docs half of `search` will fail against it. If you share one KB across several
-> machines, **install the same qmd lineage on all of them** — a `query`-based checkout and a
-> `qsearch`-based checkout cannot both work from the same `bin/kb-mcp`.
 
 ## Quick start
 
-**Install as a tool** (commands on `PATH`, no checkout to keep around):
+1. **Two tools** the KB drives: `graphify` (`uv tool install graphifyy`) and `qmd`
+   (`npm i -g @tobilu/qmd`), plus Python 3.11+.
+2. **Install:**
+   ```bash
+   uv tool install knowledge-index     # or: pipx install knowledge-index
+   kb-install                          # checks the tools, writes a config to fill in
+   ```
+3. **Name your projects** in `kb.projects.toml` (`kb --version` shows where it is): the code folders, the
+   docs folder, and for a Laravel API the app folder (its routes become graph edges).
+   ```toml
+   [[project]]
+   name   = "api"
+   code   = ["/srv/shop/api/app"]
+   docs   = "/srv/shop/api/docs"
+   routes = "/srv/shop/api"
 
-```bash
-uv tool install knowledge-index      # or: pipx install knowledge-index
-kb-install                           # requirements, config, the MCP snippet
-kb vendor                            # once: offline renderer for the dashboard
-kb build                             # stage repos read-only, build the graph, index the docs
-```
+   [[project]]
+   name   = "web"
+   code   = ["/srv/shop/web/src"]
+   calls  = ["/srv/shop/web/src"]      # its API calls are linked to ...
+   serves = "api"                      # ... the controllers of this project
+   ```
+4. **Build:** `kb build` (a few minutes the first time; `kb update` after that).
+5. **Connect your agent:** `claude mcp add kb -- kb-mcp` (or the `.mcp.json` entry in
+   [docs/install.md](docs/install.md#1-mcp-server-config)), then restart the session.
 
-Installed, the tool follows the XDG spec — code stays read-only in site-packages while data and
-config live per machine (`KB_HOME` overrides both, `kb --version` prints all of it):
+That is the whole core. Everything else is optional and off until you turn it on.
 
-| | Path |
+## What the agent gets
+
+| Tool | Answers |
 |---|---|
-| data (`graphify-out/`, `repos/`, staged shell) | `$XDG_DATA_HOME/knowledge-index` → `~/.local/share/knowledge-index` |
-| config (`kb.projects.toml`, `aliases.toml`) | `$XDG_CONFIG_HOME/knowledge-index` → `~/.config/knowledge-index` |
+| `contracts_search` | a route: its controller, middleware and every file that calls it |
+| `graph_explain` | one symbol and all its connections |
+| `graph_affected` | what depends on a symbol, across repositories |
+| `graph_routes` | several ways from A to B, with the routes on the way |
+| `search` | docs and code by meaning |
 
-**Or work from a checkout** — unchanged, no migration: everything stays inside the clone.
+Long answers come in pages with a cursor; `connections` and `problems` show the service map and its gaps.
 
-```bash
-make install    # same checks; never overwrites an existing file (`make check` only reports)
-make build && make open
-```
+## Add-ons
 
+Off until you install them; an add-on that is off adds no tool, page or route.
 
-```bash
-make build      # build the merged graph + qmd doc index
-make vendor     # once: fetch the renderer for offline use (web/vendor/)
-make open       # open the dashboard: graph + status (web/index.html)
-qmd query "how does auth work" -c kb
-graphify path "useAuthFlow.js" "AuthMethodsController" --graph graphify-out/graph.json
-```
-
-The qmd collection name defaults to `kb`; override it by setting `KB_COLLECTION` before a build.
-
-## What you get
-
-- `graphify-out/graph.json` — merged graph: every node tagged with its `repo`; `http_request`
-  edges connect frontend call sites to backend controllers across repos.
-- `web/index.html` — the **dashboard**: the typed/domain graph plus a Status panel (index health, the
-  alias table, search-quality numbers). A versioned, dependency-free shell; the graph data is
-  generated next to the index. Old note, kept for orientation: this used to be a generated
-  `graphify-out/kb-graph.html`. (shape = type,
-  color = domain), hierarchical and lazy-loaded. This is what `make open` opens. The hierarchical
-  lazy-loading (domain super-nodes expand on demand, edges reroute) is built to stay usable on
-  **large codebases — 5k+ files is fine**; it never renders the whole graph at once.
-- `graphify-out/graph.html` — graphify's full interactive visualization (fallback).
-- `graphify-out/GRAPH_REPORT.md` — human-readable architecture report with communities.
-- qmd `kb` collection (`.qmd/`) — hybrid BM25 + vector search over all docs.
-
-## The dashboard: how it is made and how to rebuild it
-
-The dashboard is two halves that meet in the browser:
-
-| Half | Files | In git? | Made by |
-|---|---|---|---|
-| **Shell** — markup, styling, behaviour | `web/index.html`, `web/app.js`, `web/style.css` | yes | hand-written |
-| **Data** — the graph split per domain | `graphify-out/kb-manifest.js`, `kb-status.js`, `kb-graph-data/*.js` | **no** | `bin/render_viz.py`, last step of `make build` |
-| **Renderer** — vis-network | `web/vendor/vis-network.min.js` | no | `make vendor` (CDN fallback with a banner if absent) |
-
-The data stays out of git on purpose: it is a map of the indexed projects' code, and those projects
-are usually private. Everyone rebuilds it from their own checkouts:
-
-```bash
-cp kb.projects.toml.example kb.projects.toml   # once: point it at your repos
-make vendor                                    # once: offline renderer
-make build                                     # graph + docs; render_viz.py writes the data
-make open                                      # open web/index.html
-```
-
-**In the browser** the sidebar has three inputs and a domain list:
-
-| Control | Does | Needs |
+| Add-on | `kb addon install …` gives | Needs |
 |---|---|---|
-| **Filter** | finds nodes by name, click to jump | nothing — works from `file://` |
-| **graphify query** | "how does X work" → a scoped subgraph as text | `make serve` |
-| **qmd docs** | search the indexed docs by meaning | `make serve` (first query loads the model, ~1 min) |
-| **Domains** | tick to show or hide a domain; click a name to expand it | nothing |
-
-For the two queries run `make serve` and open <http://127.0.0.1:8899/>: the API serves the dashboard
-itself, so the page and `/search` share one origin and no CORS header is ever sent (one would let any
-open website read the index from 127.0.0.1). Opened as a file, those two inputs are disabled and say so.
-
-Only the graph changed? `make graph && make open` is enough — the docs index is not involved.
-`bin/render_viz.py graphify-out/graph.json` re-splits an existing graph without rebuilding it.
-
-How the split works: the shell opens with only one node per domain (`kb-manifest.js`). A domain's
-members load from `kb-graph-data/<domain>.js` when you double-click it; cross-domain edges come from
-`_cross.js`, search from `_index.js`. Every data file is a `<script>` that calls a function in
-`app.js` (`kbManifest(…)`, `kbRecv(…)`), which is how a page on `file://` reads its siblings.
-
-## Configuration
-
-Copy `kb.projects.toml.example` to `kb.projects.toml` and edit it to add/remove a project or change
-which paths are scanned/indexed. No symlinks — paths are explicit. `.graphifyignore` controls what
-graphify excludes.
-
-### qmd embedding backend
-
-The first build asks **where to plug qmd's embeddings** and remembers the choice in `.kb.local`
-(gitignored):
-
-| Choice | What it does |
-|---|---|
-| `none` | Skip vectors entirely — BM25 keyword search only. No model download. |
-| `llama` | On-device llama.cpp embeddings (qmd's default; downloads a small GGUF model). |
-| `other` | Bring your own embedder: runs `$KB_QMD_EMBED_CMD` if set, otherwise plain `qmd embed` so you can point qmd at your own model/endpoint via its env. |
-
-Skip the prompt by setting `KB_QMD_BACKEND=none|llama|other` (e.g. in CI). Change it later with
-`make qmd-backend` (or `bin/kb qmd-backend`).
-
-## Install into a project
-
-Each consuming project needs two things: the **MCP server config** so its agent can query the KB,
-and the **`kb` skill** so the agent knows when/how to use it. Both point back here — this repo is
-the single source of truth.
-
-### 1. MCP server config
-
-Add the `kb` server to the project's `.mcp.json` (`mcpServers` object). No env, no install — it's a
-zero-dependency stdio server (use the absolute path to this checkout):
-
-```json
-{
-  "mcpServers": {
-    "kb": { "command": "/path/to/kb/bin/kb-mcp" }
-  }
-}
-```
-
-Restart the agent session to load it. It exposes `search`, `graph_routes`, `graph_path`, `graph_explain`,
-`graph_affected`, `docs_get`, `contracts_search`, `connections`, `problems`, `batch`, `run_code`, `version`.
-
-`graph_routes` gives several ways from one place to another with the HTTP routes on the way
-(`from: "shop-web:OrdersView.vue", to: "api:Order"`). Every tool but `version` takes `page` and
-`page_length`; a long answer ends with a `cursor` that serves its next pages for 10 minutes without
-running the query again.
-
-`batch` runs up to 10 calls in one request. `run_code` runs a short JavaScript program that calls the tools
-through `kb(tool, args)` and returns only what it needs (a filter over a long answer, a lookup that needs
-another's result). The program runs in QuickJS compiled to WebAssembly, inside a Node process started with
-the permission model (`--permission`, read access to `sandbox/` only): no network, no files, no child
-processes, at most 30 tool calls and 20 s. Install it once with `npm ci` in `sandbox/`; without it the
-tool answers that it is not installed. (This repo's own `.mcp.json` only registers `qmd`,
-which `kb-mcp` calls internally — projects do **not** need the `qmd` entry.)
-
-### 2. The `kb` skill
-
-The canonical skill lives here at [`skills/kb/SKILL.md`](skills/kb/SKILL.md). Install it into a
-project by symlinking, so updates here propagate everywhere:
-
-```bash
-# Laravel projects that keep skills in .ai/skills with a .claude/skills symlink:
-ln -s /path/to/kb/skills/kb /path/to/project/.ai/skills/kb
-ln -s ../../.ai/skills/kb   /path/to/project/.claude/skills/kb
-
-# Or, for a project that reads skills straight from .claude/skills:
-ln -s /path/to/kb/skills/kb /path/to/project/.claude/skills/kb
-```
-
-Match each project's existing skill layout (check a sibling skill: some use `.ai/skills` + a
-`.claude/skills` symlink, others use `.claude/skills` directly). Restart the session to pick it up.
-If you prefer a self-contained copy over a symlink, `cp -r` the directory instead.
-
-### 3. Auto-reminder hook (recommended)
-
-**Skip this and the install reliably under-performs.** The skill only fires on the agent's own
-judgement, and the `kb` MCP tools may be **deferred** behind a tool-search index when a project has
-many MCP servers — so an agent can default to `grep`/`Explore` on a "how does X work / what connects
-to Y / impact" prompt and never reach the graph (exactly the failure this hook prevents). A
-`UserPromptSubmit` hook closes that gap deterministically: it scans the prompt for connection/impact
-trigger words and injects a one-line reminder to use the `kb` graph tools first.
-
-Add it in the consuming project (not here — this repo is read-only and isn't a Claude Code project).
-A ready-made matcher template ships at [`skills/kb/install/kb-reminder.py`](skills/kb/install/kb-reminder.py)
-(EN + RU triggers; extend `TRIGGERS` with your team's languages):
-
-```bash
-# 1. copy the matcher template (don't symlink — projects extend its TRIGGERS list)
-mkdir -p /path/to/project/.claude/hooks
-cp /path/to/kb/skills/kb/install/kb-reminder.py /path/to/project/.claude/hooks/
-
-# 2. wire it in .claude/settings.json (merge — never clobber existing hooks/keys)
-```
-```json
-{
-  "hooks": {
-    "UserPromptSubmit": [
-      { "hooks": [ { "type": "command",
-        "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/kb-reminder.py\" 2>/dev/null || true",
-        "statusMessage": "Checking for kb-graph relevance" } ] }
-    ]
-  }
-}
-```
-
-The script reads the hook JSON on stdin, prints
-`{"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "<reminder>"}}`
-on a trigger hit, and stays silent + exit 0 otherwise so it can never block a prompt. Also add a
-**project-guideline line** ("for how-does-X / what-connects / impact questions, use the `kb` skill
-before grep, and tell delegated sub-agents to do the same"). See SKILL.md "How to use it well"
-points 5–6 for the rationale.
-
-### 4. Verify the install
-
-Run from the project root — every line should report present/YES:
-
-```bash
-# 1. MCP server registered and the binary is runnable
-python3 -c "import json;print('kb cmd:',json.load(open('.mcp.json'))['mcpServers']['kb']['command'])"
-test -x "$(python3 -c "import json;print(json.load(open('.mcp.json'))['mcpServers']['kb']['command'])")" && echo "kb-mcp executable: YES"
-
-# 2. skill reachable (whichever layout the project uses)
-test -f .claude/skills/kb/SKILL.md && echo "skill: YES"
-
-# 3. hook present, valid, and actually fires on a sample prompt
-test -f .claude/hooks/kb-reminder.py && echo "hook script: present"
-jq -e '.hooks.UserPromptSubmit' .claude/settings.json >/dev/null && echo "hook wired: YES"
-echo '{"prompt":"how does auth work"}' | python3 .claude/hooks/kb-reminder.py | jq -e .hookSpecificOutput >/dev/null && echo "hook fires: YES"
-
-# 4. qmd is the compatible lineage (the docs half of `search` needs `qmd query`)
-qmd query --help >/dev/null 2>&1 && echo "qmd query CLI: YES" || echo "qmd query CLI: NO — wrong qmd lineage"
-```
-
-Then **restart the agent session** (or open `/hooks` once) so it loads the new `.mcp.json` server,
-the skill, and the freshly-created `settings.json` — the settings watcher only tracks `.claude/` if a
-settings file existed there at session start.
-
-## Where this sits (and where it does not)
-
-**This is a small local tool, not an enterprise search product.** It indexes a handful of related
-repositories you own, on one machine, for one owner, and exposes them to agents, scripts and a browser
-tab. It has no connectors, no multi-user permissions, no UI for administering anything, and no
-support. If you need those, the table below points at what to use instead.
-
-Facts below were checked in **July 2026**; licences and pricing move, so verify before deciding.
-
-### Code side
-
-| | Indexes | Cross-repo edges | Local / on-device | Daemon needed | Licence & cost |
-|---|---|---|---|---|---|
-| **knowledge-index** | code **+ docs** | ✅ incl. frontend call site → controller | ✅ | no (CLI/MCP; API optional) | GPL-3.0, free |
-| [Sourcegraph](https://sourcegraph.com) | code | ✅ (repo-wide search) | ◐ | yes | **proprietary since 2023**; free self-host deprecated, from ~$49/user/mo |
-| [Zoekt](https://github.com/sourcegraph/zoekt) / [OpenGrok](https://oracle.github.io/opengrok/) | code (**search only**, no graph) | ❌ | ✅ | yes | OSS, free |
-| [Glean (Meta)](https://glean.software/) | code, as schema-defined facts | ✅ within its schema | ✅ | yes (fact DB) | OSS, free — **compiler-grade, and heavy** |
-| [CodeQL](https://codeql.github.com/) | code, as a query language | ◐ | ✅ | no | free for OSS, **licence-restricted commercially** |
-| [graphify](https://github.com/Graphify-Labs/graphify) | code (AST graph) | — | ✅ | no | our dependency, not an alternative |
-
-### Docs / retrieval side
-
-| | Indexes | Local / on-device | Daemon needed | Permissions | Licence & cost |
-|---|---|---|---|---|---|
-| **knowledge-index** | markdown docs + the code graph | ✅ embeddings on device | no | **none — one owner by design** | GPL-3.0, free |
-| [Onyx](https://onyx.app) (ex-Danswer) | 45+ connectors | ◐ can self-host, LLM optional | yes (Docker stack) | ✅ mirrors source ACLs | MIT, free |
-| [R2R](https://github.com/SciPhi-AI/R2R) | ingested documents | ◐ | yes | users/auth built in | Apache-2.0, free |
-| [RAGFlow](https://github.com/infiniflow/ragflow) | **deep** PDF/scan parsing | ◐ | yes (Elasticsearch) | multi-tenant | Apache-2.0, free |
-| [txtai](https://github.com/neuml/txtai) | embeddable, single package | ✅ | no | — | Apache-2.0, free |
-| Azure AI Search · Bedrock KB · Vertex AI Search | managed RAG primitives | ❌ cloud | managed | query-time ACL / IAM | metered |
-| [Glean (the company)](https://glean.com) | 100+ connectors, enterprise search | ❌ cloud | managed | ✅ permission mirroring | ~$45–50/seat/mo, ~100-seat minimum |
-
-### What the others do better
-
-- **Compiler-grade code semantics.** Meta's Glean, CodeQL and SCIP-based indexers resolve symbols the
-  way a compiler does. This project uses AST extraction plus regex heuristics for the cross-repo hops,
-  and says so on every edge via `confidence` (`EXTRACTED | INFERRED | AMBIGUOUS | DERIVED`) — honest,
-  but weaker than a real indexer.
-- **Connectors and permission mirroring.** Onyx and Glean read Slack, Drive, Confluence, Jira and
-  reflect their ACLs. This project reads local files and has no permission model at all.
-- **Document understanding.** RAGFlow parses scanned PDFs and tables properly; here a document is
-  markdown, and anything else is out of scope.
-- **Scale, operations, support.** A managed service is the right answer for a company; this is one
-  process and a directory of generated files.
-
-### Non-goals (decided, not pending)
-
-These are **out of scope on purpose** — the table above lists them as things others do better, which is
-true, and none of them are a gap this project intends to close:
-
-- **Document *understanding*.** Extraction exists (see below) but it is text extraction, not layout
-  reconstruction: no table-structure recovery from a scan, no figure captioning, no audio. If you need
-  that, use RAGFlow — that is what it is for.
-- **Connectors to SaaS suites** (Slack, Drive, Confluence, Jira) and the **permission mirroring** they
-  require. One owner, local files. See Onyx or Glean.
-- **Issuing identities.** The shared server (`bin/kb-http`, off by default — see "Shared server")
-  asks an identity endpoint you already run who a token belongs to; it never stores users, passwords
-  or roles of its own.
-- **A write path.** The index is a projection; whoever owns the corpus owns writing to it.
-
-### Languages: one plugin per language
-
-`graphify` parses the AST. The plugins in `bin/lang/` add what an AST cannot see — framework relations,
-schema facts, design rationale in comments, and documents as graph nodes:
-
-| Module | Role | Claims | Contributes |
-|---|---|---|---|
-| `markdown` | plugin | `.md` | `doc` nodes · `links_to` (wikilinks, relative links — `EXTRACTED`) · `documents` (symbol mentions — `INFERRED`, capped) |
-| `php_laravel` | patterns | `.php` | class/layer vocabulary · `$table` · Eloquent relations · schema + FK · query-builder refs · migration-name parsing |
-| `js_ts` | patterns | `.js .ts .tsx .vue` | HTTP call sites: `api.verb()`, `$api()`, `apiFetch`, `fetch(BASE)` · template/script suffixes · build-output dirs |
-
-Two roles, and the difference is deliberate. A **plugin** defines `enrich(graph, roots)` and runs as a
-pipeline step of its own; a **patterns** module carries only regexes and pure functions that the
-enrichers call. The enrichers' pipelines are older and heavier than one function signature, so the
-patterns moved first and the pipelines stayed — the cheap half of the split, separate from the risky
-half. `lang.plugins()` and `lang.patterns()` keep the two apart, and a test asserts `re.compile` never
-reappears in an enricher.
-
-Two boundaries were drawn against the tidier-looking option. There is **no `sql.py`**: nothing here
-parses `.sql` files, so `DB::table` and `Schema::create` — which match PHP source — live in
-`php_laravel`, and a "SQL language plugin" would be a fake boundary. And **route matching stays in
-`link_http.py`**: a Laravel route table meeting a JS call site is a join between two languages and
-belongs to neither plugin.
-
-The shared file-type facts live in `bin/lang/__init__.py` — one place, named by role
-(`FRONTEND` ⊂ `ALL_CODE`), because the same list used to be copy-pasted into four enrichers and
-forgetting one produced a silently partial graph.
-
-### Document formats: one plugin per format
-
-Not everything worth indexing is markdown. Extraction is handled by **one plugin per format** in
-`bin/parsers/`, each a thin wrapper over an external CLI — so the zero-dependency rule survives and a
-format you do not need costs nothing.
-
-```bash
-kb-extract --list                       # what can be extracted here, and what to install for the rest
-kb-extract quote.pdf                    # to stdout, with a provenance header
-kb-extract --into docs/ *.pdf           # write <name>.md next to your docs
-```
-
-| Plugin | Formats | Needs | Confidence |
-|---|---|---|---|
-| `pdf_text` | `.pdf` with a text layer (`pdftotext -layout`) | poppler | `EXTRACTED` |
-| `pdf_ocr` | scanned `.pdf`, `.png/.jpg/.tif` | tesseract (+poppler for PDFs) | `OCR` |
-| `office` | `.docx .odt .rtf .epub` → markdown incl. tables | pandoc | `EXTRACTED` |
-
-Four rules the registry enforces:
-
-- **A missing tool means the format is unsupported, not a crash.** It is reported once and the build
-  continues — a silent hole in the index is worse than a loud gap.
-- **Text layer before OCR, always** (`PRIORITY`). A PDF that yields almost nothing is refused with an
-  explanation rather than indexed as an empty document.
-- **Every extracted file carries provenance** — source, tool *and its version*, timestamp, and
-  `confidence: EXTRACTED | OCR`. OCR output is noisy by nature; it must never pass for authored text.
-  A search hit from an `OCR` document is a lead, not a quote.
-- **The corpus is still never modified.** Extraction writes into the staged copy only, and
-  `KB_EXTRACT=0` turns it off entirely.
-
-### When this is the better fit
-
-- Several **related repositories you own**, where the interesting facts are the *joins* — which
-  frontend call hits which controller, which model backs which table.
-- **Agents are the primary consumer**: MCP is a first-class surface, not an add-on.
-- **Nothing may leave the machine**: embeddings run on device, no API key is required, and the HTTP
-  surface refuses to bind off loopback without a token.
-- The index is **disposable**: delete `graphify-out/` and rebuild. No migration, no lock-in — the
-  corpus is your files.
-- Small enough to read: ~4k lines including the dashboard and the tests.
-
-## Three surfaces, three consumers
-
-Each surface exists for a different reader, and that decides what it may require:
-
-| Surface | For | Job | Requires |
-|---|---|---|---|
-| **MCP** (`bin/kb-mcp`, stdio) | agents | search + traverse inside a session | nothing — no port, no auth |
-| **HTTP API** (`bin/kb-api`) | scripts, CI, cron | the same search from bash/python | a port; a token off loopback |
-| **web** (`web/index.html`) | a human | look at status: the graph, index health | nothing running — opens from `file://` |
-| **shared MCP** (`bin/kb-http`, **off by default**) | a team's agents | one index on a server, each caller limited to their projects | `KB_SERVER=on`, an identity endpoint, TLS in front |
-
-MCP and the API are the **same contract**: both dispatch through `kb_core.call_tool()` and publish
-`kb_core.TOOLS`, so they cannot drift apart without deleting code. The web surface is not a client of
-that contract — it must work when nothing is running, which is precisely when you want to look at it.
-
-```bash
-make serve                      # 127.0.0.1:8899, no token needed on loopback; dashboard at /
-PORT=9000 TOKEN=secret make serve
-```
-
-```bash
-curl -s localhost:8899/version
-curl -s localhost:8899/tools                            # the list MCP publishes
-curl -s -X POST localhost:8899/search \
-     -d '{"q":"how does auth work","domain":"both"}'
-curl -s -X POST localhost:8899/graph/affected -d '{"symbol":"BookingService"}'
-curl -s "localhost:8899/doc?path=docs/AUTH.md"
-curl -s -X POST localhost:8899/call \
-     -d '{"name":"search","arguments":{"q":"deposit","domain":"docs","mode":"lex","limit":5}}'
-```
-
-`search` takes `{q, domain: docs|code|both, scope, mode: auto|lex|vec|hybrid, limit, min_score,
-expand_aliases, explain, budget}`. The old names `docs_search` and `graph_query` were removed in tool
-contract 2 (`api_contract` in `version`); call `search` with `domain: docs` or `domain: code`.
-
-**Binding off loopback requires a token, and the server refuses to start without one.** The point of
-this project is that the corpus never leaves the machine; an index published to the network without
-auth would be the leak it exists to prevent. For remote use, bind loopback and tunnel over SSH.
-
-## Shared server (off by default)
-
-One build on one server, reached by every developer's agent over MCP "streamable HTTP", where each
-caller sees only the projects they may see. It is the same core: `bin/kb-http` dispatches through
-`kb_core.call_tool(name, args, allowed)`, and the access filter (`bin/access.py`) works on the inputs —
-graph tools run on a filtered copy of the graph, doc hits are checked by their resolved path. Contract
-docs and the cross-repo `http_request` edges stay visible to everyone: they are the interfaces between
-services (`KB_CONTRACT_EDGES=0` hides the edges too).
-
-**It does not start unless you switch it on.** A local install never opens a port by accident:
-
-```bash
-KB_SERVER=on KB_AUTH_URL=https://api.example.com/kb/me kb-http   # 127.0.0.1:8790; TLS proxy in front
-```
-
-Identity is yours, not this tool's. Every request carries `Authorization: Bearer <token>`; the server
-sends it to `KB_AUTH_URL` and expects `200 {"user": {"name": ...}, "projects": ["api", "web"]}` — the
-names from `kb.projects.toml` this caller may see. 401 stays 401, any other refusal is 403, an
-unreachable endpoint is 503 (never cached). Verdicts are cached `KB_AUTH_CACHE_SECONDS` (60) per SHA-256
-of the token; the token is never logged.
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `KB_SERVER` | `off` | must be `on` |
-| `KB_AUTH_URL` | — | identity endpoint (required) |
-| `KB_HTTP_HOST` / `KB_HTTP_PORT` | `127.0.0.1` / `8790` | bind address; put a TLS proxy in front |
-| `KB_DOCS_MODE` | `light` | no reranker (~650 MB RAM); `full` adds an LLM reranker (1-2 min per search on a CPU); `bm25` = keywords only (~70 MB) |
-| `KB_MAX_GRAPH_JOBS` / `KB_MAX_DOCS_JOBS` | `3` / `1` | parallel graphify / qmd processes |
-| `KB_AUTH_CACHE_SECONDS` / `KB_AUTH_TIMEOUT` | `60` / `10` | auth cache and timeout |
-| `KB_CONTRACT_EDGES` | `1` | `0` hides other repos' endpoints of `http_request` edges |
-| `KB_USAGE_FILE` | `<data>/logs/usage.json` | tool usage counters (`kb-http usage` prints them with user names; the MCP tool `usage` without) |
-| `KB_WARM` | `1` | `0` = no long-lived graphify / qmd: one process per call, as before |
-| `KB_GRAPH_CACHE_FILES` / `KB_GRAPH_VIEWS` | `2` / `8` | graph files the graphify worker keeps parsed / views it keeps cut in memory (two per caller project set) |
-| `KB_OAUTH` | `on` | `off` = no browser sign-in, bearer tokens only |
-| `KB_LOGIN_ENV` | `<data>/kb-login.env`, then `<data>/deploy/kb-login.env` | where the sign-in finds `KB_LOGIN_API` and the login paths |
-| `KB_OAUTH_TOKEN_TTL` | `28800` | `expires_in` reported to the client (the API decides the real lifetime) |
-
-**Speed.** The servers keep two helpers running (`bin/warm.py`): graphify in its own interpreter
-with the graph already parsed (`bin/graph_worker.py`), and `qmd mcp` with the embedding model loaded.
-On a 23k-node graph a graph lookup drops from 1-6 s to a few milliseconds, a code search from ~6 s to
-0.1 s and a docs search from 4-7 s to 0.2 s. The first call for a caller's project set cuts that view from the
-parsed graph in memory (~0.3-1.6 s on that graph; then milliseconds). A helper that fails or is missing falls back to the old one-process-per-call path.
-
-**Locally:** `make serve` (`bin/kb-api` on 127.0.0.1:8899) also answers MCP over HTTP at `/mcp` and shows
-the same admin pages at `/admin`, without sign-in: loopback without a token is the trust boundary.
-
-**Admin pages (`/admin`).** For the users named in `KB_ADMINS` (comma-separated) or in `<data>/admins.txt`
-(one per line), matched against the `uname`, `username`, `name`, `id` or `uid` the identity endpoint
-returns; nobody else gets more than a 404. Sign-in is the API's own login with its second factor, then
-an HttpOnly, SameSite=Strict session cookie (8 hours) and a CSRF token on every form. Pages: status
-(version, graph, the last builds, warm helpers, a rebuild button), index (charts: graph make-up,
-storage per index, documents and embedded chunks per project, build times, answer time per tool,
-calls per day), usage, and sign-in clients (revoke one). Plain HTML and server-drawn SVG, no scripts.
-
-**Browser sign-in (MCP OAuth).** With `KB_LOGIN_API` and the login paths set, an MCP client signs in
-by itself: a 401 points it to `/.well-known/oauth-protected-resource`, it registers (dynamic client
-registration), opens `/authorize` in the browser, the person types the API user name, password and
-authenticator code, and the client receives the API's dev token as its access token (PKCE S256,
-loopback redirect URIs only, refresh while the API token lives). `bin/oauth.py` has the details and the
-limits. Behind a proxy, pass `X-Forwarded-Proto`, `X-Forwarded-Host` and the stripped path as
-`X-Forwarded-Prefix`; the discovery documents are also served at the host root
-(`/.well-known/oauth-authorization-server/<prefix>`), see `examples/server/`.
-
-Around it:
-
-- **`bin/kb-refresh`** — cron, every minute: runs `kb update` when an indexed checkout has a new HEAD.
-  `KB_REFRESH_WAIT_LOCK=<file>` makes it wait while your deploy holds that lock.
-- **`bin/kb-login`** — the terminal alternative to the browser sign-in: logs a developer in to *your*
-  API, keeps the token in `~/.claude/kb/token` and registers the server once in Claude Code's user scope
-  with a `headersHelper` (`--add-to-claude`). No default addresses: `--env-file`, or `KB_LOGIN_API`,
-  `KB_URL`, `KB_LOGIN_PATH`, `KB_LOGIN_2FA_PATH`, `KB_LOGIN_2FA_SETUP_PATH`, `KB_LOGIN_HEADERS` (the
-  contract is in the script's header).
-- **`examples/server/`** — a systemd unit, an nginx vhost and a crontab, with `kb.example.com`
-  placeholders.
-
-## Contracts between services
-
-Three tools answer what the graph answers badly — they read indexes `kb update` builds next to the
-graph (`bin/contracts.py`):
-
-- **`contracts_search`** — an API route with its controller action, middleware, the frontend files
-  that call it, and the contract docs that name it. Words match all of them (`POST v2/users`).
-- **`connections`** — the service map: who talks to whom, over what, and why. Built from contract docs,
-  one file per connection in `<project docs>/contracts/<from>-<to>.md` with front matter `from`, `to`,
-  `protocol`, `summary`, plus one generated HTTP line per frontend→API pair the code shows.
-- **`problems`** — the gaps: a project without contract docs, a contract doc with incomplete front
-  matter, a connection the code shows but no doc describes, a frontend call to a route that does not
-  exist. Check it before finishing work on a project.
-
-A checkout of the KB itself may hold `docs/contracts/` too (the KB's own connections); it is indexed
-as project `kb` (`KB_SELF_DOCS_NAME`).
-
-## How the projects connect
-
-`bin/link_http.py` reads each Laravel app's `php artisan route:list --json` and matches the
-frontend's API call sites against it, injecting `http_request` edges. It recognizes the common
-shapes — dotted clients (`api.<verb>('<path>')`), ofetch/fetch wrappers where the verb sits in an
-options object (`$api(...)`, `apiFetch(...)`, and a raw `fetch(\`${API_BASE}/…\`)`) — and tolerates
-the frontend omitting a base prefix that the base URL supplies (e.g. Laravel's `api/`). This is
-what makes `graphify path` traverse from a Vue/React file to the controller that serves its request.
-
-## Design rules that hold this together
-
-Not aspirations — these are the properties the code already has, kept explicit so a future change
-(or a future agent) does not quietly trade them away.
-
-- **The corpus is never touched; the index is disposable.** Indexed projects are read-only, every
-  artefact under `graphify-out/`, `repos/`, `.docs/` is generated and git-ignored. Delete the whole
-  output and `make build` reconstructs it. Nothing here is a source of truth, which is also why this
-  project has **no write path** — see the changelog entry for 0.4.0.
-- **One artefact, a pipeline of small filters.** Each `bin/*.py` does one transform:
-  read `graph.json` → change one thing → write it back → print a single summary line. `bin/kb`
-  composes them. Every script has the same shape (`main()`, `argv`, docstring first,
-  `raise SystemExit(main())`), so opening an unfamiliar one costs nothing.
-- **The artefact contract lives in exactly one module.** `bin/graph.py` owns loading, saving, the
-  node-id format (`repo::path::symbol`) and the relation/confidence vocabularies. A relation typo is
-  an `AttributeError`, not a silently wrong edge; a format change has one place to update instead of
-  eight.
-- **Writes are atomic.** `graph.save()` writes a temp file in the same directory and `os.replace()`s
-  it, so a crash or Ctrl-C leaves the previous complete graph rather than a truncated one — the
-  pipeline has no recovery step, so it must not need one. Save also refuses a value that is not a
-  graph.
-- **Uncertainty is data, not a vibe.** Every edge carries `confidence`
-  (`EXTRACTED | INFERRED | AMBIGUOUS | DERIVED`): AST facts and regex guesses are visibly different,
-  and the visualisation draws inferred edges dotted. A heuristic may be wrong; it may not *pretend*.
-- **Restraint over cleverness in destructive steps.** `dedupe.py` refuses to merge when a label has
-  two real definitions (merging would invent a fact); `declutter.py` prunes only the curated hubs in
-  `kb.hubs.txt`, with no degree-based auto-detection, because a high-degree definition-less node is
-  usually a real service whose definition was never captured. Both restraints are pinned by tests.
-- **Tests sit where the risk is.** The destructive transforms (`dedupe`, `declutter`) and the artefact
-  contract (`graph`) are covered, not just the easy pure parser. Stdlib `unittest`, no test deps:
-  `make test`.
-- **Zero runtime dependencies.** Stdlib Python and bash only — the MCP server speaks JSON-RPC by
-  hand, config is `tomllib`. This is a deliberate constraint: the tool has to run on a machine where
-  installing packages is not an option.
-- **Deployment data is not code.** `kb.projects.toml` and `aliases.toml` are git-ignored with
-  committed `.example` twins: the repository is public, the corpus map and the alias table are not.
-- **Failures are loud.** A missing route table warns instead of silently dropping the cross-repo half
-  of the graph; steps that must run twice (clustering ↔ labeling is a fixpoint through files) say why
-  in a comment rather than looking like a copy-paste slip.
-- **Setup reports, it does not surprise.** `bin/install` never overwrites an existing file, never
-  installs someone else's tool behind your back (it prints the exact command), and is idempotent;
-  `--check` writes nothing at all. An installer that violates those is worse than no installer.
-- **The interface is a source file, not an artefact.** `web/` holds the shell (markup, styling,
-  behaviour) as versioned, diffable, testable files with no build step; the generator emits data only
-  (`kb-manifest.js`, `kb-status.js`, per-domain files). Data arrives as `.js` calls rather than
-  JSON + fetch because a page opened from `file://` cannot fetch a sibling file — the dashboard has to
-  work when nothing is running.
-- **Snapshots say when they were taken.** The Status panel is a build-time snapshot, stamped. A stale
-  number that admits its age is useful; one that pretends to be live is not.
-- **The renderer is local.** `make vendor` fetches vis-network into `web/vendor/` once; the page
-  prefers that copy and falls back to a CDN **with a visible banner**. A tool whose promise is "the
-  corpus never leaves the machine" should not quietly fetch code from a third party.
-- **The interface is English.** Code, comments, commit messages and the web surface are in English —
-  it is a public project read by people who did not write the corpus. The indexed content keeps its
-  own language; the interface is not the corpus. No i18n layer (it would break the
-  zero-dependency rule and let UI strings drift).
-- **Documentation explains *why*, at the top of the file it belongs to.** Each script opens with the
-  upstream behaviour that makes it necessary — e.g. `dedupe.py` starts from *how* graphify emits
-  reference nodes. Docstrings age better than commit messages.
-
-## Roadmap
-
-- [ ] **Extract the read core** (`bin/kb_core.py`) so the stdio MCP adapter and a future HTTP
-  adapter dispatch through one function and advertise one schema — identity by construction. Details
-  and the generic `/search` shape are in `CHANGELOG.md` under 0.4.0.
-- [ ] **Mutation testing for `bin/link_http.py`.** The matcher has unit tests
-  (`make test`), but tests can pass while being blind to real regressions. Add a
-  mutation pass — flip a regex, swap the GET default to POST, invert an
-  `endswith`, drop the shortest-suffix sort — and confirm the suite *fails* on
-  each (every mutant killed). Keep it dependency-light (a small stdlib harness +
-  `make mutation`) or wire up `mutmut` in a venv.
-
-## Footprint
-
-The indexed projects are **never modified**. Their code is rsynced (code-only) into `repos/`
-(git-ignored) for scanning; all outputs live here in this repo.
-
-See `CLAUDE.md` for the agent query workflow.
+| `tool-multicall` | `batch`: several tool calls in one request | — |
+| `code-mode` | `run_code`: a small program that calls the tools, in a sandbox | Node 22+ |
+| `fast-routes` | `graph_routes` on a Rust core, 2-3x faster | graphify via uv or pipx |
+| `metrics` | `GET /metrics` for Prometheus, Grafana or PMM | — |
+| `admin` | `/admin`: status, charts, usage, sign-in clients | on a shared server: `KB_ADMINS` |
+
+`kb addon list` shows what is on, `kb addon remove <name>` switches one off. A team server with browser
+sign-in and access per project: [docs/server.md](docs/server.md); it asks your own system who may see
+what through two webhooks, [docs/access-protocol.md](docs/access-protocol.md).
+
+## More
+
+- [Install and configure](docs/install.md): requirements, the configuration, the dashboard, wiring the KB
+  into each project.
+- [The shared server](docs/server.md): sign-in, access per project, speed, admin pages, metrics.
+- [Writing docs the KB can use](docs/documentation-guide.md), and the `doc-organization` skill that
+  applies it.
+- [Design](docs/design.md): where it sits among similar tools, the plugins, the rules, the roadmap.
+- [Changelog](CHANGELOG.md).
 
 ## License
 

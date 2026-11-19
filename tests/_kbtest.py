@@ -15,6 +15,10 @@ from types import ModuleType
 HERE = os.path.dirname(os.path.abspath(__file__))
 BIN = os.path.abspath(os.path.join(HERE, "..", "bin"))
 
+# The tests cover the add-ons too: switch them all on unless a test says otherwise.
+os.environ.setdefault("KB_ADDONS", "code-mode,tool-multicall,fast-routes,metrics,admin")
+os.environ.setdefault("KB_FAST_ROUTES", "1")
+
 if BIN not in sys.path:
     sys.path.insert(0, BIN)
 

@@ -18,7 +18,7 @@ from _kbtest import BIN  # noqa: F401
 
 import admin
 import kb_core
-from test_oauth import TOKEN, FakeApi, kb_http  # the same fake API: password, then a TOTP code
+from test_oauth import TOKEN, FakeApi, kb_http  # the same fake webhooks: password, then a code
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -37,15 +37,15 @@ class Admin(unittest.TestCase):
         cls.api = serve(ThreadingHTTPServer(("127.0.0.1", 0), FakeApi))
         api = f"http://127.0.0.1:{cls.api.server_address[1]}"
         cls.tmp = tempfile.TemporaryDirectory()
-        env = {"KB_LOGIN_API": api, "KB_LOGIN_PATH": "/v1/login",
-               "KB_LOGIN_2FA_PATH": "/v1/login/two-factor", "KB_LOGIN_HEADERS": '{"app":"dev"}'}
+        env = {"KB_LOGIN_URL": f"{api}/login", "KB_HOOK_HEADERS": '{"app":"dev"}'}
         cls.patches = [mock.patch.object(kb_core, "KB", cls.tmp.name),
                        mock.patch.object(kb_core, "GRAPH", os.path.join(cls.tmp.name, "graph.json")),
+                       mock.patch.object(kb_core, "PROJECTS", {"api": [], "web": []}),
                        mock.patch.object(kb_core, "warm_qmd", lambda: None)]
         for p in cls.patches:
             p.start()
-        auth = kb_http.Authenticator(url=f"{api}/me", ttl=0)
-        cls.srv = serve(kb_http.make_server("127.0.0.1", 0, auth, None, oauth_env=env, admins={"adel"}))
+        auth = kb_http.Authenticator(url=f"{api}/permissions", ttl=0)
+        cls.srv = serve(kb_http.make_server("127.0.0.1", 0, auth, None, oauth_env=env, admins={"ann"}))
         cls.other = serve(kb_http.make_server("127.0.0.1", 0, auth, None, oauth_env=env, admins={"someone"}))
         cls.base = f"http://127.0.0.1:{cls.srv.server_address[1]}"
         cls.other_base = f"http://127.0.0.1:{cls.other.server_address[1]}"
@@ -75,8 +75,8 @@ class Admin(unittest.TestCase):
             return e.code, dict(e.headers), e.read().decode()
 
     def sign_in(self, opener, base, code="123456"):
-        self.req(opener, "POST", f"{base}/admin/login", {"username": "adel", "password": "pw"})
-        status, _, page = self.req(opener, "POST", f"{base}/admin/login", {"username": "adel", "password": "pw"})
+        self.req(opener, "POST", f"{base}/admin/login", {"username": "ann", "password": "pw"})
+        status, _, page = self.req(opener, "POST", f"{base}/admin/login", {"username": "ann", "password": "pw"})
         lid = re.search(r'name="lid" value="([^"]+)"', page).group(1)
         return self.req(opener, "POST", f"{base}/admin/login", {"lid": lid, "code": code})
 
@@ -139,8 +139,8 @@ class Admin(unittest.TestCase):
     def test_no_admins_no_pages(self):
         with mock.patch.dict(os.environ, {"KB_ADMINS": ""}):
             self.assertEqual(admin.admins(), set())
-        self.assertTrue(admin.is_admin({"uname": "Adel"}, {"adel"}))
-        self.assertFalse(admin.is_admin({"uname": "bob"}, {"adel"}))
+        self.assertTrue(admin.is_admin({"uname": "Ann"}, {"ann"}))
+        self.assertFalse(admin.is_admin({"uname": "bob"}, {"ann"}))
 
 
 if __name__ == "__main__":

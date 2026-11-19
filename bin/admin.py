@@ -2,7 +2,7 @@
 """The admin pages of the shared server (bin/kb-http): /admin.
 
 Who: the users named in KB_ADMINS (comma-separated; matched against the `uname`, `username`, `name`,
-`id` or `uid` the identity endpoint returns). Nobody else sees anything, not even that the page exists
+`id` or `uid` the permission webhook returns). Nobody else sees anything, not even that the page exists
 (404). No KB_ADMINS -> no admin pages.
 
 Sign-in: the same login as the browser sign-in of MCP clients (user name, password, the authenticator
@@ -28,6 +28,7 @@ import secrets
 import subprocess
 import threading
 import time
+import urllib.parse
 
 import kb_core
 import warm
@@ -198,44 +199,76 @@ def _problems_line() -> str:
 
 
 # ---------------------------------------------------------------------------------- pages
-STYLE = """:root{--surface:#fcfcfb;--plane:#f4f4f2;--ink:#0b0b0b;--ink2:#52514e;--grid:#e8e7e3;
---bar:#1c1917;--bar-ink:#e7e5e4;--s1:#2a78d6;--crit:#d03b3b;--good:#0ca30c;--btn:#1c1917;--btn-ink:#fff;
---btn2:#e8e7e3;--btn2-ink:#1c1917;--note:#ecfdf5}
-@media (prefers-color-scheme: dark){:root{--surface:#1a1a19;--plane:#0d0d0d;--ink:#f0efec;--ink2:#c3c2b7;
---grid:#383835;--bar:#000;--bar-ink:#c3c2b7;--s1:#3987e5;--crit:#e66767;--good:#0ca30c;--btn:#f0efec;
---btn-ink:#0d0d0d;--btn2:#383835;--btn2-ink:#f0efec;--note:#12301f}}
-body{font:15px system-ui,sans-serif;margin:0;background:var(--plane);color:var(--ink)}
-header{background:var(--bar);color:#fff;padding:.8rem 1.5rem;display:flex;gap:1.5rem;align-items:center;flex-wrap:wrap}
-header a{color:var(--bar-ink);text-decoration:none}header a.on{color:#fff;font-weight:600}
-header form{margin-left:auto}main{max-width:72rem;margin:1.5rem auto;padding:0 1rem}
-section{background:var(--surface);border-radius:10px;padding:1rem 1.3rem;margin-bottom:1rem;box-shadow:0 1px 2px #0002}
-h2{font-size:1rem;margin:.2rem 0 .8rem}table{border-collapse:collapse;width:100%}
-td,th{text-align:left;padding:.3rem .5rem;border-bottom:1px solid var(--grid);font-size:.9rem;vertical-align:top}
-pre{white-space:pre-wrap;font-size:.82rem;margin:0}.bad{color:var(--crit)}.ok{color:var(--good)}
-button{padding:.4rem .9rem;border:0;border-radius:6px;background:var(--btn);color:var(--btn-ink);cursor:pointer}
-button.light{background:var(--btn2);color:var(--btn2-ink)}
-.note{background:var(--note);border-left:3px solid var(--good);padding:.5rem .8rem;margin-bottom:1rem}
-main.login{max-width:22rem;margin:12vh auto}label{display:block;font-size:.9rem;margin:.8rem 0 .3rem}
-input{width:100%;box-sizing:border-box;padding:.55rem;border:1px solid var(--grid);border-radius:6px;font-size:1rem;
-background:var(--surface);color:var(--ink)}"""
+STYLE = """:root{--page:#f4f4f2;--panel:#fcfcfb;--panel2:#f0efec;--line:#dddcd6;--ink:#0b0b0b;--ink2:#52514e;
+--ink3:#7a7975;--accent:#2a78d6;--accent-soft:#2a78d61f;--track:#e8e7e3;--crit:#d03b3b;--good:#0ca30c;--top:#ffffff;
+--btn:#1c1917;--btn-ink:#fff}
+@media (prefers-color-scheme: dark){:root{--page:#111110;--panel:#1a1a19;--panel2:#202020;--line:#30302e;--ink:#ecebe6;
+--ink2:#b4b3ad;--ink3:#8a8984;--accent:#3987e5;--accent-soft:#3987e526;--track:#2c2c2a;--crit:#e05656;--good:#0ca30c;
+--top:#161615;--btn:#ecebe6;--btn-ink:#111110}}
+*{box-sizing:border-box}body{font:13px/1.45 Inter,system-ui,sans-serif;margin:0;background:var(--page);color:var(--ink);
+font-variant-numeric:tabular-nums}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+header{background:var(--top);border-bottom:1px solid var(--line);height:52px;padding:0 24px;display:flex;align-items:center;gap:28px}
+header .brand{font-weight:700;font-size:16px;color:var(--ink)}header nav{display:flex;gap:22px;height:100%}
+header nav a{color:var(--ink2);display:flex;align-items:center;border-bottom:2px solid transparent;padding-top:2px}
+header nav a.on{color:var(--ink);font-weight:600;border-bottom-color:var(--accent)}header nav a:hover{text-decoration:none;color:var(--ink)}
+header .right{margin-left:auto;display:flex;gap:8px;align-items:center}
+main{padding:20px 24px 32px;max-width:1440px;margin:0 auto}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:3px;margin-bottom:16px;min-width:0}
+.panel>h2{font-size:14px;font-weight:600;margin:0;padding:11px 16px;border-bottom:1px solid var(--line);display:flex;gap:12px}
+.panel>h2 small{margin-left:auto;font-weight:400;color:var(--ink3);font-size:12px}
+.panel .body{padding:12px 16px}
+.grid{display:grid;gap:16px}.g2{grid-template-columns:repeat(2,minmax(0,1fr))}.g3{grid-template-columns:repeat(3,minmax(0,1fr))}
+@media (max-width:1100px){.g3{grid-template-columns:repeat(2,minmax(0,1fr))}}@media (max-width:760px){.g2,.g3{grid-template-columns:1fr}}
+.grid>.panel{margin-bottom:0}.stack{display:flex;flex-direction:column;gap:16px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
+.tile{background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:10px 12px 8px}
+.tile .k{font-size:12px;color:var(--ink2)}.tile .v{font-size:24px;font-weight:600;margin:2px 0 4px;letter-spacing:-.01em}
+.tile .s{font-size:11px;color:var(--ink3)}
+table{border-collapse:collapse;width:100%}th{font-weight:500;color:var(--ink2);font-size:12px;text-align:left;
+padding:7px 10px;border-bottom:1px solid var(--line);background:var(--panel2);white-space:nowrap}
+td{padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:middle}tr:last-child td{border-bottom:0}
+td.n,th.n{text-align:right;white-space:nowrap}tr.total td{font-weight:600}
+.ratio{height:3px;background:var(--track);border-radius:2px;margin-top:4px}.ratio i{display:block;height:3px;background:var(--accent);border-radius:2px}
+.ratio.bad i{background:var(--crit)}
+.bad{color:var(--crit)}.ok{color:var(--good)}.muted{color:var(--ink3)}code{font-size:12px}
+button,.btn{font:inherit;padding:6px 12px;border:1px solid var(--line);border-radius:3px;background:var(--panel);color:var(--ink);cursor:pointer}
+button.primary{background:var(--btn);color:var(--btn-ink);border-color:var(--btn)}
+.note{background:var(--accent-soft);border-left:3px solid var(--accent);padding:8px 12px;margin-bottom:16px}
+.layout{display:grid;grid-template-columns:224px minmax(0,1fr);gap:16px}@media (max-width:900px){.layout{grid-template-columns:1fr}}
+.filters h3{font-size:14px;margin:14px 0 6px;display:flex}.filters h3 span{margin-left:auto;color:var(--accent);font-weight:500}
+.filters a{display:flex;gap:8px;align-items:center;color:var(--ink);padding:3px 0}.filters a:hover{text-decoration:none;color:var(--accent)}
+.filters a .box{width:13px;height:13px;border:1px solid var(--ink3);border-radius:2px;flex:none}
+.filters a.on .box{background:var(--accent);border-color:var(--accent)}.filters a .pct{margin-left:auto;color:var(--ink2)}
+.filters hr{border:0;border-top:1px solid var(--line);margin:10px 0}
+svg text{fill:var(--ink2);font:11px Inter,system-ui,sans-serif}svg .v{fill:var(--ink);font-size:12px}
+svg .grid{stroke:var(--line)}svg .bar{fill:var(--accent)}svg .badbar{fill:none;stroke:var(--crit);stroke-width:1.5}
+svg .badtxt{fill:var(--crit);font-weight:600}
+main.login{max-width:360px;margin:12vh auto;padding:0}label{display:block;font-size:12px;color:var(--ink2);margin:12px 0 4px}
+input{width:100%;padding:8px;border:1px solid var(--line);border-radius:3px;font:inherit;background:var(--page);color:var(--ink)}"""
 
 
 def esc(x) -> str:
     return html.escape(str(x))
 
 
-def page(title: str, body: str, base: str = "", tab: str = "", csrf: str = "") -> bytes:
+def page(title: str, body: str, base: str = "", tab: str = "", csrf: str = "", right: str = "") -> bytes:
     nav = ""
     if csrf:
         links = "".join(f'<a href="{base}/admin{p}" class="{"on" if tab == t else ""}">{t}</a>'
                         for t, p in (("Status", ""), ("Index", "/index"), ("Usage", "/usage"),
-                                             ("Clients", "/clients")))
-        nav = (f'<header><b>KB admin</b>{links}<form method="post" action="{base}/admin/logout">'
-               f'<input type="hidden" name="csrf" value="{esc(csrf)}"><button class="light">Sign out</button>'
-               f'</form></header>')
+                                     ("Clients", "/clients")))
+        nav = (f'<header><span class="brand">KB admin</span><nav>{links}</nav><div class="right">{right}'
+               f'<form method="post" action="{base}/admin/logout"><input type="hidden" name="csrf" '
+               f'value="{esc(csrf)}"><button>Sign out</button></form></div></header>')
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width, initial-scale=1"><title>{esc(title)}</title>'
             f'<style>{STYLE}</style></head><body>{nav}{body}</body></html>').encode()
+
+
+def panel(title: str, inner: str, note: str = "") -> str:
+    small = f"<small>{esc(note)}</small>" if note else ""
+    return f'<section class="panel"><h2>{esc(title)}{small}</h2><div class="body">{inner}</div></section>'
 
 
 def login_page(base: str, step: str = "password", lid: str = "", error: str = "") -> bytes:
@@ -247,8 +280,8 @@ def login_page(base: str, step: str = "password", lid: str = "", error: str = ""
         fields = ('<label for="u">User name</label><input id="u" name="username" autocomplete="username" autofocus required>'
                   '<label for="p">Password</label><input id="p" name="password" type="password" '
                   'autocomplete="current-password" required>')
-    body = (f'<main class="login"><section><h2>KB admin</h2>{err}<form method="post" action="{base}/admin/login">'
-            f'{fields}<p><button>Sign in</button></p></form></section></main>')
+    body = (f'<main class="login">' + panel("KB admin · sign in", f'{err}<form method="post" action="{base}/admin/login">'
+            f'{fields}<p><button class="primary">Sign in</button></p></form>') + '</main>')
     return page("KB admin · sign in", body)
 
 
@@ -261,9 +294,9 @@ def status_page(base: str, csrf: str, s: dict, user: dict, note: str = "") -> by
                       for n, st, m in s["helpers"])
     rebuild_btn = ("<p>A build is running.</p>" if s["building"] else
                    f'<form method="post" action="{base}/admin/rebuild"><input type="hidden" name="csrf" '
-                   f'value="{esc(csrf)}"><button>Rebuild now</button></form>')
+                   f'value="{esc(csrf)}"><button class="primary">Rebuild now</button></form>')
     body = (f'<main>{f"<div class=note>{esc(note)}</div>" if note else ""}'
-            f'<section><h2>Knowledge base</h2><table>'
+            f'<section class=panel><h2>Knowledge base</h2><div class=body><table>'
             f'<tr><th>Version</th><td>{esc(s["version"])} (tool contract {esc(s["contract"])})</td></tr>'
             f'<tr><th>Graph</th><td>built {esc(g.get("built"))}, {esc(g.get("nodes"))} nodes, '
             f'{esc(g.get("edges"))} edges, {esc(g.get("size_mb"))} MB</td></tr>'
@@ -272,16 +305,11 @@ def status_page(base: str, csrf: str, s: dict, user: dict, note: str = "") -> by
             f'<tr><th>In use</th><td>{s["cursors"]} cursors, {s["clients"]} sign-in clients, server '
             f'{esc(s["server_mb"])} MB</td></tr>'
             f'<tr><th>Signed in as</th><td>{esc(next((user.get(k) for k in ID_FIELDS if user.get(k)), "?"))}</td></tr>'
-            f'</table></section>'
-            f'<section><h2>Builds{" — <span class=bad>last failed</span>" if s["failed"] and s["builds"] and "exit=0" not in s["builds"][-1] else ""}</h2>'
-            f'<table>{builds}</table><p></p>{rebuild_btn}</section>'
-            f'<section><h2>Warm helpers</h2><table>{helpers}</table></section></main>')
+            f'</table></div></section>'
+            f'<section class=panel><h2>Builds{" — <span class=bad>last failed</span>" if s["failed"] and s["builds"] and "exit=0" not in s["builds"][-1] else ""}</h2>'
+            f'<div class=body><table>{builds}</table><p></p>{rebuild_btn}</div></section>'
+            f'<section class=panel><h2>Warm helpers</h2><div class=body><table>{helpers}</table></div></section></main>')
     return page("KB admin", body, base, "Status", csrf)
-
-
-def usage_page(base: str, csrf: str, report: str) -> bytes:
-    return page("KB admin · usage", f"<main><section><h2>Usage</h2><pre>{esc(report)}</pre></section></main>",
-                base, "Usage", csrf)
 
 
 def clients_page(base: str, csrf: str, clients: dict, note: str = "") -> bytes:
@@ -291,76 +319,105 @@ def clients_page(base: str, csrf: str, clients: dict, note: str = "") -> bytes:
         f"<td>{esc(', '.join(c.get('redirect_uris', [])))}</td>"
         f'<td><form method="post" action="{base}/admin/clients/revoke"><input type="hidden" name="csrf" '
         f'value="{esc(csrf)}"><input type="hidden" name="client_id" value="{esc(cid)}">'
-        f'<button class="light">Revoke</button></form></td></tr>'
+        f'<button>Revoke</button></form></td></tr>'
         for cid, c in sorted(clients.items(), key=lambda kv: -kv[1].get("client_id_issued_at", 0)))
-    body = (f'<main>{f"<div class=note>{esc(note)}</div>" if note else ""}<section><h2>Sign-in clients</h2>'
+    body = (f'<main>{f"<div class=note>{esc(note)}</div>" if note else ""}<section class=panel><h2>Sign-in clients</h2><div class=body>'
             f'<p>MCP clients that registered for the browser sign-in. Revoking one ends its refresh tokens: '
             f'it has to sign in again. A token it already holds lives until the API ends it.</p>'
             f'<table><tr><th>Name</th><th>Client id</th><th>Registered</th><th>Redirect</th><th></th></tr>'
-            f'{rows or "<tr><td colspan=5>none</td></tr>"}</table></section></main>')
+            f'{rows or "<tr><td colspan=5>none</td></tr>"}</table></div></section></main>')
     return page("KB admin · clients", body, base, "Clients", csrf)
 
 
-# ---------------------------------------------------------------------------------- index page
-# Charts are server-rendered SVG: no scripts (the CSP forbids them), a native tooltip (<title>) on
-# every mark, the numbers also as text. One series per chart, so one hue and no legend; a failed
-# build carries the critical status color and the word "failed". Colors: the dataviz reference
-# palette (series-1 blue, status critical), light and dark from the same ramps.
-CHART_CSS = """.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(9.5rem,1fr));gap:.7rem;margin-bottom:1rem}
-.tile{background:var(--surface);border-radius:10px;padding:.8rem 1rem;box-shadow:0 1px 2px #0002}
-.tile b{display:block;font-size:1.5rem;color:var(--ink)}.tile span{font-size:.8rem;color:var(--ink2)}
-.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(30rem,100%),1fr));gap:1rem}
-svg text{fill:var(--ink2);font:12px system-ui,sans-serif}svg .v{fill:var(--ink)}"""
+# ---------------------------------------------------------------------------------- charts
+# Server-drawn SVG: no scripts (the CSP forbids them), a native tooltip (<title>) on every mark, the
+# numbers also as text. One series per chart, so one hue and no legend; a failed build is drawn as a
+# red outline with the word "failed" (status color + label, never color alone). Colors are CSS
+# variables, so the same SVG follows the light and the dark theme.
+def nice(top: float) -> float:
+    """A round axis maximum at or above `top` (1, 2, 2.5, 5 x 10^n)."""
+    import math
+    if top <= 0:
+        return 1
+    e = 10 ** math.floor(math.log10(top))
+    for m in (1, 2, 2.5, 5, 10):
+        if m * e >= top:
+            return m * e
+    return 10 * e
 
 
-def _hbar(rows: list[tuple[str, float]], unit: str = "", width: int = 520, fmt=lambda v: f"{v:,.0f}") -> str:
-    """Horizontal bars, one series: label left, bar, value at the bar end."""
+def hbars(rows: list[tuple[str, float]], unit: str = "", fmt=lambda v: f"{v:,.0f}", width: int = 440,
+          label_w: int = 120, empty: str = "no data") -> str:
+    """Horizontal bars: label, bar, value; a light axis with 0 / half / max underneath."""
     if not rows:
-        return "<p>no data</p>"
-    top = max(v for _, v in rows) or 1
-    lw, row_h, bar_h = 170, 24, 14
-    plot = width - lw - 70
-    h = row_h * len(rows) + 6
-    parts = [f'<svg viewBox="0 0 {width} {h}" width="100%" role="img">']
+        return f'<p class="muted">{esc(empty)}</p>'
+    top = nice(max(v for _, v in rows))
+    vw = 64
+    plot = width - label_w - vw - 8
+    row_h = 22
+    h = row_h * len(rows) + 22
+    out = [f'<svg viewBox="0 0 {width} {h}" width="100%" role="img">']
+    for frac in (0, .5, 1):
+        x = label_w + plot * frac
+        out.append(f'<line class="grid" x1="{x:.1f}" x2="{x:.1f}" y1="0" y2="{h - 16}"/>'
+                   f'<text x="{x:.1f}" y="{h - 3}" text-anchor="middle">{esc(fmt(top * frac))}</text>')
     for i, (label, v) in enumerate(rows):
         y = i * row_h + 4
-        w = max(2, plot * v / top)
-        lab = label if len(label) <= 24 else label[:23] + "…"
-        parts.append(f'<text x="{lw - 8}" y="{y + 11}" text-anchor="end">{esc(lab)}</text>'
-                     f'<rect x="{lw}" y="{y}" width="{w:.1f}" height="{bar_h}" rx="3" fill="var(--s1)">'
-                     f'<title>{esc(label)}: {esc(fmt(v))}{esc(unit)}</title></rect>'
-                     f'<text class="v" x="{lw + w + 6:.1f}" y="{y + 11}">{esc(fmt(v))}{esc(unit)}</text>')
-    parts.append("</svg>")
-    return "".join(parts)
+        w = max(1.5, plot * v / top)
+        lab = label if len(label) <= 18 else label[:17] + "…"
+        out.append(f'<text x="0" y="{y + 11}">{esc(lab)}</text>'
+                   f'<rect class="bar" x="{label_w}" y="{y + 1}" width="{w:.1f}" height="12" rx="1.5">'
+                   f'<title>{esc(label)}: {esc(fmt(v))}{esc(unit)}</title></rect>'
+                   f'<text class="v" x="{width}" y="{y + 11}" text-anchor="end">{esc(fmt(v))}{esc(unit)}</text>')
+    out.append("</svg>")
+    return "".join(out)
 
 
-def _vbar(rows: list[tuple[str, float, bool]], unit: str, width: int = 520, height: int = 190) -> str:
-    """Vertical bars over time, one series; `bad` rows are marked critical with a text label."""
+def vbars(rows: list[tuple[str, float, bool]], unit: str, width: int = 640, height: int = 210,
+          every: int = 1, empty: str = "no data") -> str:
+    """Vertical bars over time with a y axis; `bad` rows are a red outline labelled "failed"."""
     if not rows:
-        return "<p>no builds logged</p>"
-    top = max(v for _, v, _ in rows) or 1
-    left, bottom, top_pad = 40, 34, 16
-    plot_w, plot_h = width - left - 8, height - bottom - top_pad
-    step = plot_w / len(rows)
-    bw = max(4, min(26, step - 4))
-    parts = [f'<svg viewBox="0 0 {width} {height}" width="100%" role="img">']
-    for frac in (0, 0.5, 1):
-        y = top_pad + plot_h * (1 - frac)
-        parts.append(f'<line x1="{left}" x2="{width - 8}" y1="{y:.1f}" y2="{y:.1f}" stroke="var(--grid)"/>'
-                     f'<text x="{left - 6}" y="{y + 4:.1f}" text-anchor="end">{top * frac:.0f}</text>')
+        return f'<p class="muted">{esc(empty)}</p>'
+    top = nice(max(v for _, v, _ in rows) * 1.1)
+    left, bottom, top_pad = 44, 26, 18
+    pw, ph = width - left - 4, height - bottom - top_pad
+    step = pw / len(rows)
+    bw = max(3, min(28, step * 0.72))
+    out = [f'<svg viewBox="0 0 {width} {height}" width="100%" role="img">']
+    for frac in (0, .25, .5, .75, 1):
+        y = top_pad + ph * (1 - frac)
+        out.append(f'<line class="grid" x1="{left}" x2="{width - 4}" y1="{y:.1f}" y2="{y:.1f}"/>'
+                   f'<text x="{left - 6}" y="{y + 4:.1f}" text-anchor="end">{top * frac:,.0f}</text>')
     for i, (label, v, bad) in enumerate(rows):
         x = left + i * step + (step - bw) / 2
-        bh = max(2, plot_h * v / top)
-        y = top_pad + plot_h - bh
-        color = "var(--crit)" if bad else "var(--s1)"
-        parts.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{bw:.1f}" height="{bh:.1f}" rx="3" fill="{color}">'
-                     f'<title>{esc(label)}: {v:.0f}{esc(unit)}{" — failed" if bad else ""}</title></rect>')
+        bh = max(1.5, ph * v / top)
+        y = top_pad + ph - bh
+        tip = f"<title>{esc(label)}: {v:,.0f}{esc(unit)}{' — failed' if bad else ''}</title>"
         if bad:
-            parts.append(f'<text x="{x + bw / 2:.1f}" y="{y - 4:.1f}" text-anchor="middle">failed</text>')
-    first, last = rows[0][0], rows[-1][0]
-    parts.append(f'<text x="{left}" y="{height - 10}">{esc(first)}</text>'
-                 f'<text x="{width - 8}" y="{height - 10}" text-anchor="end">{esc(last)}</text></svg>')
-    return "".join(parts)
+            out.append(f'<rect class="badbar" x="{x:.1f}" y="{y:.1f}" width="{bw:.1f}" height="{bh:.1f}">{tip}</rect>'
+                       f'<text class="badtxt" x="{x + bw / 2:.1f}" y="{y - 5:.1f}" text-anchor="middle">failed</text>')
+        else:
+            out.append(f'<rect class="bar" x="{x:.1f}" y="{y:.1f}" width="{bw:.1f}" height="{bh:.1f}" rx="1.5">{tip}</rect>')
+        if i % every == 0 or i == len(rows) - 1:
+            out.append(f'<text x="{x + bw / 2:.1f}" y="{height - 8}" text-anchor="middle">{esc(label)}</text>')
+    out.append("</svg>")
+    return "".join(out)
+
+
+def spark(values: list[float], width: int = 140, height: int = 18, scale: float | None = None) -> str:
+    """A tiny bar sparkline; `scale` shares one maximum between rows (like PMM's table)."""
+    if len(values) < 2 or not any(values):  # one point is no trend: a baseline, not a full bar
+        return f'<svg viewBox="0 0 {width} {height}" width="{width}" height="{height}"><line class="grid" x1="0" x2="{width}" y1="{height - .5}" y2="{height - .5}"/></svg>'
+    top = scale or max(values)
+    step = width / len(values)
+    bars = "".join(f'<rect class="bar" x="{i * step:.1f}" y="{height - max(1, height * v / top):.1f}" '
+                   f'width="{max(1, step - 1):.1f}" height="{max(1, height * v / top):.1f}"/>'
+                   for i, v in enumerate(values) if v)
+    return f'<svg viewBox="0 0 {width} {height}" width="{width}" height="{height}">{bars}</svg>'
+
+
+def ratio(frac: float, bad: bool = False) -> str:
+    return f'<div class="ratio{" bad" if bad else ""}"><i style="width:{max(0, min(1, frac)) * 100:.1f}%"></i></div>'
 
 
 def _size(path: str) -> int:
@@ -442,11 +499,40 @@ def builds() -> list[tuple[str, float, bool]]:
     """(when, seconds, failed) of the last 30 builds, from logs/refresh.log."""
     import re
     out = []
-    for line in _tail(os.path.join(kb_core.KB, "logs", "refresh.log"), 30):
+    logs = os.path.join(kb_core.KB, "logs")
+    # builds.log is written by bin/kb itself (every build, any trigger); refresh.log by the server's
+    # kb-refresh only. Prefer the first, fall back to the second for builds made before it existed.
+    source = os.path.join(logs, "builds.log")
+    if not os.path.exists(source):
+        source = os.path.join(logs, "refresh.log")
+    for line in _tail(source, 30):
         m = re.match(r"(\d{4}-\d\d-\d\d) (\d\d:\d\d):\d\d exit=(\d+) (\d+)s", line)
         if m:
             out.append((f"{m.group(1)[5:]} {m.group(2)}", float(m.group(4)), m.group(3) != "0"))
     return out
+
+
+PSEUDO_NAMES = {"domain": "(domain groups)", "db": "(database tables)"}
+
+
+def _history(facts: dict) -> list[dict]:
+    """The KB's own small history of its headline numbers, one point per graph build (kept in
+    logs/index-history.json, last 60): the tiles' sparklines need no Prometheus."""
+    path = os.path.join(kb_core.KB, "logs", "index-history.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            hist = json.load(f)
+    except (OSError, ValueError):
+        hist = []
+    if facts.get("built") and (not hist or hist[-1].get("built") != facts["built"]):
+        hist = (hist + [facts])[-60:]
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(hist, f)
+        except OSError:
+            pass
+    return hist
 
 
 def index_page(base: str, csrf: str, usage) -> bytes:
@@ -455,50 +541,167 @@ def index_page(base: str, csrf: str, usage) -> bytes:
     docs = docs_facts()
     out_dir = os.path.dirname(kb_core.GRAPH)
     stores = [(label, _size(p) / 1e6) for label, p in (
-        ("graph.json", kb_core.GRAPH),
-        ("caller views on disk", os.path.join(out_dir, "filtered")),
-        ("dashboard data", os.path.join(out_dir, "kb-graph-data")),
-        ("contracts + problems", os.path.join(out_dir, "contracts.json")),
-        ("graphify cache", os.path.join(out_dir, "cache")),
-        ("docs search (qmd)", docs["path"] or ""),
         ("staged code", os.path.join(kb_core.KB, "repos")),
-        ("staged docs", os.path.join(kb_core.KB, ".docs"))) if p and os.path.exists(p)]
+        ("caller views", os.path.join(out_dir, "filtered")),
+        ("graph.json", kb_core.GRAPH),
+        ("docs search", docs["path"] or ""),
+        ("dashboard data", os.path.join(out_dir, "kb-graph-data")),
+        ("staged docs", os.path.join(kb_core.KB, ".docs")),
+        ("graphify cache", os.path.join(out_dir, "cache")),
+        ("contracts", os.path.join(out_dir, "contracts.json"))) if p and os.path.exists(p)]
     stores.sort(key=lambda r: -r[1])
+    disk = sum(v for _, v in stores)
     b = builds()
-    ok = [s for _, s, bad in b if not bad]
-    tools = {}
-    days = []
-    if usage is not None:
-        with usage._lock:
-            d = json.loads(json.dumps(usage.data))
-        tools = d.get("tools", {})
-        days = sorted(d.get("days", {}).items())[-14:]
+    good = [s_ for _, s_, bad in b if not bad]
+    d = usage.snapshot() if usage is not None else {"tools": {}, "days": {}, "hours": {}}
+    tools = d.get("tools", {})
+    calls = sum(v.get("calls", 0) for v in tools.values())
+    avg = (sum(v.get("seconds", 0) for v in tools.values()) / calls) if calls else None
+    n_docs, n_chunks = sum(n for _, n in docs["docs"]), sum(n for _, n in docs["chunks"])
+    hist = _history({"built": g.get("built"), "nodes": g.get("nodes"), "edges": g.get("edges"),
+                     "docs": n_docs, "chunks": n_chunks, "disk": round(disk, 1),
+                     "build": good[-1] if good else None})
+    series = lambda k: [float(h.get(k) or 0) for h in hist[-30:]]  # noqa: E731
+    hours = [float(sum(v.values())) for _, v in sorted(d.get("hours", {}).items())][-24:]
+
+    def tile(label, value, sub, values):
+        return (f'<div class="tile"><div class="k">{esc(label)}</div><div class="v">{esc(value)}</div>'
+                f'{spark(values, 160, 16)}<div class="s">{esc(sub)}</div></div>')
+    fmt_n = lambda v: f"{v:,}" if isinstance(v, int) else "—"  # noqa: E731
+    tiles = "".join([
+        tile("Graph nodes", fmt_n(g.get("nodes")), f"built {g.get('built', '—')}", series("nodes")),
+        tile("Graph edges", fmt_n(g.get("edges")), f"{len(g.get('repos', {}))} projects", series("edges")),
+        tile("Documents", f"{n_docs:,}", "in docs search", series("docs")),
+        tile("Embedded chunks", f"{n_chunks:,}", "vectors", series("chunks")),
+        tile("Disk", f"{disk:,.0f} MB", "all indexes", series("disk")),
+        tile("Last good build", f"{good[-1]:.0f} s" if good else "—",
+             f"{sum(1 for *_, bad in b if bad)} failed of {len(b)}" if b else "no builds logged", [v for _, v, _ in b]),
+        tile("Avg answer", f"{avg:.2f} s" if avg is not None else "—",
+             f"{calls:,} calls" if calls else "no calls counted yet", hours),
+    ])
+    repos = sorted(((PSEUDO_NAMES.get(k, k), v) for k, v in g.get("repos", {}).items()), key=lambda kv: -kv[1])
+    by_proj = {}
+    for name, n in docs["docs"]:
+        by_proj.setdefault(name, [0, 0])[0] = n
+    for name, n in docs["chunks"]:
+        by_proj.setdefault(name, [0, 0])[1] = n
+    top_d = max([v[0] for v in by_proj.values()] or [1]) or 1
+    top_c = max([v[1] for v in by_proj.values()] or [1]) or 1
+    doc_rows = "".join(f'<tr><td>{esc(k)}</td><td class="n">{v[0]:,}{ratio(v[0] / top_d)}</td>'
+                       f'<td class="n">{v[1]:,}{ratio(v[1] / top_c)}</td></tr>'
+                       for k, v in sorted(by_proj.items(), key=lambda kv: -kv[1][1]))
+    doc_table = (f'<table><tr><th>Project</th><th class="n">Documents</th><th class="n">Chunks</th></tr>{doc_rows}'
+                 f'<tr class="total"><td>Total</td><td class="n">{n_docs:,}</td><td class="n">{n_chunks:,}</td></tr></table>'
+                 if by_proj else '<p class="muted">docs search not built</p>')
     latency = sorted(((t, v["seconds"] / v["calls"]) for t, v in tools.items() if v.get("calls")),
                      key=lambda r: -r[1])
-    calls = sum(v.get("calls", 0) for v in tools.values())
-    avg = (sum(v.get("seconds", 0) for v in tools.values()) / calls) if calls else 0
-    tile = lambda big, small: f'<div class="tile"><b>{esc(big)}</b><span>{esc(small)}</span></div>'  # noqa: E731
-    tiles = "".join([
-        tile(f"{g.get('nodes', '?'):,}" if isinstance(g.get("nodes"), int) else "?", "graph nodes"),
-        tile(f"{g.get('edges', '?'):,}" if isinstance(g.get("edges"), int) else "?", "graph edges"),
-        tile(f"{sum(n for _, n in docs['docs']):,}", "documents indexed"),
-        tile(f"{sum(n for _, n in docs['chunks']):,}", "embedded chunks"),
-        tile(f"{sum(v for _, v in stores):,.0f} MB", "on disk"),
-        tile(f"{ok[-1]:.0f} s" if ok else "—", "last good build"),
-        tile(f"{avg:.2f} s" if calls else "—", f"avg answer, {calls:,} calls"),
-    ])
-    sec = lambda title, inner: f"<section><h2>{esc(title)}</h2>{inner}</section>"  # noqa: E731
-    body = (f'<main><div class="tiles">{tiles}</div><div class="grid2">'
-            + sec("Graph nodes per project", _hbar(sorted(g.get("repos", {}).items(), key=lambda kv: -kv[1])))
-            + sec("Graph nodes per type", _hbar(detail.get("types", [])))
-            + sec("Graph edges per relation", _hbar(detail.get("relations", [])))
-            + sec("Storage", _hbar(stores, " MB", fmt=lambda v: f"{v:,.1f}"))
-            + sec("Documents per project (docs search)", _hbar(docs["docs"]))
-            + sec("Embedded chunks per project", _hbar(docs["chunks"]))
-            + sec("Build time, last 30 builds (s)", _vbar(b, " s"))
-            + sec("Average answer time per tool (s)", _hbar(latency, " s", fmt=lambda v: f"{v:.2f}"))
-            + sec("Calls per day, last 14 days", _vbar([(day[5:], float(sum(v.values())), False)
-                                                        for day, v in days], " calls"))
-            + "</div></main>")
-    html_bytes = page("KB admin · index", body, base, "Index", csrf)
-    return html_bytes.replace(b"</style>", CHART_CSS.encode() + b"</style>", 1)
+    days = sorted(d.get("days", {}).items())[-14:]
+    body = ('<main><div class="tiles">' + tiles + '</div>'
+            '<div class="grid g2">'
+            + panel("Build time · last 30 builds", vbars(b, " s", every=max(1, len(b) // 10),
+                                                         empty="no builds logged yet: the next build records its time"),
+                    f"last {good[-1]:.0f} s" if good else "")
+            + panel("Calls per day · last 14 days", vbars([(day[5:], float(sum(v.values())), False) for day, v in days],
+                                                          " calls", empty="no calls counted yet"),
+                    f"{calls:,} total" if calls else "")
+            + '</div><div class="grid g3" style="margin-top:16px">'
+            + panel("Graph nodes by project", hbars(repos))
+            + panel("Graph nodes by type", hbars(detail.get("types", [])))
+            + panel("Graph edges by relation", hbars(detail.get("relations", [])), f"{g.get('edges', 0):,} edges"
+                    if isinstance(g.get("edges"), int) else "")
+            + '</div><div class="grid g3" style="margin-top:16px">'
+            + panel("Documents and chunks by project", doc_table, f"{n_docs:,} docs · {n_chunks:,} chunks")
+            + panel("Storage per index", hbars(stores, " MB", fmt=lambda v: f"{v:,.0f}" if v >= 10 else f"{v:,.1f}"),
+                    f"total {disk:,.0f} MB")
+            + panel("Average answer time by tool", hbars(latency, " s", fmt=lambda v: f"{v:.2f}",
+                                                         empty="no calls counted yet"), "mean")
+            + '</div></main>')
+    return page("KB admin · index", body, base, "Index", csrf)
+
+
+def _rate(calls: float, hours: int) -> str:
+    """Calls in the window, and per minute once there are enough of them to say something."""
+    per_min = calls / (hours * 60)
+    return f"{calls:,.0f} · {per_min:.2f}/min" if per_min >= 0.01 else f"{calls:,.0f} calls"
+
+
+def usage_page(base: str, csrf: str, usage, query: dict | None = None, hours: int = 12) -> bytes:
+    """PMM Query Analytics, KB edition: filters on the left (links, no scripts), one row per tool
+    with its calls sparkline over the last `hours` hours, calls/min, mean and p95 time, errors."""
+    query = query or {}
+    if usage is None:
+        return page("KB admin · usage", '<main>' + panel("Usage", '<p class="muted">usage counting is off</p>')
+                    + '</main>', base, "Usage", csrf)
+    d = usage.snapshot()
+    tools = d.get("tools", {})
+    pick_tool, pick_user, pick_proj = query.get("tool"), query.get("user"), query.get("project")
+    allowed_tools = set(tools)
+    if pick_user and pick_user in d.get("users", {}):
+        allowed_tools &= set(d["users"][pick_user])
+    if pick_proj and pick_proj in d.get("projects", {}):
+        allowed_tools &= set(d["projects"][pick_proj])
+    if pick_tool:
+        allowed_tools &= {pick_tool}
+    hour_keys = [time.strftime("%Y-%m-%d %H", time.localtime(time.time() - 3600 * k)) for k in range(hours - 1, -1, -1)]
+    per_hour = {t: [float(d.get("hours", {}).get(h, {}).get(t, 0)) for h in hour_keys] for t in tools}
+    window_calls = {t: sum(v) for t, v in per_hour.items()}
+    scale = max([max(v) for v in per_hour.values()] or [1]) or 1
+    rows = sorted((t for t in tools if t in allowed_tools), key=lambda t: -tools[t]["calls"])
+    total_calls = sum(tools[t]["calls"] for t in rows) or 1
+    max_avg = max([tools[t]["seconds"] / tools[t]["calls"] for t in rows if tools[t]["calls"]] or [1]) or 1
+    max_err = max([tools[t]["errors"] for t in rows] or [1]) or 1
+    p95s = {t: usage.p95(t) for t in rows}
+    max_p95 = max([v for v in p95s.values() if v] or [1]) or 1
+
+    def link(**kw) -> str:
+        q = {k: v for k, v in {"tool": pick_tool, "user": pick_user, "project": pick_proj, **kw}.items() if v}
+        return f"{base}/admin/usage" + ("?" + urllib.parse.urlencode(q) if q else "")
+
+    def filt(title, key, counts, current):
+        tot = sum(counts.values()) or 1
+        items = "".join(f'<a class="{"on" if current == k else ""}" href="{esc(link(**{key: None if current == k else k}))}">'
+                        f'<span class="box"></span>{esc(k)}<span class="pct">{v / tot:.0%}</span></a>'
+                        for k, v in sorted(counts.items(), key=lambda kv: -kv[1])[:12])
+        return f'<h3>{esc(title)}<span>{len(counts)}</span></h3>{items}'
+    users = {u: sum(v.values()) for u, v in d.get("users", {}).items()}
+    projects = {p: sum(v.values()) for p, v in d.get("projects", {}).items()}
+    tool_counts = {t: v["calls"] for t, v in tools.items()}
+    filters = ('<aside class="panel filters"><div class="body">'
+               + filt("Project", "project", projects, pick_proj) + "<hr>" + filt("Tool", "tool", tool_counts, pick_tool)
+               + "<hr>" + filt("User", "user", users, pick_user)
+               + (f'<hr><a href="{base}/admin/usage">Reset all</a>' if (pick_tool or pick_user or pick_proj) else "")
+               + '</div></aside>')
+    trs = []
+    tot_hour = [sum(per_hour[t][i] for t in rows) for i in range(hours)]
+    trs.append(f'<tr class="total"><td>TOTAL</td><td>{spark(tot_hour, 300, 20)}</td>'
+               f'<td class="n">{_rate(sum(window_calls[t] for t in rows), hours)}{ratio(1)}</td>'
+               f'<td class="n">{sum(tools[t]["seconds"] for t in rows) / total_calls:.2f} s</td>'
+               f'<td class="n">{sum(tools[t]["errors"] for t in rows)}</td><td class="n"></td></tr>')
+    for t in rows:
+        v = tools[t]
+        avg = v["seconds"] / v["calls"] if v["calls"] else 0
+        p95 = p95s[t]
+        trs.append(f'<tr><td><a href="{esc(link(tool=t))}"><code>{esc(t)}</code></a></td>'
+                   f'<td>{spark(per_hour[t], 300, 20, scale)}</td>'
+                   f'<td class="n">{_rate(window_calls[t], hours)}{ratio(v["calls"] / total_calls)}</td>'
+                   f'<td class="n">{avg:.2f} s{ratio(avg / max_avg)}</td>'
+                   f'<td class="n{" bad" if v["errors"] else ""}">{v["errors"]}{ratio(v["errors"] / max_err, True) if v["errors"] else ""}</td>'
+                   f'<td class="n">{f"{p95:.2f} s" if p95 is not None else "—"}{ratio((p95 or 0) / max_p95)}</td></tr>')
+    table = ('<table><tr><th>Tool</th><th>Calls · last 12 hours</th><th class="n">Calls</th>'
+             '<th class="n">Avg time</th><th class="n">Errors</th><th class="n">p95 time</th></tr>'
+             + "".join(trs) + "</table>")
+    args = []
+    for t, a in d.get("args", {}).items():
+        if t in allowed_tools:
+            args += [(n, t, k) for k, n in a.items()]
+    args.sort(key=lambda r: -r[0])
+    top_n = args[0][0] if args else 1
+    asked = "".join(f'<tr><td><code>{esc(t)}</code> · {esc(k)}</td><td class="n">{n:,}{ratio(n / top_n)}</td></tr>'
+                    for n, t, k in args[:15]) or '<tr><td class="muted">no calls counted yet</td></tr>'
+    sub = f"{len(rows)} tools · {len(users)} users · since {d.get('since', '—')}"
+    body = ('<main><div class="layout">' + filters + '<div class="stack">'
+            + panel("Tool usage", table, sub)
+            + panel("Most asked", f'<table><tr><th>Argument</th><th class="n">Count</th></tr>{asked}</table>',
+                    "the most frequent arguments")
+            + '</div></div></main>')
+    return page("KB admin · usage", body, base, "Usage", csrf)

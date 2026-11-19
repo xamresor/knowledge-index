@@ -42,6 +42,7 @@ import os
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import addons
 import admin
 import kb_core
 import paths
@@ -130,7 +131,7 @@ def mcp(message: dict) -> dict | None:
     if method == "ping":
         return {"jsonrpc": "2.0", "id": mid, "result": {}}
     if method == "tools/list":
-        return {"jsonrpc": "2.0", "id": mid, "result": {"tools": kb_core.TOOLS}}
+        return {"jsonrpc": "2.0", "id": mid, "result": {"tools": kb_core.tools()}}
     if method == "tools/call":
         params = message.get("params") or {}
         try:
@@ -151,7 +152,7 @@ def dispatch(method: str, path: str, query: dict, body: dict) -> dict:
     if method == "GET" and path == "/version":
         return kb_core.version_info()
     if method == "GET" and path == "/tools":
-        return {"tools": kb_core.TOOLS}
+        return {"tools": kb_core.tools()}
     if method == "GET" and path == "/doc":
         return {"text": kb_core.call_tool("docs_get", {"path": query.get("path", "")})}
     if method == "POST" and path == "/call":
@@ -210,9 +211,9 @@ def make_handler(host: str, token: str | None):
             self.end_headers()
             self.wfile.write(body)
 
-        def _admin(self, method: str, path: str) -> None:
+        def _admin(self, method: str, path: str, query: dict | None = None) -> None:
             """Local admin pages: only without a token on loopback (the dashboard's own trust)."""
-            if token or host not in LOOPBACK:
+            if token or host not in LOOPBACK or not addons.on("admin"):
                 raise ApiError(404, f"no route for {method} {path}")
             base = ""
             if method == "POST":
@@ -236,9 +237,9 @@ def make_handler(host: str, token: str | None):
             if path == "/admin":
                 self._page(200, admin.status_page(base, CSRF, admin.status(None), {"name": "local"}))
             elif path == "/admin/index":
-                self._page(200, admin.index_page(base, CSRF, None))
+                self._page(200, admin.index_page(base, CSRF, kb_core.LOCAL_USAGE))
             elif path == "/admin/usage":
-                self._page(200, admin.usage_page(base, CSRF, "(local mode: tool calls are not counted)"))
+                self._page(200, admin.usage_page(base, CSRF, kb_core.LOCAL_USAGE, query))
             elif path == "/admin/clients":
                 self._page(200, admin.clients_page(base, CSRF, {}, "Local mode: no browser sign-in."))
             else:
@@ -260,8 +261,20 @@ def make_handler(host: str, token: str | None):
                 if method == "GET" and self._static(parsed.path):
                     return
                 clean = parsed.path.rstrip("/") or "/"
+                if method == "GET" and clean == "/metrics" and (
+                        addons.on("metrics") or os.environ.get("KB_METRICS", "off").lower() == "on"):
+                    import metrics
+                    if not metrics.allowed(self.client_address[0], self.headers):
+                        raise ApiError(401, "metrics need KB_METRICS_TOKEN")
+                    data = metrics.render(kb_core.LOCAL_USAGE).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
                 if clean == "/admin" or clean.startswith("/admin/"):
-                    self._admin(method, clean)
+                    self._admin(method, clean, query)
                     return
                 if not authorized(host, token, self.headers.get("Authorization")):
                     raise ApiError(401, "missing or invalid token")
@@ -315,6 +328,8 @@ def main(argv: list[str] | None = None) -> int:
 
     check_bind(args.bind, args.token)
     warm.enable()  # long-lived graphify and qmd, as in the MCP servers
+    from usage import Usage
+    kb_core.LOCAL_USAGE = Usage(os.path.join(kb_core.KB, "logs", "usage-local.json"))
     kb_core.warm_qmd()
     httpd = ThreadingHTTPServer((args.bind, args.port), make_handler(args.bind, args.token))
     auth = "token required" if args.token else "loopback only, no token"
