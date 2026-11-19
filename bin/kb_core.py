@@ -28,12 +28,14 @@ import json
 import os
 import re
 import subprocess
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import access
 import contracts
 import paths
 import query_build
+import warm
 from alias_expand import expand as expand_aliases, load_aliases
 
 # Code and data are different roots once the tool is installed — see bin/paths.py.
@@ -46,11 +48,12 @@ TIMEOUT_DOCS = 150      # qmd's first call loads the embedding model (cold start
 MAX_OUT = 8000
 
 # How a docs search spends memory and time (KB_DOCS_MODE). The per-call `mode` still applies.
-#   full  - `qmd query` with reranking: best ranking, the reranker model loads (~1.5 GB RAM).
-#   light - the same query document with --no-rerank: BM25 + vectors, embedding model only
-#           (~650 MB, ~2 s). Meant for a shared server.
+#   light - (default) the query document without reranking: BM25 + vectors, embedding model only
+#           (~650 MB; 0.2 s with the warm qmd, bin/warm.py).
+#   full  - the same with an LLM reranker: a better order, but the reranker model loads (~1.5 GB) and
+#           on a CPU each search takes 1-2 minutes (measured 2026-11-19: 81 s and 97 s).
 #   bm25  - keywords only (`qmd search`), no model at all (~70 MB).
-DOCS_MODE = os.environ.get("KB_DOCS_MODE", "full")
+DOCS_MODE = os.environ.get("KB_DOCS_MODE", "light")
 
 # The surface's own contract number, bumped when a tool's shape changes in a breaking way.
 # Deliberately NOT the repo version: the repo can release many times without touching the contract,
@@ -365,8 +368,17 @@ def validate(name: str, args: dict) -> None:
 
 
 # --- process plumbing ---------------------------------------------------------------------------
+GRAPH_VERBS = {"query", "path", "explain", "affected"}
+
+
 def run(cmd: list[str], cwd: str | None = None, timeout: int = TIMEOUT_GRAPH,
         limit: int | None = MAX_OUT) -> str:
+    if cmd[:1] == ["graphify"] and cmd[1:2] and cmd[1] in GRAPH_VERBS:
+        worker = warm.graph()
+        out = worker.run(cmd[1:]) if worker else None
+        if out is not None:  # None: no worker or it failed — fall through to a plain process
+            out = out.strip()
+            return (out[:limit] if limit else out) or "(no results)"
     try:
         p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
         out = (p.stdout or "") + (("\n[stderr] " + p.stderr) if p.returncode and p.stderr else "")
@@ -383,6 +395,20 @@ def warm_qmd() -> None:
     first real doc search — turns a >60s cold start into a ~2s warm call."""
     if DOCS_MODE == "bm25":
         return  # no model to load
+    if warm.ENABLED:  # load the model inside the long-lived qmd, and parse the graph once
+        def _prime():
+            worker = warm.qmd(KB)
+            if worker:
+                worker.query([{"type": "vec", "query": "warmup"}], [], 1, None, rerank=False)
+            graph = warm.graph()
+            if graph and os.path.exists(GRAPH):
+                graph.run(["explain", "warmup", "--graph", GRAPH])
+                try:  # path search and impact use the copy without domain anchors
+                    graph.run(["explain", "warmup", "--graph", access.path_graph(GRAPH)])
+                except access.Denied:
+                    pass
+        threading.Thread(target=_prime, daemon=True).start()
+        return
     cmd = ["qmd", "query", "lex: warmup\nvec: warmup"] + (["--no-rerank"] if DOCS_MODE == "light" else [])
     try:
         subprocess.Popen(
@@ -536,7 +562,43 @@ def _empty(out: str) -> bool:
     return out in ("(no results)", "") or out.startswith("No results found")
 
 
+def _searches(args: dict, q: str) -> tuple[list[dict], str | None]:
+    """The typed sub-queries (and intent) `qmd query` would run for this mode — for the qmd worker."""
+    mode = "lex" if DOCS_MODE == "bm25" else args.get("mode", "auto")
+    if mode == "lex":
+        return [{"type": "lex", "query": q}], None
+    if mode == "vec":
+        return [{"type": "vec", "query": q}], None
+    searches, intent = [], None
+    for line in query_build.build(q).split("\n"):
+        kind, sep, text = line.partition(":")
+        kind, text = kind.strip(), text.strip()
+        if not sep or not text:
+            continue
+        if kind == "intent":
+            intent = text
+        elif kind in ("lex", "vec", "hyde"):
+            searches.append({"type": kind, "query": text})
+    return searches or [{"type": "lex", "query": q}, {"type": "vec", "query": q}], intent
+
+
+def _docs_warm(args: dict, q: str) -> str | None:
+    """The docs search through the long-lived qmd (model already loaded); None = use the CLI."""
+    if args.get("explain"):
+        return None  # score traces exist only in the CLI
+    worker = warm.qmd(KB)
+    if worker is None:
+        return None
+    searches, _intent = _searches(args, q)
+    hits = worker.query(searches, resolve_collections(args)[0], args.get("limit") or 5,  # CLI default
+                        args.get("min_score"), rerank=DOCS_MODE == "full")
+    return None if hits is None else warm.format_hits(hits)[:MAX_OUT]
+
+
 def _docs_once(args: dict, q: str) -> str:
+    out = _docs_warm(args, q)
+    if out is not None:
+        return out
     out = run(_qmd_cmd(args, q), cwd=KB, timeout=TIMEOUT_DOCS)
     if out == "(timed out)" and args.get("mode", "auto") == "auto":
         # cold start exceeded the budget — fall back to instant BM25 rather than returning nothing

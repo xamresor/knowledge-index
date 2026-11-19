@@ -464,20 +464,41 @@ of the token; the token is never logged.
 | `KB_SERVER` | `off` | must be `on` |
 | `KB_AUTH_URL` | — | identity endpoint (required) |
 | `KB_HTTP_HOST` / `KB_HTTP_PORT` | `127.0.0.1` / `8790` | bind address; put a TLS proxy in front |
-| `KB_DOCS_MODE` | `full` | `light` = no reranker (~650 MB RAM), `bm25` = keywords only (~70 MB) |
+| `KB_DOCS_MODE` | `light` | no reranker (~650 MB RAM); `full` adds an LLM reranker (1-2 min per search on a CPU); `bm25` = keywords only (~70 MB) |
 | `KB_MAX_GRAPH_JOBS` / `KB_MAX_DOCS_JOBS` | `3` / `1` | parallel graphify / qmd processes |
 | `KB_AUTH_CACHE_SECONDS` / `KB_AUTH_TIMEOUT` | `60` / `10` | auth cache and timeout |
 | `KB_CONTRACT_EDGES` | `1` | `0` hides other repos' endpoints of `http_request` edges |
 | `KB_USAGE_FILE` | `<data>/logs/usage.json` | tool usage counters (`kb-http usage` prints them with user names; the MCP tool `usage` without) |
+| `KB_WARM` | `1` | `0` = no long-lived graphify / qmd: one process per call, as before |
+| `KB_GRAPH_CACHE_FILES` | `4` | graph files the graphify worker keeps parsed (one per caller project set) |
+| `KB_OAUTH` | `on` | `off` = no browser sign-in, bearer tokens only |
+| `KB_LOGIN_ENV` | `<data>/kb-login.env`, then `<data>/deploy/kb-login.env` | where the sign-in finds `KB_LOGIN_API` and the login paths |
+| `KB_OAUTH_TOKEN_TTL` | `28800` | `expires_in` reported to the client (the API decides the real lifetime) |
+
+**Speed.** The servers keep two helpers running (`bin/warm.py`): graphify in its own interpreter
+with the graph already parsed (`bin/graph_worker.py`), and `qmd mcp` with the embedding model loaded.
+On a 23k-node graph a graph lookup drops from 1-6 s to a few milliseconds, a code search from ~6 s to
+0.1 s and a docs search from 4-7 s to 0.2 s. The first call on a caller's own filtered graph parses
+it once (~1-2 s). A helper that fails or is missing falls back to the old one-process-per-call path.
+
+**Browser sign-in (MCP OAuth).** With `KB_LOGIN_API` and the login paths set, an MCP client signs in
+by itself: a 401 points it to `/.well-known/oauth-protected-resource`, it registers (dynamic client
+registration), opens `/authorize` in the browser, the person types the API user name, password and
+authenticator code, and the client receives the API's dev token as its access token (PKCE S256,
+loopback redirect URIs only, refresh while the API token lives). `bin/oauth.py` has the details and the
+limits. Behind a proxy, pass `X-Forwarded-Proto`, `X-Forwarded-Host` and the stripped path as
+`X-Forwarded-Prefix`; the discovery documents are also served at the host root
+(`/.well-known/oauth-authorization-server/<prefix>`), see `examples/server/`.
 
 Around it:
 
 - **`bin/kb-refresh`** — cron, every minute: runs `kb update` when an indexed checkout has a new HEAD.
   `KB_REFRESH_WAIT_LOCK=<file>` makes it wait while your deploy holds that lock.
-- **`bin/kb-login`** — logs a developer in to *your* API and writes the `kb` entry with the token into
-  their `.mcp.json`. No default addresses: `--api`/`KB_LOGIN_API`, `--kb-url`/`KB_URL`, and the login
-  paths and extra headers through `KB_LOGIN_PATH`, `KB_LOGIN_2FA_PATH`, `KB_LOGIN_2FA_SETUP_PATH`,
-  `KB_LOGIN_HEADERS` (the contract is in the script's header).
+- **`bin/kb-login`** — the terminal alternative to the browser sign-in: logs a developer in to *your*
+  API, keeps the token in `~/.claude/kb/token` and registers the server once in Claude Code's user scope
+  with a `headersHelper` (`--add-to-claude`). No default addresses: `--env-file`, or `KB_LOGIN_API`,
+  `KB_URL`, `KB_LOGIN_PATH`, `KB_LOGIN_2FA_PATH`, `KB_LOGIN_2FA_SETUP_PATH`, `KB_LOGIN_HEADERS` (the
+  contract is in the script's header).
 - **`examples/server/`** — a systemd unit, an nginx vhost and a crontab, with `kb.example.com`
   placeholders.
 

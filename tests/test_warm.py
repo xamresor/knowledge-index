@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""bin/warm.py and its use in kb_core: long-lived graphify and qmd, with the old path as fallback."""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import tempfile
+import unittest
+from unittest import mock
+
+from _kbtest import BIN
+
+import kb_core
+import warm
+
+
+class Formatting(unittest.TestCase):
+    def test_hits_in_the_cli_layout_that_the_access_filter_reads(self):
+        text = warm.format_hits([{"file": "kb-web/a.md", "line": 46, "docid": "#ab12", "title": "A",
+                                  "score": 0.5, "snippet": "46: @@ -45,4 @@\n47: | x |"}])
+        self.assertTrue(text.startswith("qmd://kb-web/a.md:46 #ab12\nTitle: A\nScore:  50%"))
+        self.assertIn("\n| x |", text)                     # line numbers dropped
+        self.assertEqual(warm.format_hits([]), "No results found.")
+
+    def test_searches_follow_the_mode(self):
+        self.assertEqual(kb_core._searches({"mode": "lex"}, "a b")[0], [{"type": "lex", "query": "a b"}])
+        searches, intent = kb_core._searches({}, "violation status buttons")
+        self.assertIn({"type": "vec", "query": "violation status buttons"}, searches)
+        self.assertIn({"type": "lex", "query": "violation"}, searches)
+        self.assertEqual(intent, "violation status buttons")
+
+
+class Fallback(unittest.TestCase):
+    def test_off_by_default_so_tests_and_builds_spawn_nothing(self):
+        with mock.patch.object(warm, "ENABLED", False):
+            self.assertIsNone(warm.graph())
+            self.assertIsNone(warm.qmd())
+
+    def test_graph_worker_failure_falls_back_to_a_process(self):
+        dead = mock.Mock(run=mock.Mock(return_value=None))
+        with mock.patch.object(warm, "graph", return_value=dead), \
+                mock.patch.object(kb_core.subprocess, "run",
+                                  return_value=mock.Mock(stdout="from cli", stderr="", returncode=0)) as sp:
+            self.assertEqual(kb_core.run(["graphify", "explain", "X", "--graph", "/g.json"]), "from cli")
+            sp.assert_called_once()
+
+    def test_graph_worker_answer_skips_the_process(self):
+        alive = mock.Mock(run=mock.Mock(return_value="  warm answer \n"))
+        with mock.patch.object(warm, "graph", return_value=alive), \
+                mock.patch.object(kb_core.subprocess, "run") as sp:
+            self.assertEqual(kb_core.run(["graphify", "path", "A", "B", "--graph", "/g.json"]), "warm answer")
+            sp.assert_not_called()
+
+    def test_other_commands_never_use_the_worker(self):
+        alive = mock.Mock(run=mock.Mock(return_value="warm"))
+        with mock.patch.object(warm, "graph", return_value=alive), \
+                mock.patch.object(kb_core.subprocess, "run",
+                                  return_value=mock.Mock(stdout="cli", stderr="", returncode=0)):
+            self.assertEqual(kb_core.run(["graphify", "merge-graphs", "a", "b"]), "cli")
+            alive.run.assert_not_called()
+
+    def test_docs_explain_stays_on_the_cli(self):
+        worker = mock.Mock()
+        with mock.patch.object(warm, "qmd", return_value=worker):
+            self.assertIsNone(kb_core._docs_warm({"explain": True}, "x"))
+            worker.query.assert_not_called()
+
+
+@unittest.skipUnless(warm.graphify_python(), "graphify is not installed")
+class RealGraphWorker(unittest.TestCase):
+    """The worker's answer is the CLI's answer, and a changed file is read again."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.graph = os.path.join(self._tmp.name, "graph.json")
+        self.write(["A", "B"])
+        self.worker = warm.GraphWorker()
+        self.addCleanup(self.worker.kill)
+
+    def write(self, labels):
+        nodes = [{"id": f"r::{x}", "label": x, "source_file": f"{x}.php"} for x in labels]
+        links = [{"source": nodes[0]["id"], "target": n["id"], "relation": "calls",
+                  "confidence": "EXTRACTED"} for n in nodes[1:]]
+        with open(self.graph, "w") as f:
+            json.dump({"directed": True, "multigraph": False, "graph": {}, "nodes": nodes,
+                       "links": links, "hyperedges": []}, f)
+
+    def test_same_answer_as_the_cli(self):
+        argv = ["explain", "A", "--graph", self.graph]
+        cli = subprocess.run(["graphify", *argv], capture_output=True, text=True)
+        self.assertEqual(self.worker.run(argv).strip(), (cli.stdout + cli.stderr).strip())
+
+    def test_changed_file_is_read_again(self):
+        self.assertNotIn("Zeta", self.worker.run(["explain", "A", "--graph", self.graph]))
+        self.write(["A", "B", "Zeta"])
+        st = os.stat(self.graph)
+        os.utime(self.graph, (st.st_atime, st.st_mtime + 5))
+        self.assertIn("Zeta", self.worker.run(["explain", "A", "--graph", self.graph]))
+
+    def test_only_lookup_commands(self):
+        self.assertIn("not allowed", self.worker.run(["update", "/tmp"]))
+
+
+if __name__ == "__main__":
+    unittest.main()

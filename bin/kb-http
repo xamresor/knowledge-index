@@ -34,7 +34,7 @@ Environment:
   KB_HTTP_HOST (127.0.0.1)   KB_HTTP_PORT (8790)   put a TLS proxy in front for the network
   KB_AUTH_CACHE_SECONDS (60) KB_AUTH_TIMEOUT (10)
   KB_MAX_GRAPH_JOBS (3)      KB_MAX_DOCS_JOBS (1)   parallel graphify / qmd processes
-  KB_DOCS_MODE (full|light|bm25), KB_CONTRACT_EDGES (1|0): see kb_core.py / access.py
+  KB_DOCS_MODE (light|full|bm25), KB_CONTRACT_EDGES (1|0): see kb_core.py / access.py
   KB_USAGE_FILE (<data>/logs/usage.json)   tool usage counters, saved every 30 s
 
 `kb-http usage` prints the usage report with user names; the MCP tool `usage` shows it without them.
@@ -48,11 +48,14 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import kb_core  # noqa: E402
+import oauth  # noqa: E402
+import warm  # noqa: E402
 
 HOST = os.environ.get("KB_HTTP_HOST", "127.0.0.1")
 PORT = int(os.environ.get("KB_HTTP_PORT", "8790"))
@@ -62,12 +65,26 @@ AUTH_TIMEOUT = float(os.environ.get("KB_AUTH_TIMEOUT", "10"))
 MAX_BODY = 1024 * 1024
 SUPPORTED_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 
-# Told to a caller without a valid token: how to get one. The server has no OAuth, so an MCP client
-# that tries its OAuth discovery after a 401 fails with a bare "could not connect".
+# Told to a caller without a valid token: how to get one.
 AUTH_HINT = os.environ.get(
     "KB_AUTH_HINT",
-    "This server takes a bearer token of your API, not OAuth. Get one with bin/kb-login "
+    "Sign in through your MCP client (it opens a browser page), or get a token with bin/kb-login "
     "(github.com/xamresor/knowledge-index) and pass it as 'Authorization: Bearer <token>'.")
+
+
+def login_env(env: dict | None = None) -> dict:
+    """bin/kb-login's settings (KB_LOGIN_API, paths, headers) for the browser sign-in: the
+    environment first, then the first KEY=VALUE file found. Empty dict = no sign-in page."""
+    env = dict(os.environ if env is None else env)
+    candidates = [env.get("KB_LOGIN_ENV", ""), os.path.join(kb_core.KB, "kb-login.env"),
+                  os.path.join(kb_core.KB, "deploy", "kb-login.env")]
+    for path in candidates:
+        if path and os.path.isfile(path):
+            oauth.kb_login.load_env_file(path, env)  # the environment keeps priority
+            break
+    if env.get("KB_OAUTH", "on").lower() == "off" or not env.get("KB_LOGIN_API"):
+        return {}
+    return {k: v for k, v in env.items() if k.startswith("KB_LOGIN_")}
 USAGE_FILE = os.environ.get("KB_USAGE_FILE", os.path.join(kb_core.KB, "logs", "usage.json"))
 USAGE_DAYS = 90       # per-day counters older than this are dropped
 USAGE_TOP_ARGS = 200  # most frequent arguments kept per tool
@@ -354,6 +371,7 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "kb-http/1.0"
     protocol_version = "HTTP/1.1"
     auth: Authenticator  # set on the subclass by make_server()
+    oauth: "oauth.Server | None" = None
 
     def log_message(self, fmt: str, *args) -> None:  # request line only, never headers
         log(f"{self.address_string()} {fmt % args}")
@@ -382,16 +400,136 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._send(405, {"error": "method not allowed"}, {"Allow": "POST"})
 
-    do_GET = do_DELETE = do_PUT = do_PATCH = _not_allowed
+    do_DELETE = do_PUT = do_PATCH = _not_allowed
+
+    # ------------------------------------------------------------------ OAuth (bin/oauth.py)
+    def _base(self) -> str:
+        """This server's public URL as the client sees it (nginx passes the prefix it strips)."""
+        proto = self.headers.get("X-Forwarded-Proto") or "http"
+        host = self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or f"{HOST}:{PORT}"
+        prefix = (self.headers.get("X-Forwarded-Prefix") or "").rstrip("/")
+        return f"{proto}://{host}{prefix}"
+
+    def _send_page(self, status: int, body: bytes, headers: dict | None = None) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; "
+                                                    "form-action 'self'; frame-ancestors 'none'")
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _redirect(self, url: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", url)
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
+    def _body(self) -> bytes | None:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return None
+        if length < 0 or length > MAX_BODY:
+            return None
+        return self.rfile.read(length)
+
+    def _form(self) -> dict | None:
+        raw = self._body()
+        if raw is None:
+            return None
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip()
+        if ctype == "application/json":
+            try:
+                data = json.loads(raw or b"{}")
+            except ValueError:
+                return None
+            return data if isinstance(data, dict) else None
+        return {k: v[0] for k, v in urllib.parse.parse_qs(raw.decode("utf-8", "replace")).items()}
+
+    def _oauth_error(self, e: "oauth.OAuthError") -> None:
+        self._send(e.status, {"error": e.error, "error_description": e.description})
+
+    def do_GET(self) -> None:  # noqa: N802
+        path, _, qs = self.path.partition("?")
+        srv = self.oauth
+        if srv is None:
+            self._not_allowed()
+            return
+        base = self._base()
+        if path in ("/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"):
+            self._send(200, srv.resource_metadata(base))
+        elif path.startswith("/.well-known/oauth-authorization-server") or \
+                path.startswith("/.well-known/openid-configuration"):
+            self._send(200, srv.server_metadata(base))
+        elif path == "/authorize":
+            q = {k: v[0] for k, v in urllib.parse.parse_qs(qs).items()}
+            try:
+                txn = srv.start(q)
+            except oauth.OAuthError as e:
+                self._send_page(400, oauth.page(f"{base}/authorize", "", "password", e.description))
+                return
+            self._send_page(200, oauth.page(f"{base}/authorize", txn, "password"))
+        else:
+            self._not_allowed()
+
+    def _oauth_post(self, path: str) -> None:
+        srv, base = self.oauth, self._base()
+        form = self._form()
+        if form is None:
+            self._send(400, {"error": "invalid_request", "error_description": "unreadable body"})
+            return
+        if path == "/register":
+            try:
+                self._send(201, srv.register(form))
+            except oauth.OAuthError as e:
+                self._oauth_error(e)
+        elif path == "/token":
+            try:
+                self._send(200, srv.token(form))
+            except oauth.OAuthError as e:
+                self._oauth_error(e)
+        elif path == "/authorize":
+            txn, step = str(form.get("txn", "")), form.get("step")
+            action = f"{base}/authorize"
+            try:
+                if step == "code":
+                    self._redirect(srv.code_step(txn, str(form.get("code", ""))))
+                    return
+                state, url = srv.password_step(txn, str(form.get("username", "")),
+                                               str(form.get("password", "")))
+                if state == "code":
+                    self._send_page(200, oauth.page(action, txn, "code"))
+                else:
+                    self._redirect(url)
+            except oauth.OAuthError as e:
+                self._send_page(400, oauth.page(action, "", "password", e.description))
+            except oauth.kb_login.LoginError as e:
+                log(f"oauth: sign-in refused: {str(e)[:120]}")
+                self._send_page(200, oauth.page(action, txn, step or "password", str(e)))
+        else:
+            self._send(404, {"error": "not found"})
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path.split("?")[0] != "/mcp":
+        path = self.path.split("?")[0]
+        if self.oauth is not None and path in ("/register", "/token", "/authorize"):
+            self._oauth_post(path)
+            return
+        if path != "/mcp":
             self._send(404, {"error": "not found"})
             return
         try:
             ident = self.auth.check(self.headers.get("Authorization"))
         except AuthError as e:
-            extra = {"WWW-Authenticate": 'Bearer realm="kb"'} if e.status == 401 else {}
+            challenge = 'Bearer realm="kb"'
+            if self.oauth is not None:
+                challenge += f', resource_metadata="{self._base()}/.well-known/oauth-protected-resource"'
+            extra = {"WWW-Authenticate": challenge} if e.status == 401 else {}
             body = {"error": e.message}
             if e.status == 401 and AUTH_HINT:
                 body["hint"] = AUTH_HINT
@@ -420,10 +558,18 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def make_server(host: str = HOST, port: int = PORT, auth: Authenticator | None = None,
-                usage: Usage | None = None) -> ThreadingHTTPServer:
+                usage: Usage | None = None, oauth_env: dict | None = None) -> ThreadingHTTPServer:
     global USAGE
     USAGE = usage
-    handler = type("KbHandler", (Handler,), {"auth": auth or Authenticator()})
+    auth = auth or Authenticator()
+    env = login_env() if oauth_env is None else oauth_env
+
+    def check(token: str) -> None:
+        auth.check(f"Bearer {token}")
+
+    srv_oauth = oauth.Server(env, check, os.path.join(kb_core.KB, "logs", "oauth-clients.json")) \
+        if env else None
+    handler = type("KbHandler", (Handler,), {"auth": auth, "oauth": srv_oauth})
     srv = ThreadingHTTPServer((host, port), handler)
     srv.daemon_threads = True
     return srv
@@ -448,6 +594,8 @@ def main() -> int:
     if reason:
         print(reason, file=sys.stderr)
         return 2
+    warm.enable()  # long-lived graphify and qmd: no cold start per call (bin/warm.py)
+    kb_core.warm_qmd()
     usage = Usage()
     srv = make_server(usage=usage)
     log(f"kb-http listening on {HOST}:{PORT}, auth={AUTH_URL}, docs_mode={kb_core.DOCS_MODE}, "

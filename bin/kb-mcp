@@ -18,6 +18,7 @@ import sys
 # `bin/` is already sys.path[0] for a directly executed script, so the sibling module imports
 # without any path surgery.
 import kb_core
+import warm
 
 PROTO = "2024-11-05"
 
@@ -28,6 +29,7 @@ def send(msg: dict) -> None:
 
 
 def main() -> None:
+    warm.enable()  # long-lived graphify and qmd: no cold start per call (bin/warm.py)
     for line in sys.stdin:
         line = line.strip()
         if not line:

@@ -14,6 +14,18 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+- **Faster: long-lived graphify and qmd in the servers** (`bin/warm.py`, `bin/graph_worker.py`). Every
+  call used to start graphify (parse a 34 MB graph, build networkx) or qmd (load the embedding model).
+  On a 23k-node graph: graph_explain 4-7 s -> 0.01 s, code search 1-4 s -> 0.1 s, docs search 6-8 s ->
+  0.2 s, same answers. A failing helper falls back to the old path; `KB_WARM=0` turns them off.
+- **Changed: `KB_DOCS_MODE` defaults to `light`** (no LLM reranker). With the reranker a docs search
+  took 1-2 minutes on a CPU; `full` is still there for a machine with a GPU.
+- **Added: browser sign-in for MCP clients (OAuth 2.1, `bin/oauth.py`).** Protected-resource and
+  authorization-server metadata, dynamic client registration, a login page that runs the API's own
+  login with its second factor, PKCE S256, loopback redirects only; the access token is the API's dev
+  token, so the access check is unchanged. On by default when the login settings are present
+  (`KB_OAUTH=off` to disable).
+
 - **Removed (breaking, tool contract 2): `docs_search` and `graph_query`.** They were aliases of
   `search` and confused new users and their skills. Use `search` with `domain: docs` or
   `domain: code`. `version` reports `api_contract: 2`.
