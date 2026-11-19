@@ -155,3 +155,23 @@ class BodyParsingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LocalMcpAndAdmin(unittest.TestCase):
+    """POST /mcp and the local admin pages of bin/kb_api.py."""
+
+    def test_mcp_messages(self):
+        from unittest import mock
+        init = kb_api.mcp({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+        self.assertEqual(init["result"]["serverInfo"]["name"], "kb")
+        tools = kb_api.mcp({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]
+        self.assertIn("run_code", [t["name"] for t in tools])
+        with mock.patch.object(kb_api.kb_core, "call_tool", lambda n, a: f"{n} ok"):
+            call = kb_api.mcp({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                               "params": {"name": "version", "arguments": {}}})
+        self.assertEqual(call["result"]["content"][0]["text"], "version ok")
+        self.assertIsNone(kb_api.mcp({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+        self.assertEqual(kb_api.mcp({"jsonrpc": "2.0", "id": 4, "method": "nope"})["error"]["code"], -32601)
+
+    def test_admin_form_token_is_per_process_and_long(self):
+        self.assertGreaterEqual(len(kb_api.CSRF), 24)

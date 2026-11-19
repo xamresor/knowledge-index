@@ -14,6 +14,10 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+- **Added: local MCP over HTTP and local admin pages in `kb-api`** (`make serve`): `POST /mcp` speaks
+  MCP JSON-RPC, `/admin` shows the status, index charts and the rebuild button without sign-in, only
+  without a token on loopback; forms carry a per-process token and a cross-site `Origin` is refused.
+
 ## [0.12.0] — 2026-11-19
 
 - **Added: `batch`** — up to 10 tool calls in one request, each with the caller's own rights; one failing

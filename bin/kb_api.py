@@ -20,6 +20,9 @@ Endpoints — the MCP shape plus ergonomic aliases:
     POST /graph/affected  {symbol}              -> {"text": …}
     GET  /doc?path=…                            -> {"text": …}
     GET  /  and  /web/…, /graphify-out/…        -> the dashboard, so its docs search can call /search
+    POST /mcp         MCP JSON-RPC (initialize, tools/list, tools/call): an MCP client over HTTP
+    GET  /admin, /admin/index, /admin/usage     -> the admin pages, local mode only (no token, loopback):
+                                                   no sign-in, this machine is the trust boundary
 
 Serving the dashboard from here is what lets the page search docs: the page and the API share one
 origin, so no CORS header is ever sent. A CORS header would let any website open in the same browser
@@ -39,8 +42,10 @@ import os
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import admin
 import kb_core
 import paths
+import warm
 
 LOOPBACK = ("127.0.0.1", "::1", "localhost")
 
@@ -110,6 +115,35 @@ def static_file(path: str):
     return None
 
 
+CSRF = __import__("secrets").token_urlsafe(24)  # this process's form token for the local admin pages
+
+
+def mcp(message: dict) -> dict | None:
+    """One MCP JSON-RPC message, local mode: every project (the same as the stdio kb-mcp)."""
+    mid, method = message.get("id"), message.get("method")
+    if method == "initialize":
+        return {"jsonrpc": "2.0", "id": mid, "result": {
+            "protocolVersion": (message.get("params") or {}).get("protocolVersion", "2025-06-18"),
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "kb", "version": kb_core.VERSION, "apiContract": kb_core.API_CONTRACT},
+            "instructions": kb_core.instructions()}}
+    if method == "ping":
+        return {"jsonrpc": "2.0", "id": mid, "result": {}}
+    if method == "tools/list":
+        return {"jsonrpc": "2.0", "id": mid, "result": {"tools": kb_core.TOOLS}}
+    if method == "tools/call":
+        params = message.get("params") or {}
+        try:
+            text, err = kb_core.call_tool(params.get("name", ""), params.get("arguments") or {}), False
+        except kb_core.ToolError as e:
+            text, err = f"(error: {e})", True
+        return {"jsonrpc": "2.0", "id": mid,
+                "result": {"content": [{"type": "text", "text": text}], "isError": err}}
+    if "id" not in message:
+        return None  # a notification
+    return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": f"method not found: {method}"}}
+
+
 def dispatch(method: str, path: str, query: dict, body: dict) -> dict:
     """Pure routing: (request) -> payload. No sockets, so this is what the tests exercise."""
     if method == "GET" and path == "/health":
@@ -166,6 +200,50 @@ def make_handler(host: str, token: str | None):
             self.wfile.write(data)
             return True
 
+        def _page(self, status: int, body: bytes) -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; "
+                                                        "form-action 'self'; frame-ancestors 'none'")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _admin(self, method: str, path: str) -> None:
+            """Local admin pages: only without a token on loopback (the dashboard's own trust)."""
+            if token or host not in LOOPBACK:
+                raise ApiError(404, f"no route for {method} {path}")
+            base = ""
+            if method == "POST":
+                origin = self.headers.get("Origin")
+                if origin and urllib.parse.urlsplit(origin).hostname not in LOOPBACK:
+                    raise ApiError(403, "cross-site form")
+                length = int(self.headers.get("Content-Length") or 0)
+                form = {k: v[0] for k, v in urllib.parse.parse_qs(
+                    self.rfile.read(length).decode("utf-8", "replace") if length else "").items()}
+                if form.get("csrf") != CSRF:
+                    raise ApiError(403, "form expired: reload the page")
+                if path == "/admin/rebuild":
+                    self._page(200, admin.status_page(base, CSRF, admin.status(None), {"name": "local"},
+                                                      admin.rebuild()))
+                    return
+                self.send_response(302)
+                self.send_header("Location", "/admin")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if path == "/admin":
+                self._page(200, admin.status_page(base, CSRF, admin.status(None), {"name": "local"}))
+            elif path == "/admin/index":
+                self._page(200, admin.index_page(base, CSRF, None))
+            elif path == "/admin/usage":
+                self._page(200, admin.usage_page(base, CSRF, "(local mode: tool calls are not counted)"))
+            elif path == "/admin/clients":
+                self._page(200, admin.clients_page(base, CSRF, {}, "Local mode: no browser sign-in."))
+            else:
+                raise ApiError(404, f"no route for {method} {path}")
+
         def _handle(self, method: str) -> None:
             parsed = urllib.parse.urlparse(self.path)
             query = {k: v[0] for k, v in urllib.parse.parse_qs(parsed.query).items()}
@@ -181,11 +259,32 @@ def make_handler(host: str, token: str | None):
                     return
                 if method == "GET" and self._static(parsed.path):
                     return
+                clean = parsed.path.rstrip("/") or "/"
+                if clean == "/admin" or clean.startswith("/admin/"):
+                    self._admin(method, clean)
+                    return
                 if not authorized(host, token, self.headers.get("Authorization")):
                     raise ApiError(401, "missing or invalid token")
                 length = int(self.headers.get("Content-Length") or 0)
-                body = _json_body(self.rfile.read(length) if length else b"")
-                self._reply(200, dispatch(method, parsed.path.rstrip("/") or "/", query, body))
+                raw = self.rfile.read(length) if length else b""
+                if method == "POST" and clean == "/mcp":
+                    try:
+                        msg = json.loads(raw or b"null")
+                    except ValueError:
+                        raise ApiError(400, "parse error") from None
+                    answers = [a for a in (mcp(m) for m in (msg if isinstance(msg, list) else [msg]))
+                               if a is not None] if isinstance(msg, (list, dict)) else None
+                    if answers is None:
+                        raise ApiError(400, "invalid request")
+                    if not answers:
+                        self.send_response(202)
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                        return
+                    self._reply(200, answers if isinstance(msg, list) else answers[0])
+                    return
+                body = _json_body(raw)
+                self._reply(200, dispatch(method, clean, query, body))
             except kb_core.ToolError as e:
                 self._reply(400, {"error": str(e)})
             except ApiError as e:
@@ -215,12 +314,15 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     check_bind(args.bind, args.token)
+    warm.enable()  # long-lived graphify and qmd, as in the MCP servers
     kb_core.warm_qmd()
     httpd = ThreadingHTTPServer((args.bind, args.port), make_handler(args.bind, args.token))
     auth = "token required" if args.token else "loopback only, no token"
     paths.stage_web()   # installed mode: put the shell next to the data, as `kb open` does
     print(f"kb-api {kb_core.VERSION} (contract {kb_core.API_CONTRACT}) on "
-          f"http://{args.bind}:{args.port} — {auth} · dashboard: http://{args.bind}:{args.port}/",
+          f"http://{args.bind}:{args.port} — {auth} · dashboard: http://{args.bind}:{args.port}/ · "
+          f"MCP: http://{args.bind}:{args.port}/mcp"
+          + (f" · admin: http://{args.bind}:{args.port}/admin" if not args.token else ""),
           flush=True)
     try:
         httpd.serve_forever()

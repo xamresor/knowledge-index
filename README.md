@@ -497,6 +497,9 @@ On a 23k-node graph a graph lookup drops from 1-6 s to a few milliseconds, a cod
 0.1 s and a docs search from 4-7 s to 0.2 s. The first call for a caller's project set cuts that view from the
 parsed graph in memory (~0.3-1.6 s on that graph; then milliseconds). A helper that fails or is missing falls back to the old one-process-per-call path.
 
+**Locally:** `make serve` (`bin/kb-api` on 127.0.0.1:8899) also answers MCP over HTTP at `/mcp` and shows
+the same admin pages at `/admin`, without sign-in: loopback without a token is the trust boundary.
+
 **Admin pages (`/admin`).** For the users named in `KB_ADMINS` (comma-separated) or in `<data>/admins.txt`
 (one per line), matched against the `uname`, `username`, `name`, `id` or `uid` the identity endpoint
 returns; nobody else gets more than a 404. Sign-in is the API's own login with its second factor, then
