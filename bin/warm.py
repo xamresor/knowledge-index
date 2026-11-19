@@ -143,6 +143,23 @@ class GraphWorker(_Proc):
         return str(reply.get("out", ""))
 
 
+def graph_once(argv: list[str], view: dict | None = None, timeout: float = 120.0) -> str | None:
+    """One request to a fresh graph worker that exits after it: the same answers without the warm
+    process (KB_WARM=0, tests, scripts). None when graphify's interpreter is not found."""
+    py = graphify_python()
+    if not py:
+        return None
+    message: dict = {"argv": argv}
+    if view:
+        message["view"] = view
+    try:
+        p = subprocess.run([py, os.path.join(HERE, "graph_worker.py")], input=json.dumps(message) + "\n",
+                           capture_output=True, text=True, timeout=timeout)
+        return str(json.loads(p.stdout.strip().splitlines()[-1]).get("out", ""))
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return None
+
+
 # --------------------------------------------------------------------------- docs
 class QmdWorker(_Proc):
     def __init__(self, cwd: str | None = None):

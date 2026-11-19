@@ -44,7 +44,7 @@ COLLECTION = os.environ.get("KB_COLLECTION", "kb")
 CONTRACT_DOCS_DIR = "contracts"
 CONTRACT_KEYS = ("from", "to", "protocol", "summary")
 CONTRACTS_RESULTS = 25
-MAX_OUT = 8000
+MAX_OUT = 200_000   # kb_core pages the answer (PAGE_CHARS)
 
 
 class NotBuilt(LookupError):

@@ -14,6 +14,20 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+- **Added: `graph_routes` — several ways between two places, with the routes they cross.** Hops are
+  priced by kind (calls and requests cheap, imports dearer, inheritance dearest), busy hubs and
+  framework classes cost extra, a symbol merged across files costs a jump; Dijkstra finds the cheapest
+  way, then again with the used edges made dearer for the next ways. Every HTTP hop prints its method,
+  URI and controller. Pin a project in a name: `api:Customer`.
+- **Added: backend-to-backend HTTP calls.** A PHP backend listed with `calls`/`serves` (an API client of
+  another service: `Http::get('v2/…')`, `->send($req, 'post', 'v1/…' . $id)`) is linked from its
+  enclosing method to the controller of the other service. Test folders are skipped.
+- **Added: paging on every tool but `version`: `page` and `page_length`** (characters, 1000-50000,
+  default 6000). Lists are cut at blank lines or line ends and say how to get the next page; `search`
+  pages docs by hits and code by graph nodes. The old cuts (8000 characters, 25 contracts, graphify's 20
+  connections in `graph_explain`) are gone: `graph_explain` lists every connection.
+- **Changed: optional arguments carry their `default` in the tool schemas.**
+
 - **Faster: a caller's project set is cut from the graph in memory.** The graphify worker keeps the
   main graph parsed and makes each caller's view (`filter_graph`, and `strip_domains` for path and
   impact) from it, instead of a filtered file written by a subprocess and parsed again. The first call

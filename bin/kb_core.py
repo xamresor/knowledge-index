@@ -45,7 +45,7 @@ COLLECTION = os.environ.get("KB_COLLECTION", "kb")
 
 TIMEOUT_GRAPH = 60      # graph queries are sub-second; this is just a safety net
 TIMEOUT_DOCS = 150      # qmd's first call loads the embedding model (cold start)
-MAX_OUT = 8000
+MAX_OUT = 200_000   # sanity cap on one producer's text; callers get it in pages (PAGE_CHARS)
 
 # How a docs search spends memory and time (KB_DOCS_MODE). The per-call `mode` still applies.
 #   light - (default) the query document without reranking: BM25 + vectors, embedding model only
@@ -234,11 +234,54 @@ def graph_call(cmd: list[str], args: dict, allowed: set[str] | None, *terms: str
     if auto and _no_match(out):
         out, where = ask(allowed)
         label = f"all (nothing in {label[:-7]})"
+    if cmd[1] == "explain":
+        out = _full_connections(out, projects if not (auto and "all (" in label) else allowed)
     if terms:
         out = with_suggestions(out, *terms, **where)
     if cmd[1] == "query":
         out = _mcp_hint(out)
     return f"[projects: {label}]\n\n{out}"
+
+
+def _full_connections(out: str, projects: set[str] | None) -> str:
+    """graphify's `explain` lists 20 connections and "... and N more": replace that list with all of
+    them (the answer is paged), from the same view of the graph."""
+    m = re.search(r"(?m)^  ID:\s+(\S+)", out)
+    if not m or not re.search(r"(?m)^\s+\.\.\. and \d+ more$", out):
+        return out
+    full = projects is None or set(PROJECTS) <= set(projects)
+    view = {"allowed": None if full else sorted(projects), "routes": False}
+    argv = ["neighbors", m.group(1), "--graph", GRAPH]
+    worker = warm.graph()
+    lst = worker.run(argv, view) if worker is not None else None
+    if lst is None:
+        lst = warm.graph_once(argv, view)
+    if not lst:
+        return out
+    head = re.split(r"(?m)^Connections \(\d+\):$", out)[0].rstrip()
+    return head + "\n\n" + lst.strip()
+
+
+def graph_routes(args: dict, allowed: set[str] | None) -> str:
+    """Several weighted paths (bin/routes.py), on the caller's view without domain anchors. A project
+    pinned in a name (`api:Customer`) must be one the caller may see."""
+    for end in (args["from"], args["to"]):
+        m = re.match(r"^([\w-]+):", end)
+        if m and m.group(1) in PROJECTS and allowed is not None and m.group(1) not in allowed:
+            raise ToolError(f"unknown or not allowed project: {m.group(1)}")
+    scoped = {**args, "project": args.get("project") or "all"}
+    projects, label, _ = scope_projects(scoped, allowed)
+    full = projects is None or set(PROJECTS) <= set(projects)
+    view = {"allowed": None if full else sorted(projects), "routes": True}
+    payload = json.dumps({"from": args["from"], "to": args["to"], "k": args.get("k") or 3})
+    argv = ["routes", payload, "--graph", GRAPH]
+    worker = warm.graph()
+    out = worker.run(argv, view) if worker is not None else None
+    if out is None:
+        out = warm.graph_once(argv, view)
+    if out is None:
+        raise ToolError("graph_routes needs graphify's Python environment (networkx); it was not found")
+    return f"[projects: {label}]\n\n{out.strip()}"
 
 
 CODE_BUDGET, CODE_BUDGET_MAX = 1800, 8000
@@ -254,8 +297,8 @@ def _budget(args: dict) -> int:
 
 
 def _mcp_hint(out: str) -> str:
-    return _CLI_HINT.sub(f"Raise `budget` (max {CODE_BUDGET_MAX}), narrow `project`, or ask "
-                         "graph_explain about one symbol", out)
+    return _CLI_HINT.sub(f"Next nodes: page: 2. Or raise `budget` (max {CODE_BUDGET_MAX}), narrow "
+                         "`project`, or ask graph_explain about one symbol", out)
 
 
 def instructions(projects: list[str] | None = None) -> str:
@@ -266,7 +309,7 @@ def instructions(projects: list[str] | None = None) -> str:
         "Code knowledge base over several repos (a Laravel API and its frontends). " + seen +
         "Which tool: an endpoint and who calls it -> contracts_search (fast, the best first step); "
         "one symbol and its neighbours -> graph_explain; what breaks if X changes -> graph_affected; "
-        "how A reaches B -> graph_path; a free question -> search (domain docs, code or both). "
+        "how A reaches B -> graph_routes (several ways, with the routes they cross) or graph_path (one shortest); a free question -> search (domain docs, code or both). "
         "Trust: edges marked EXTRACTED come from the syntax; INFERRED ones (http_request, eloquent, "
         "doc mentions) are matched by name and can be wrong. in_domain only groups a symbol with its "
         "domain, it is not a dependency. The index is rebuilt after each deploy and can lag the "
@@ -305,6 +348,17 @@ TOOLS = [
                     "relations incl. cross-repo http_request (frontend↔controller).",
      "inputSchema": {"type": "object", "properties": {"from": {"type": "string"}, "project": {"type": "string", "description": "limit to these project(s): a name, several comma-separated, or 'all'. Default: the session's project(s), widening to all when nothing is found"},
                                                      "to": {"type": "string"}},
+                     "required": ["from", "to"]}},
+    {"name": "graph_routes",
+     "description": "Several ways from one place in the code to another, cheapest first, with the HTTP "
+                    "routes each way crosses (frontend -> route -> controller, backend -> another "
+                    "service). Calls and requests are cheap, imports dearer, busy hub classes dearest, "
+                    "so a path reads like a real chain, not a shortcut through a framework class. Pin a "
+                    "project as 'api:Customer', 'sw-api:TicketController'.",
+     "inputSchema": {"type": "object", "properties": {
+         "from": {"type": "string"}, "to": {"type": "string"},
+         "k": {"type": "integer", "description": "how many different ways (default 3, max 6)"},
+         "project": {"type": "string", "description": "limit to these project(s): a name, several comma-separated, or 'all'. Default: all the caller may see"}},
                      "required": ["from", "to"]}},
     {"name": "graph_explain",
      "description": "Explain a symbol: its node, neighbours and relation types (calls, eloquent, fk, "
@@ -346,6 +400,36 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {}}},
 ]
 
+# Every tool that can answer at length takes `page`. Lists (contracts, connections, problems, impact,
+# paths, documents) are cut into pages of PAGE_CHARS at blank lines or line ends; `search` pages by
+# hits (docs) and by graph nodes (code). Each page says how to get the next one. Nothing is dropped.
+PAGE_CHARS = int(os.environ.get("KB_PAGE_CHARS", "6000"))
+PAGE_MIN, PAGE_MAX = 1000, 50_000
+UNPAGED = {"version"}
+SELF_PAGED = {"search"}
+for _t in TOOLS:
+    if _t["name"] not in UNPAGED:
+        _t["inputSchema"].setdefault("properties", {})["page"] = {
+            "type": "integer", "description": "page of a long answer, 1-based (default 1); an answer "
+                                              "with more says so at its end"}
+        _t["inputSchema"]["properties"]["page_length"] = {
+            "type": "integer", "description": f"characters per page (default {PAGE_CHARS}, "
+                                              f"{PAGE_MIN}-{PAGE_MAX}); for search: the size of the code "
+                                              "half's page (docs pages by `limit` hits)"}
+# The values a missing optional argument takes, written into the schemas so a client shows and
+# pre-fills them. `project` has none to write: without it the session's projects are used.
+DEFAULTS = {
+    "search": {"domain": "both", "mode": "auto", "limit": 5, "expand_aliases": True, "explain": False,
+               "budget": CODE_BUDGET},
+    "graph_routes": {"k": 3, "project": "all"},
+}
+for _t in TOOLS:
+    _props = _t["inputSchema"].get("properties", {})
+    for _key, _value in DEFAULTS.get(_t["name"], {}).items():
+        _props[_key]["default"] = _value
+    if "page" in _props:
+        _props["page"]["default"] = 1
+        _props["page_length"]["default"] = PAGE_CHARS
 TOOLS_BY_NAME = {t["name"]: t for t in TOOLS}
 
 _JSON_TYPES = {"string": str, "integer": int, "number": (int, float), "boolean": bool,
@@ -421,6 +505,9 @@ def warm_qmd() -> None:
                 graph.run(["explain", "warmup", "--graph", GRAPH])
                 # path search and impact use the view without domain anchors
                 graph.run(["explain", "warmup", "--graph", GRAPH], {"allowed": None, "routes": True})
+                # graph_routes builds its weighted graph once per view (~5 s on 23k nodes): now
+                graph.run(["routes", json.dumps({"from": "", "to": ""}), "--graph", GRAPH],
+                          {"allowed": None, "routes": True})
         threading.Thread(target=_prime, daemon=True).start()
         return
     cmd = ["qmd", "query", "lex: warmup\nvec: warmup"] + (["--no-rerank"] if DOCS_MODE == "light" else [])
@@ -638,8 +725,56 @@ def search_code(args: dict, allowed: set[str] | None = None) -> str:
     return graph_call(["graphify", "query", args["q"]], args, allowed)
 
 
+def _page_hits(out: str, page: int, want: int) -> str:
+    """Hits `want*(page-1)` … `want*page` of a docs answer that holds the first `want*page` hits."""
+    blocks = re.split(r"(?m)^(?=qmd://)", out)
+    head = blocks[0] if blocks[0].startswith("[") else ""
+    hits = blocks[1:]
+    if not hits:
+        return out
+    chosen = hits[want * (page - 1): want * page]
+    if not chosen:
+        return head + "(no more documents)"
+    more = (f"\n\n[page {page} — call again with page: {page + 1} for more documents]"
+            if len(hits) >= want * page else "")
+    return (head + "".join(chosen)).rstrip() + more
+
+
+def _code_page(args: dict, allowed: set[str] | None, page: int) -> str:
+    """Page `page` of a code search: the nodes a budget of `budget*page` adds to `budget*(page-1)`."""
+    if page == 1:
+        return search_code(args, allowed)
+    b = _budget(args)
+    now = search_code({**args, "budget": min(b * page, CODE_BUDGET_MAX * 4)}, allowed)
+    before = set(search_code({**args, "budget": min(b * (page - 1), CODE_BUDGET_MAX * 4)}, allowed)
+                 .splitlines())
+    lines = now.splitlines()
+    head = [ln for ln in lines[:3] if ln.startswith(("[projects:", "Traversal:")) or not ln]
+    new = [ln for ln in lines if ln.startswith(("NODE ", "EDGE ")) and ln not in before]
+    if not new:
+        return "\n".join(head) + "\n(no more nodes)"
+    more = "truncated" in now.lower() or "TRUNCATED" in now
+    tail = f"\n\n[page {page} — call again with page: {page + 1} for more nodes]" if more else ""
+    return "\n".join(head + new) + tail
+
+
 def search(args: dict, allowed: set[str] | None = None) -> str:
     """The one search entry point. `domain` decides which halves run; `both` labels each section."""
+    page = args.pop("_page", 1)
+    if page > 1:
+        want = int(args.get("limit") or 5)
+
+        def docs_page():
+            return _page_hits(search_docs({**args, "limit": want * page}, allowed), page, want)
+
+        def code_page():
+            return _code_page(args, allowed, page)
+        domain = args.get("domain", "both")
+        if domain == "docs":
+            return docs_page()
+        if domain == "code":
+            return code_page()
+        return f"=== docs ===\n{docs_page()}\n\n=== code ===\n{code_page()}"
     domain = args.get("domain", "both")
     if domain == "docs":
         return search_docs(args, allowed)
@@ -703,19 +838,67 @@ def call_tool(name: str, args: dict, allowed: set[str] | None = None) -> str:
     _no_options(name, args)
     if allowed is not None:
         allowed = set(allowed)
+    page = args.pop("page", None)
+    page = 1 if page is None else page
+    if page < 1:
+        raise ToolError(f"{name}: 'page' must be 1 or more")
+    length = args.pop("page_length", None)
+    if length is not None and not PAGE_MIN <= length <= PAGE_MAX:
+        raise ToolError(f"{name}: 'page_length' must be {PAGE_MIN}-{PAGE_MAX}")
+    if name in UNPAGED:
+        return _dispatch(name, args, allowed)
+    if name in SELF_PAGED:
+        if length and "budget" not in args:  # ~4 characters per token
+            args["budget"] = max(300, min(length // 4, CODE_BUDGET_MAX))
+        return _dispatch(name, {**args, "_page": page}, allowed)
+    return paginate(_dispatch(name, args, allowed), page, length)
 
+
+def paginate(text: str, page: int, size: int | None = None) -> str:
+    """Page `page` of `text`. A leading `[projects: …]` line is repeated on every page; the cut falls on
+    a blank line when it can, else on a line end."""
+    size = size or PAGE_CHARS
+    head = ""
+    if text.startswith("[projects:"):
+        first, _, rest = text.partition("\n")
+        head, text = first + "\n\n", rest.lstrip("\n")
+    pages, rest = [], text
+    while rest:
+        if len(rest) <= size:
+            pages.append(rest)
+            break
+        cut = rest.rfind("\n\n", 0, size)
+        if cut < size // 3:
+            cut = rest.rfind("\n", 0, size)
+        if cut < size // 3:
+            cut = size
+        pages.append(rest[:cut].rstrip())
+        rest = rest[cut:].lstrip("\n")
+    pages = pages or [""]
+    if page > len(pages):
+        return head + f"(no page {page}: the answer has {len(pages)} page(s))"
+    if len(pages) == 1:
+        return head + pages[0]
+    nav = f"\n\n[page {page} of {len(pages)}"
+    nav += f" — call again with page: {page + 1} for the rest]" if page < len(pages) else "]"
+    return head + pages[page - 1] + nav
+
+
+def _dispatch(name: str, args: dict, allowed: set[str] | None) -> str:
     if name == "search":
         return search(args, allowed)
     if name == "graph_path":
         return graph_call(["graphify", "path", args["from"], args["to"]], args, allowed,
                           args["from"], args["to"])
+    if name == "graph_routes":
+        return graph_routes(args, allowed)
     if name in ("graph_explain", "graph_affected"):
         verb = "explain" if name == "graph_explain" else "affected"
         return graph_call(["graphify", verb, args["symbol"]], args, allowed, args["symbol"])
     if name == "docs_get":
         return docs_get(args["path"], allowed)
     if name == "contracts_search":
-        return _index(contracts.contracts_search, args["query"])
+        return _index(contracts.contracts_search, args["query"], None, 100_000)
     if name == "connections":
         return _index(contracts.connections, args.get("service", ""))
     if name == "problems":

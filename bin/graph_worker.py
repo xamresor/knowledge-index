@@ -156,7 +156,16 @@ Path.read_text = read_text
 json.loads = loads
 json_graph.node_link_graph = node_link_graph
 
-ALLOWED = {"query", "path", "explain", "affected"}
+ALLOWED = {"query", "path", "explain", "affected", "routes", "neighbors"}
+
+
+def _routes(argv: list[str]) -> str:
+    """`routes '<json args>' --graph <file>`: several weighted paths (bin/routes.py) on the caller's view."""
+    import routes
+    args = _loads(argv[1]) if len(argv) > 1 else {}
+    graph = argv[argv.index("--graph") + 1]
+    data = json.loads(Path(graph).read_text(encoding="utf-8"))  # cached text, parsed dict, view
+    return routes.find(data, str(args.get("from", "")), str(args.get("to", "")), args.get("k") or 3)
 
 
 def handle(argv: list[str], view: dict | None = None) -> dict:
@@ -172,7 +181,14 @@ def handle(argv: list[str], view: dict | None = None) -> dict:
     _view = view or None
     try:
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-            _run_cli()
+            if argv[0] == "routes":
+                buf.write(_routes(argv))
+            elif argv[0] == "neighbors":  # `neighbors <node id> --graph <file>`: every connection
+                import routes
+                graph = argv[argv.index("--graph") + 1]
+                buf.write(routes.neighbors(json.loads(Path(graph).read_text(encoding="utf-8")), argv[1]))
+            else:
+                _run_cli()
     except SystemExit as e:
         code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
     except Exception as e:  # noqa: BLE001 — one bad request must not kill the worker

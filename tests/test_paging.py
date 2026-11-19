@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""Paging: every tool but `version` takes `page`, long answers are cut at line ends, nothing is lost."""
+from __future__ import annotations
+
+import unittest
+from unittest import mock
+
+from _kbtest import BIN  # noqa: F401
+
+import kb_core
+from lang import php_laravel
+
+
+class Paginate(unittest.TestCase):
+    def test_every_tool_but_version_takes_page_and_page_length(self):
+        for tool in kb_core.TOOLS:
+            props = tool["inputSchema"]["properties"]
+            for key in ("page", "page_length"):
+                self.assertEqual(key in props, tool["name"] != "version", (tool["name"], key))
+
+    def test_optional_arguments_show_their_defaults(self):
+        props = {t["name"]: t["inputSchema"]["properties"] for t in kb_core.TOOLS}
+        self.assertEqual(props["search"]["domain"]["default"], "both")
+        self.assertEqual(props["search"]["limit"]["default"], 5)
+        self.assertEqual(props["graph_routes"]["k"]["default"], 3)
+        for name, p in props.items():
+            if name != "version":
+                self.assertEqual(p["page"]["default"], 1)
+                self.assertEqual(p["page_length"]["default"], kb_core.PAGE_CHARS)
+
+    def test_page_length_sets_the_page_size(self):
+        long_text = "\n".join("row %d" % i for i in range(3000))
+        with mock.patch.object(kb_core, "_index", lambda fn, *a: long_text):
+            short = kb_core.call_tool("contracts_search", {"query": "x", "page_length": 1000})
+            wide = kb_core.call_tool("contracts_search", {"query": "x", "page_length": 20000})
+            with self.assertRaises(kb_core.ToolError):
+                kb_core.call_tool("contracts_search", {"query": "x", "page_length": 10})
+        self.assertLess(len(short), 1200)
+        self.assertGreater(len(wide), 15000)
+
+    def test_pages_cover_the_text_without_loss(self):
+        text = "[projects: api]\n\n" + "\n".join(f"- line {i} " + "x" * 40 for i in range(400))
+        pages, n = [], 1
+        while True:
+            out = kb_core.paginate(text, n, size=2000)
+            self.assertTrue(out.startswith("[projects: api]\n\n"))
+            body = out.split("\n\n", 1)[1]
+            pages.append(body.split("\n\n[page ")[0])
+            if "call again with page" not in out:
+                break
+            n += 1
+        self.assertGreater(n, 5)
+        joined = "\n".join(pages)
+        for i in range(400):
+            self.assertIn(f"- line {i} ", joined)
+        self.assertIn("no page", kb_core.paginate(text, n + 1, size=2000))
+
+    def test_short_answer_has_no_page_note(self):
+        self.assertEqual(kb_core.paginate("short", 1), "short")
+
+    def test_page_reaches_the_tool_through_call_tool(self):
+        long_text = "\n".join("row %d" % i for i in range(3000))
+        with mock.patch.object(kb_core, "_index", lambda fn, *a: long_text):
+            first = kb_core.call_tool("contracts_search", {"query": "x"})
+            second = kb_core.call_tool("contracts_search", {"query": "x", "page": 2})
+        self.assertIn("call again with page: 2", first)
+        self.assertNotEqual(first, second)
+        with self.assertRaises(kb_core.ToolError):
+            kb_core.call_tool("contracts_search", {"query": "x", "page": 0})
+
+    def test_docs_page_two_skips_the_first_hits(self):
+        hits = "".join(f"qmd://kb-api/d{i}.md:1 #{i}\nTitle: D{i}\n\n" for i in range(10))
+        out = kb_core._page_hits("[projects: api]\n\n" + hits, 2, 5)
+        self.assertIn("d5.md", out)
+        self.assertNotIn("d4.md", out)
+        self.assertIn("page: 3", out)
+
+
+class BackendCalls(unittest.TestCase):
+    def test_php_calls_with_versioned_paths(self):
+        src = ("$this->send($this->bridge(), 'post', 'v1/sw-bridge/vehicles/' . $vid . '/commands', []);\n"
+               'Http::withToken($t)->get("v2/users/{$uid}/roles");\n'
+               "$cache->get('v1-key'); $arr->get('name');\n")
+        self.assertEqual([(v, p) for _, v, p in php_laravel.iter_backend_calls(src)],
+                         [("post", "v1/sw-bridge/vehicles/{}/commands"), ("get", "v2/users/{}/roles")])
+
+
+if __name__ == "__main__":
+    unittest.main()

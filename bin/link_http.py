@@ -124,6 +124,31 @@ def main() -> int:
                     return m["id"]
         return cls_id  # fallback: the controller class node
 
+    # PHP backends calling another service: the call's source is its enclosing method (the method
+    # node with the latest start line not after the call), else the class/file node of that file.
+    php_methods: dict[str, list[tuple[int, str]]] = {}
+    php_files: dict[str, str] = {}
+    for n in graph.nodes(g):
+        sf = (n.get("source_file") or "").lstrip("/")
+        if n.get("repo") == target_repo or not sf.endswith(".php"):
+            continue
+        loc = str(n.get("source_location") or "")
+        if n["label"].startswith(".") and n["label"].endswith("()") and loc.startswith("L"):
+            php_methods.setdefault(sf, []).append((int(loc[1:] or 0), n["id"]))
+        elif n["label"] == os.path.basename(sf):
+            php_files[sf] = n["id"]
+
+    def php_node_for(rel: str, line: int):
+        for sf, methods in php_methods.items():
+            if sf.endswith(rel) or rel.endswith(sf):
+                before = [m for m in methods if m[0] <= line]
+                if before:
+                    return max(before)[1]
+        for sf, nid in php_files.items():
+            if sf.endswith(rel) or rel.endswith(sf):
+                return nid
+        return None
+
     def fe_node_for(rel: str):
         for n in fe_nodes:
             sf = n["source_file"].lstrip("/")
@@ -138,16 +163,25 @@ def main() -> int:
             # don't scan dependency / build output — not our source, and slow
             dirs[:] = js_ts.prune(dirs)
             for fn in files:
-                if not fn.endswith(lang.FRONTEND):
+                backend = fn.endswith(".php")
+                if not (backend or fn.endswith(lang.FRONTEND)):
                     continue
+                if backend and re.search(r"(^|/)tests?(/|$)", os.path.relpath(dp, root)):
+                    continue  # a test calls its own API through the test client, not another service
                 fp = os.path.join(dp, fn)
                 rel = os.path.relpath(fp, repo_root)
                 try:
-                    lines = open(fp, encoding="utf-8", errors="ignore").read().splitlines()
+                    text = open(fp, encoding="utf-8", errors="ignore").read()
                 except OSError:
                     continue
-                src_node = fe_node_for(rel)
-                for i, verb, raw in iter_calls(lines):
+                if backend:
+                    calls = list(php_laravel.iter_backend_calls(text))
+                else:
+                    calls = list(iter_calls(text.splitlines()))
+                    src_node = fe_node_for(rel)
+                for i, verb, raw in calls:
+                    if backend:
+                        src_node = php_node_for(rel, i)
                     ap = match_route(routes, verb, norm_path(raw))
                     if not ap:
                         unmatched += 1

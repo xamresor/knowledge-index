@@ -189,3 +189,64 @@ def declared_tables(repos_dir: str) -> dict[str, str]:
             if table and cls:
                 tables[cls.group(1)] = table.group(1)
     return tables
+
+
+# --------------------------------------------------------------------------- outgoing HTTP calls
+#: A backend calling another service's API: the verb is the method name or a string argument.
+#:   Http::withToken($t)->get('v2/sw-bridge/me')            $client->post("v1/x/{$id}", [...])
+#:   $this->send($this->bridge(), 'post', 'v1/sw-bridge/vehicles/' . $vid . '/commands', [...])
+#: Only versioned paths (`v1/…`) count: a bare string is too often not a URL.
+HTTP_VERBS = ("get", "post", "put", "patch", "delete")
+PHP_VERB_CALL = re.compile(r"(?:->|::)(" + "|".join(HTTP_VERBS) + r")\(\s*(?=['\"])", re.IGNORECASE)
+PHP_SEND_CALL = re.compile(r"->(?:send|request|call)\(\s*[^,()]*(?:\([^()]*\))?[^,()]*,\s*['\"]("
+                           + "|".join(HTTP_VERBS) + r")['\"]\s*,\s*", re.IGNORECASE)
+PHP_LITERAL = re.compile(r"""'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)\"""")
+PHP_VERSIONED = re.compile(r"^/?v\d+/")
+#: `{$id}` / `$id` inside a double-quoted string are path parameters.
+PHP_INTERPOLATION = re.compile(r"\{\$[^}]*\}|\$[A-Za-z_][\w>-]*")
+
+
+def _php_path(text: str, start: int) -> str | None:
+    """The path of the string expression that starts at `text[start]`: literals kept, every
+    variable or call between them becomes `{}`. None when it is not a versioned path."""
+    parts, i, depth = [], start, 0
+    while i < len(text):
+        c = text[i]
+        if c in "'\"":
+            m = PHP_LITERAL.match(text, i)
+            if not m:
+                return None
+            lit = m.group(1) if m.group(1) is not None else PHP_INTERPOLATION.sub("{}", m.group(2))
+            parts.append(lit)
+            i = m.end()
+            continue
+        if c in "([":
+            depth += 1
+        elif c in ")]":
+            if depth == 0:
+                break
+            depth -= 1
+        elif c == "," and depth == 0:
+            break
+        elif c == ";":
+            break
+        elif c not in " .\t\n" and (not parts or parts[-1] != "{}"):
+            parts.append("{}")  # a variable or a call: one path parameter
+        i += 1
+    path = "".join(parts)
+    return path if PHP_VERSIONED.match(path) else None
+
+
+def iter_backend_calls(text: str):
+    """(line number, verb, path) for every outgoing HTTP call with a versioned path in a PHP file."""
+    seen = set()
+    for pattern in (PHP_SEND_CALL, PHP_VERB_CALL):
+        for m in pattern.finditer(text):
+            path = _php_path(text, m.end())
+            if not path:
+                continue
+            line = text.count("\n", 0, m.start()) + 1
+            key = (line, path)
+            if key not in seen:
+                seen.add(key)
+                yield line, m.group(1).lower(), path
