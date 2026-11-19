@@ -99,6 +99,31 @@ class RealGraphWorker(unittest.TestCase):
         os.utime(self.graph, (st.st_atime, st.st_mtime + 5))
         self.assertIn("Zeta", self.worker.run(["explain", "A", "--graph", self.graph]))
 
+    def test_view_answers_like_the_filtered_file(self):
+        """The in-memory view of a caller's projects gives the CLI's answer on the filtered file."""
+        import access
+        nodes = [{"id": "api::Ctl", "label": "Ctl", "repo": "api", "source_file": "Ctl.php"},
+                 {"id": "api::Svc", "label": "Svc", "repo": "api", "source_file": "Svc.php"},
+                 {"id": "admin::Secret", "label": "Secret", "repo": "admin", "source_file": "S.php"},
+                 {"id": "domain::Auth", "label": "Auth", "repo": "domain", "type": "domain"}]
+        links = [{"source": "api::Ctl", "target": "api::Svc", "relation": "calls", "confidence": "EXTRACTED"},
+                 {"source": "admin::Secret", "target": "api::Svc", "relation": "calls", "confidence": "EXTRACTED"},
+                 {"source": "api::Ctl", "target": "domain::Auth", "relation": "in_domain", "confidence": "DERIVED"}]
+        g = {"directed": True, "multigraph": False, "graph": {}, "nodes": nodes, "links": links,
+             "hyperedges": []}
+        with open(self.graph, "w") as f:
+            json.dump(g, f)
+        filtered = os.path.join(self._tmp.name, "api.json")
+        with open(filtered, "w") as f:
+            json.dump(access.strip_domains(access.filter_graph(g, {"api"})), f)
+        for argv in (["explain", "Svc"], ["affected", "Svc"], ["path", "Ctl", "Svc"]):
+            cli = subprocess.run(["graphify", *argv, "--graph", filtered], capture_output=True, text=True)
+            got = self.worker.run([*argv, "--graph", self.graph], {"allowed": ["api"], "routes": True})
+            self.assertEqual(got.strip(), (cli.stdout + cli.stderr).strip(), argv)
+            self.assertNotIn("Secret", got)
+        full = self.worker.run(["explain", "Svc", "--graph", self.graph])
+        self.assertIn("Secret", full)  # the same worker still answers the unfiltered graph
+
     def test_only_lookup_commands(self):
         self.assertIn("not allowed", self.worker.run(["update", "/tmp"]))
 

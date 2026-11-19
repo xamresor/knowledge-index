@@ -208,18 +208,34 @@ def graph_call(cmd: list[str], args: dict, allowed: set[str] | None, *terms: str
         except access.Denied as e:
             raise ToolError(str(e)) from None
 
-    projects, label, auto = scope_projects(args, allowed)
-    graph = graph_of(projects)
     extra = ["--budget", str(_budget(args))] if cmd[1] == "query" else []
     if cmd[1] == "affected":
         extra = [x for r in AFFECTED_RELATIONS for x in ("--relation", r)]
-    out = run([*cmd, "--graph", graph, *extra])
+
+    def ask(projects: set[str] | None) -> tuple[str, dict]:
+        """-> (output, how to suggest labels). The warm worker cuts the caller's view of the main
+        graph in memory; without it, a filtered file per project set is written and read."""
+        worker = warm.graph()
+        if worker is not None and os.path.exists(GRAPH):
+            full = projects is None or set(PROJECTS) <= set(projects)
+            view = {"allowed": None if full else sorted(projects),
+                    "routes": cmd[1] in ("path", "affected")}
+            out = worker.run([*cmd[1:], "--graph", GRAPH, *extra], view)  # cmd[0] is "graphify"
+            if out is not None:
+                out = out.strip()
+                return (out[:MAX_OUT] or "(no results)"), {
+                    "graph": GRAPH, "repos": None if full else set(projects),
+                    "no_domain": view["routes"]}
+        graph = graph_of(projects)
+        return run([*cmd, "--graph", graph, *extra]), {"graph": graph}
+
+    projects, label, auto = scope_projects(args, allowed)
+    out, where = ask(projects)
     if auto and _no_match(out):
-        projects, graph = allowed, graph_of(allowed)
-        out = run([*cmd, "--graph", graph, *extra])
+        out, where = ask(allowed)
         label = f"all (nothing in {label[:-7]})"
     if terms:
-        out = with_suggestions(out, *terms, graph=graph)
+        out = with_suggestions(out, *terms, **where)
     if cmd[1] == "query":
         out = _mcp_hint(out)
     return f"[projects: {label}]\n\n{out}"
@@ -403,10 +419,8 @@ def warm_qmd() -> None:
             graph = warm.graph()
             if graph and os.path.exists(GRAPH):
                 graph.run(["explain", "warmup", "--graph", GRAPH])
-                try:  # path search and impact use the copy without domain anchors
-                    graph.run(["explain", "warmup", "--graph", access.path_graph(GRAPH)])
-                except access.Denied:
-                    pass
+                # path search and impact use the view without domain anchors
+                graph.run(["explain", "warmup", "--graph", GRAPH], {"allowed": None, "routes": True})
         threading.Thread(target=_prime, daemon=True).start()
         return
     cmd = ["qmd", "query", "lex: warmup\nvec: warmup"] + (["--no-rerank"] if DOCS_MODE == "light" else [])
@@ -444,13 +458,23 @@ def labels(graph: str | None = None) -> list[tuple[str, str, str, str]]:
     return rows
 
 
-def suggest(term: str, limit: int = 20, graph: str | None = None) -> str:
+def suggest(term: str, limit: int = 20, graph: str | None = None, repos: set[str] | None = None,
+            no_domain: bool = False) -> str:
     """List exact node labels matching `term` (graphify matches by substring, so an ambiguous term
-    hits many). Exact and word-boundary matches rank first."""
+    hits many). Exact and word-boundary matches rank first.
+
+    `repos` limits the labels to those projects (a caller's view of the main graph): pseudo nodes
+    (domains, tables) are left out then, since a hidden project's tables must not show.
+    `no_domain` leaves out domain anchors (path and impact run without them)."""
     t = term.strip().lower()
     if not t:
         return ""
-    hits = [row for row in labels(graph) if t in row[0].lower()]
+    rows = labels(graph)
+    if repos is not None:
+        rows = [r for r in rows if r[2] in repos]
+    if no_domain:
+        rows = [r for r in rows if r[1] != "domain" and r[2] != "domain"]
+    hits = [row for row in rows if t in row[0].lower()]
     if not hits:
         return ""
 
@@ -477,11 +501,12 @@ def suggest(term: str, limit: int = 20, graph: str | None = None) -> str:
             f"Re-run with one of these EXACT labels:\n" + "\n".join(lines) + more)
 
 
-def with_suggestions(out: str, *terms: str, graph: str | None = None) -> str:
+def with_suggestions(out: str, *terms: str, graph: str | None = None, repos: set[str] | None = None,
+                     no_domain: bool = False) -> str:
     """If graphify couldn't pin a unique node, append the candidate exact labels."""
     if "node match" not in out.lower():
         return out
-    extra = "".join(suggest(t, graph=graph) for t in terms if t)
+    extra = "".join(suggest(t, graph=graph, repos=repos, no_domain=no_domain) for t in terms if t)
     return out + extra if extra else out
 
 

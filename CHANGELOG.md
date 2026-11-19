@@ -14,6 +14,13 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+- **Faster: a caller's project set is cut from the graph in memory.** The graphify worker keeps the
+  main graph parsed and makes each caller's view (`filter_graph`, and `strip_domains` for path and
+  impact) from it, instead of a filtered file written by a subprocess and parsed again. The first call
+  for a new project set on a 23k-node graph: 3-5 s -> 0.1-0.5 s. The same access rules (the same
+  function). Memory stays bounded: `KB_GRAPH_VIEWS` (4) views and `KB_GRAPH_CACHE_FILES` (2) files;
+  measured 240-430 MB for the worker. Label suggestions follow the caller's projects.
+
 - **Faster: long-lived graphify and qmd in the servers** (`bin/warm.py`, `bin/graph_worker.py`). Every
   call used to start graphify (parse a 34 MB graph, build networkx) or qmd (load the embedding model).
   On a 23k-node graph: graph_explain 4-7 s -> 0.01 s, code search 1-4 s -> 0.1 s, docs search 6-8 s ->

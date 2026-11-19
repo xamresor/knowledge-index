@@ -129,10 +129,15 @@ class GraphWorker(_Proc):
         py = graphify_python()
         super().__init__([py, os.path.join(HERE, "graph_worker.py")] if py else [], timeout=60.0)
 
-    def run(self, argv: list[str]) -> str | None:
+    def run(self, argv: list[str], view: dict | None = None) -> str | None:
+        """graphify's output for `argv`; `view` = {"allowed": [...] | None, "routes": bool} cuts the
+        main graph in memory (see graph_worker.py). None when the worker cannot answer."""
         if not self.argv:
             return None
-        reply = self.exchange({"argv": argv})
+        message: dict = {"argv": argv}
+        if view:
+            message["view"] = view
+        reply = self.exchange(message)
         if reply is None:
             return None
         return str(reply.get("out", ""))
