@@ -60,7 +60,7 @@ def main() -> int:
 
     print(f"decluttered: -{before_n - len(g['nodes'])} nodes "
           f"({len(prune_ids)} hubs), -{before_e - len(g['links'])} edges "
-          f"({(before_e - len(g['links']))/before_e*100:.0f}%)")
+          f"({(before_e - len(g['links'])) / max(before_e, 1) * 100:.0f}%)")
     if auto:
         print("  auto-detected hubs (degree>=%d):" % cap,
               ", ".join(f"{l}({d})" for l, d in sorted(auto, key=lambda x: -x[1])[:15]))

@@ -14,6 +14,14 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+- **Fixed: a failed build left a half-built graph in place.** `graph.json` is rewritten step by step,
+  so a build that died half-way (seen on a server: 104 failed builds in a row) served a graph with no
+  `http_request` edges and no domains. The previous graph is now kept aside and put back when the build
+  fails.
+- **Fixed: one failing `route:list` broke the whole build.** The route table was deleted and the HTTP
+  linker then crashed on the missing file. A failed run now keeps the previous table (or an empty one on
+  the first build) and says so.
+
 - **Fixed: `graph_path` reported symbols as connected when they only shared a domain.** Path search
   walked the `in_domain` edges, so any two members of a domain were two hops apart through the anchor.
   On the author's graph (5386 nodes) 21 of 105 found paths had no real route at all. Path search now

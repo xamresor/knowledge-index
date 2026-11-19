@@ -26,6 +26,19 @@ LOCAL_CFG="$KB_DATA/.kb.local"   # persisted local choices (e.g. QMD_BACKEND); g
 [ -f "$LOCAL_CFG" ] && . "$LOCAL_CFG"
 export GRAPHIFY_VIZ_NODE_LIMIT="${GRAPHIFY_VIZ_NODE_LIMIT:-20000}"
 
+# Set while build_graph rewrites graph.json; on a failed exit the previous graph comes back.
+GRAPH_PREV=""
+keep_graph() {
+  local rc=$?
+  if [ "$rc" -ne 0 ] && [ -n "$GRAPH_PREV" ] && [ -f "$GRAPH_PREV" ]; then
+    mv -f "$GRAPH_PREV" "$OUT/graph.json"
+    touch "$OUT/graph.json"   # newer than any per-caller copy cut from the half-built graph
+    echo "error: the graph build failed — kept the previous graph" >&2
+  fi
+  return "$rc"
+}
+trap keep_graph EXIT
+
 require_cfg() {
   [ -f "$CFG" ] && return
   echo "error: $CFG not found." >&2
@@ -88,9 +101,18 @@ build_graph() {
       # quietly loses its cross-repo half, so say so instead of swallowing it.
       # LOG_CHANNEL=null: the indexed app must not get log files from this run (they would be owned
       # by the KB's user, and the app's own user could not append to them later).
-      if ! env -C "$routes" LOG_CHANNEL=null php artisan route:list --json >"$KB_DATA/routes.$name.json" 2>/dev/null; then
-        echo "  [$name] WARNING: 'php artisan route:list' failed — HTTP edges for this repo will be missing" >&2
-        rm -f "$KB_DATA/routes.$name.json"
+      # A failed run keeps the previous table: routes change rarely, and a KB with last week's routes
+      # is worth more than one with none (and the linker below needs the file).
+      if env -C "$routes" LOG_CHANNEL=null php artisan route:list --json >"$KB_DATA/routes.$name.json.new" 2>/dev/null; then
+        mv -f "$KB_DATA/routes.$name.json.new" "$KB_DATA/routes.$name.json"
+      else
+        rm -f "$KB_DATA/routes.$name.json.new"
+        if [ -f "$KB_DATA/routes.$name.json" ]; then
+          echo "  [$name] WARNING: 'php artisan route:list' failed — using the previous route table" >&2
+        else
+          echo "  [$name] WARNING: 'php artisan route:list' failed — HTTP edges for this repo will be missing" >&2
+          echo "[]" >"$KB_DATA/routes.$name.json"
+        fi
       fi
     fi
     [ -n "$calls" ] && [ -n "$serves" ] && routes_specs+=("$serves|$calls")
@@ -98,6 +120,12 @@ build_graph() {
 
   echo "==> Merging into one cross-repo graph"
   mkdir -p "$OUT"
+  # From here on graph.json is rewritten in place, step by step. Keep the last good one aside, so a
+  # build that dies half-way does not leave a half-built graph for the tools to serve (keep_graph).
+  if [ -f "$OUT/graph.json" ]; then
+    cp -p "$OUT/graph.json" "$OUT/graph.json.prev"
+    GRAPH_PREV="$OUT/graph.json.prev"
+  fi
   if [ "${#merge_inputs[@]}" -ge 2 ]; then
     graphify merge-graphs "${merge_inputs[@]}" --out "$OUT/graph.json" >/dev/null
   else
@@ -155,6 +183,7 @@ build_graph() {
   rm -f "$OUT/kb-graph.html"   # 0.5.0: the shell moved to web/; drop the stale generated page
   echo "    graphify graph.html (raw upstream view) -> $OUT · shell: web/index.html"
   build_contracts
+  rm -f "$GRAPH_PREV"; GRAPH_PREV=""
 }
 
 # The contract layer (bin/contracts.py): routes joined with their frontend call sites, the service
