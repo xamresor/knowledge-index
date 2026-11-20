@@ -28,6 +28,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import time
 from collections import OrderedDict
 import subprocess
@@ -62,6 +63,9 @@ DOCS_MODE = os.environ.get("KB_DOCS_MODE", "light")
 # The surface's own contract number, bumped when a tool's shape changes in a breaking way.
 # Deliberately NOT the repo version: the repo can release many times without touching the contract,
 # and a caller pinning behaviour cares about this number only.
+# AGPL section 13: people who use the KB over a network can find its source. A changed copy points
+# KB_SOURCE_URL at its own source.
+SOURCE_URL = os.environ.get("KB_SOURCE_URL", "https://github.com/xamresor/knowledge-index")
 API_CONTRACT = 2  # 2: docs_search and graph_query removed (use search)
 
 
@@ -288,6 +292,121 @@ def graph_routes(args: dict, allowed: set[str] | None) -> str:
     return f"[projects: {label}]\n\n{out.strip()}"
 
 
+GREP_MAX, GREP_TIMEOUT = 500, 20
+
+
+def code_grep(args: dict, allowed: set[str] | None) -> str:
+    """Exact text search over the indexed code (the staged copies under <data>/repos), for what the
+    graph does not hold: config keys, SQL, error messages, strings, comments. ripgrep when installed,
+    else grep -E. Only the projects the caller may see are searched."""
+    pattern = str(args["pattern"])
+    if not pattern or len(pattern) > 500:
+        raise ToolError("code_grep: 'pattern' must be 1-500 characters")
+    projects, label, _ = scope_projects({**args, "project": args.get("project") or "all"}, allowed)
+    names = sorted(PROJECTS) if projects is None else sorted(projects)
+    roots = [(n, os.path.join(KB, "repos", n)) for n in names if os.path.isdir(os.path.join(KB, "repos", n))]
+    if not roots:
+        return f"[projects: {label}]\n\n(no indexed code for these projects)"
+    limit = min(int(args.get("limit") or 50), GREP_MAX)
+    glob = str(args.get("glob") or "")
+    rg = shutil.which("rg")
+    if rg:
+        cmd = [rg, "--no-config", "-n", "-H", "--no-heading", "--max-columns", "300", "--max-count", "20",
+               "-g", "!graphify-out/**", "-e", pattern]
+        if glob:
+            cmd += ["-g", glob]
+        if args.get("ignore_case"):
+            cmd.append("-i")
+    else:
+        cmd = ["grep", "-rEnHI", "--exclude-dir=graphify-out", "-m", "20", "-e", pattern]
+        if glob:
+            cmd.append(f"--include={glob}")
+        if args.get("ignore_case"):
+            cmd.append("-i")
+    lines: list[str] = []
+    for name, root in roots:
+        try:
+            p = subprocess.run([*cmd, "--", "."], cwd=root, capture_output=True, text=True,
+                               timeout=GREP_TIMEOUT, errors="replace")
+        except subprocess.TimeoutExpired:
+            lines.append(f"{name}: (search timed out: narrow the pattern or add 'glob')")
+            continue
+        if p.returncode not in (0, 1):
+            raise ToolError(f"code_grep: bad pattern: {p.stderr.strip()[:200]}")
+        for ln in p.stdout.splitlines():
+            path, _, rest = ln.partition(":")
+            lines.append(f"{name}:{path.removeprefix('./')}:{rest[:300]}")
+            if len(lines) >= limit:
+                break
+        if len(lines) >= limit:
+            break
+    if not lines:
+        return f"[projects: {label}]\n\n(no matches)"
+    more = f"\n\n(stopped at {limit} lines: raise 'limit' or narrow the pattern)" if len(lines) >= limit else ""
+    return f"[projects: {label}]\n\n" + "\n".join(lines) + more
+
+
+def _visible_routes(allowed: set[str] | None) -> list[dict]:
+    """Contract index rows of the projects the caller may see, callers from other projects dropped."""
+    visible = set(PROJECTS) if allowed is None else set(allowed)
+    try:
+        rows = contracts.load_index(contracts.CONTRACTS)
+    except contracts.NotBuilt:
+        return []
+    return [{**r, "callers": [c for c in r.get("callers", []) if c.get("repo") in visible]}
+            for r in rows if r.get("project") in visible]
+
+
+def _worker(argv: list[str], view: dict, what: str) -> str:
+    worker = warm.graph()
+    out = worker.run(argv, view) if worker is not None else None
+    if out is None:
+        out = warm.graph_once(argv, view)
+    if out is None:
+        raise ToolError(f"{what} needs graphify's Python environment; it was not found")
+    return out.strip()
+
+
+def repo_map(args: dict, allowed: set[str] | None) -> str:
+    """The most depended-on parts of a project within a token budget (bin/repomap.py)."""
+    projects, label, _ = scope_projects(args, allowed)
+    names = sorted(PROJECTS) if projects is None else sorted(projects)
+    budget = max(300, min(int(args.get("budget") or 1500), 8000))
+    full = allowed is None and projects is None
+    view = {"allowed": None if full else names, "routes": True}
+    payload = json.dumps({"routes": _visible_routes(allowed), "projects": names, "budget": budget,
+                          "unused": bool(args.get("unused")),
+                          "roots": {n: os.path.join(KB, "repos", n) for n in names
+                                    if os.path.isdir(os.path.join(KB, "repos", n))}})
+    return f"[projects: {label}]\n\n" + _worker(["map", payload, "--graph", GRAPH], view, "repo_map")
+
+
+def review_context(args: dict, allowed: set[str] | None) -> str:
+    """What a change touches (bin/review.py): changed symbols, what depends on them, the HTTP routes
+    and their frontend callers, the docs and notes next to them. On the caller's view."""
+    import review
+    try:
+        if args.get("diff"):
+            changes = review.parse_diff(str(args["diff"]))
+        elif args.get("files"):
+            changes = review.parse_files(list(args["files"]))
+        else:
+            raise ToolError("review_context: pass 'diff' (git diff output) or 'files'")
+    except ValueError as e:
+        raise ToolError(f"review_context: {e}") from None
+    if not changes:
+        return "(no changed files in the diff)"
+    project = args.get("project") or ""
+    if project and (project not in PROJECTS or (allowed is not None and project not in allowed)):
+        raise ToolError(f"unknown or not allowed project: {project}")
+    visible = set(PROJECTS) if allowed is None else set(allowed)
+    full = allowed is None or set(PROJECTS) <= visible
+    view = {"allowed": None if full else sorted(visible), "routes": True}
+    payload = json.dumps({"changes": {p: sorted(v) for p, v in changes.items()},
+                          "routes": _visible_routes(allowed), "project": project})
+    return _worker(["review", payload, "--graph", GRAPH], view, "review_context")
+
+
 CODE_BUDGET, CODE_BUDGET_MAX = 1800, 8000
 # graphify's own advice names CLI options and tools this server does not have.
 _CLI_HINT = re.compile(r"Narrow with context_filter=\[[^\]]*\] or use get_node for a specific symbol")
@@ -311,12 +430,14 @@ def instructions(projects: list[str] | None = None) -> str:
     seen = f"Projects you can see: {', '.join(projects)}. " if projects else ""
     return (
         "Code knowledge base over several repos (a Laravel API and its frontends). " + seen +
-        "Which tool: an endpoint and who calls it -> contracts_search (fast, the best first step); "
+        "First look at an unknown project -> repo_map. Which tool: an endpoint and who calls it -> contracts_search (fast, the best first step); "
         "one symbol and its neighbours -> graph_explain; what breaks if X changes -> graph_affected; "
         + ("several independent lookups -> batch; " if addons.on("tool-multicall") else "")
         + ("a lookup that needs the answer of another, or a filter over a long answer -> run_code "
            "(a small program calling kb(tool, args)); " if addons.on("code-mode") else "") +
-        "how A reaches B -> graph_routes (several ways, with the routes they cross) or graph_path (one shortest); a free question -> search (domain docs, code or both). "
+        "how A reaches B -> graph_routes (several ways, with the routes they cross) or graph_path (one shortest); "
+        "a diff or a pull request to review -> review_context (pass the git diff); an exact string, "
+        "config key, SQL or error text -> code_grep; a free question -> search (domain docs, code or both). "
         "Trust: edges marked EXTRACTED come from the syntax; INFERRED ones (http_request, eloquent, "
         "doc mentions) are matched by name and can be wrong. in_domain only groups a symbol with its "
         "domain, it is not a dependency. The index is rebuilt after each deploy and can lag the "
@@ -377,6 +498,40 @@ TOOLS = [
          "k": {"type": "integer", "description": "how many different ways (default 3, max 6)"},
          "project": {"type": "string", "description": "limit to these project(s): a name, several comma-separated, or 'all'. Default: all the caller may see"}},
                      "required": ["from", "to"]}},
+    {"name": "repo_map",
+     "description": "A short map of a project for a first look: its domains, then the classes most of the "
+                    "code depends on, with their busiest methods and the routes they serve, cut to a token "
+                    "budget. Read it before exploring a repository you do not know.",
+     "inputSchema": {"type": "object", "properties": {
+         "project": {"type": "string", "description": "the project(s) to map: a name, several comma-separated, "
+                                                     "or 'all'. Default: the session's project(s)"},
+         "budget": {"type": "integer", "description": "answer size in tokens (default 1500, max 8000)"},
+         "unused": {"type": "boolean", "description": "instead: classes and frontend modules nothing depends "
+                                                     "on (dead code candidates, check before deleting)"}}}},
+    {"name": "code_grep",
+     "description": "Exact text search over the indexed code with a regular expression: config keys, SQL, "
+                    "error messages, string literals, comments, anything the graph does not hold. "
+                    "Answers project:path:line: text. For symbols and how they connect use graph_explain.",
+     "inputSchema": {"type": "object", "properties": {
+         "pattern": {"type": "string", "description": "regular expression (ripgrep/ERE syntax)"},
+         "glob": {"type": "string", "description": "only files matching this, e.g. '*.php' or 'config/**'"},
+         "ignore_case": {"type": "boolean"},
+         "limit": {"type": "integer", "description": f"lines to return (default 50, max {GREP_MAX})"},
+         "project": {"type": "string", "description": "limit to these project(s): a name, several "
+                                                     "comma-separated, or 'all'. Default: all the caller may see"}},
+                     "required": ["pattern"]}},
+    {"name": "review_context",
+     "description": "Review a change: pass a unified diff (git diff base...head) or a list of files. "
+                    "Answers which classes and methods changed, what depends on them in this and other "
+                    "projects, which HTTP routes go through them and which frontend files call those "
+                    "routes, which docs describe them and which NOTE/WHY comments sit next to them. "
+                    "Use it before reviewing or merging a pull request.",
+     "inputSchema": {"type": "object", "properties": {
+         "diff": {"type": "string", "description": "unified diff text, up to 2 MB"},
+         "files": {"type": "array", "items": {"type": "string"},
+                   "description": "instead of a diff: paths, optionally with lines, e.g. 'app/X.php:10-20,31'"},
+         "project": {"type": "string", "description": "the project the paths belong to, when a path could "
+                                                     "match several"}}}},
     {"name": "batch",
      "description": "Several tool calls in one request, answered together in order: each call is "
                     "{tool, args}, as if called on its own, with the same access. Use it when the next "
@@ -394,7 +549,7 @@ TOOLS = [
                     "only what you need, in one request: loops, filters, joins of several answers. The "
                     "program is a function body with these globals: `declare function kb(tool: "
                     "'search'|'graph_routes'|'graph_path'|'graph_explain'|'graph_affected'|'docs_get'|"
-                    "'contracts_search'|'connections'|'problems'|'version', args?: Record<string, unknown>): "
+                    "'contracts_search'|'connections'|'problems'|'review_context'|'code_grep'|'repo_map'|'version', args?: Record<string, unknown>): "
                     "string` (the tool's text answer, same arguments as the tool; throws on an error) and "
                     "`declare function print(...values: unknown[]): void`; `return` gives the result. Types "
                     "are stripped (no enums or namespaces). The program runs in a sandbox (QuickJS in "
@@ -1125,6 +1280,12 @@ def _dispatch(name: str, args: dict, allowed: set[str] | None) -> str:
                           args["from"], args["to"])
     if name == "graph_routes":
         return graph_routes(args, allowed)
+    if name == "review_context":
+        return review_context(args, allowed)
+    if name == "code_grep":
+        return code_grep(args, allowed)
+    if name == "repo_map":
+        return repo_map(args, allowed)
     if name in ("graph_explain", "graph_affected"):
         verb = "explain" if name == "graph_explain" else "affected"
         return graph_call(["graphify", verb, args["symbol"]], args, allowed, args["symbol"])
@@ -1149,4 +1310,4 @@ def version_info() -> dict:
     """Two axes, never merged: the repo release and the surface's contract."""
     return {"repo": VERSION, "api_contract": API_CONTRACT, "collection": COLLECTION,
             "projects": list(PROJECTS), "session_projects": HOME_PROJECTS,
-            "aliases": len(ALIASES)}
+            "aliases": len(ALIASES), "license": "AGPL-3.0-or-later", "source": SOURCE_URL}

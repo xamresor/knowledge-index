@@ -28,6 +28,8 @@ import os
 import shutil
 import subprocess
 import threading
+import time
+from collections import OrderedDict
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENABLED = False
@@ -127,15 +129,30 @@ def graphify_python() -> str | None:
 
 
 class GraphWorker(_Proc):
+    """graph_worker.py kept running. It also re-warms itself after a rebuild: the first call on a new
+    graph.json parses it again and cuts each caller's view (2-9 s on a 23k-node graph, measured
+    2026-11-20). A server that rebuilds after every commit (kb-refresh) paid that on the first call
+    of every project set, many times a day. So the views used lately are cut again in the background
+    as soon as a build has finished, before anyone asks."""
+
+    RECENT_VIEWS = 8
+    POLL = 5.0
+
     def __init__(self):
         py = graphify_python()
         super().__init__([py, os.path.join(HERE, "graph_worker.py")] if py else [], timeout=60.0)
+        self.recent: "OrderedDict[str, tuple[dict | None, bool]]" = OrderedDict()
+        self.graph_path: str | None = None
+        self.rewarmed = 0
+        self._watcher: threading.Thread | None = None
 
-    def run(self, argv: list[str], view: dict | None = None) -> str | None:
+    def run(self, argv: list[str], view: dict | None = None, _remember: bool = True) -> str | None:
         """graphify's output for `argv`; `view` = {"allowed": [...] | None, "routes": bool} cuts the
         main graph in memory (see graph_worker.py). None when the worker cannot answer."""
         if not self.argv:
             return None
+        if _remember and "--graph" in argv:
+            self._remember(argv[argv.index("--graph") + 1], view, argv[0] == "routes")
         message: dict = {"argv": argv}
         if view:
             message["view"] = view
@@ -143,6 +160,67 @@ class GraphWorker(_Proc):
         if reply is None:
             return None
         return str(reply.get("out", ""))
+
+    def _remember(self, graph: str, view: dict | None, routes: bool) -> None:
+        key = json.dumps(view or {}, sort_keys=True)
+        old = self.recent.pop(key, (view, False))
+        self.recent[key] = (view, old[1] or routes)
+        while len(self.recent) > self.RECENT_VIEWS:
+            self.recent.popitem(last=False)
+        if self.graph_path != graph:
+            self.graph_path = graph
+        if self._watcher is None:
+            self._watcher = threading.Thread(target=self._watch, name="kb-rewarm", daemon=True)
+            self._watcher.start()
+
+    @staticmethod
+    def build_done(graph: str) -> float | None:
+        """The finished build's time: graph.json's mtime once it has stopped changing and the build's
+        end mark (.kb-post-manifest, written last by `kb update`) is not older than it."""
+        try:
+            g = os.path.getmtime(graph)
+        except OSError:
+            return None
+        mark = os.path.join(os.path.dirname(graph), ".kb-post-manifest")
+        try:
+            if os.path.getmtime(mark) + 1 < g:
+                return None        # graph.json is newer than the end mark: a build is still running
+        except OSError:
+            pass                   # an older bin/kb without the mark: fall back to "stopped changing"
+        return g
+
+    def rewarm(self) -> int:
+        """Cut every recent view of the current graph again; returns how many."""
+        graph = self.graph_path
+        if not graph:
+            return 0
+        n = 0
+        for view, routes in list(self.recent.values()):
+            self.run(["explain", "warmup", "--graph", graph], view, _remember=False)
+            if routes:
+                self.run(["routes", json.dumps({"from": "warmup", "to": "warmup", "k": 1}), "--graph", graph],
+                         view, _remember=False)
+            n += 1
+        self.rewarmed += 1
+        return n
+
+    def _watch(self) -> None:
+        seen = self.build_done(self.graph_path) if self.graph_path else None
+        pending = None
+        while True:
+            time.sleep(self.POLL)
+            done = self.build_done(self.graph_path) if self.graph_path else None
+            if done is None or done == seen:
+                pending = None
+                continue
+            if pending != done:        # changed: wait one more poll to be sure it has settled
+                pending = done
+                continue
+            seen, pending = done, None
+            try:
+                self.rewarm()
+            except Exception:  # noqa: BLE001 — warming is a favour; a failure must not kill the thread
+                pass
 
 
 def graph_once(argv: list[str], view: dict | None = None, timeout: float = 120.0) -> str | None:

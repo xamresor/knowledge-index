@@ -1,11 +1,12 @@
 <img width="1469" height="842" alt="Screenshot from 2026-07-09 22-06-41" src="https://github.com/user-attachments/assets/88c10be3-36cc-4173-b298-07163019cf17" />
-# Code Knowledge Base
+# Knowledge Index
 
-A read-only knowledge layer over a set of related code projects (for example a Laravel API and its
-Vue frontends) for AI agents. It builds **one code graph across the repositories**, with every
-frontend API call linked to the controller that serves it, and an **on-device search** over the
-projects' docs. Agents ask it over MCP: which route a page calls and what it touches, what breaks if a
-class changes, which ways lead from A to B. Everything runs on your machine, no API keys.
+**One search over several related code projects and their docs, for AI agents.** In a few minutes it builds a
+map of the projects (for example a Laravel API and its Vue or React frontends) and answers what depends on
+what, which screen calls which route, how to get from A to B across repositories, and what a pull request
+touches, and keeps the map current within seconds of each commit. It joins a **code graph across the repositories** (every frontend API call linked to the controller
+that serves it) with an **on-device search** over the docs and the code. Agents ask it over MCP. Everything
+runs on your machine, no API keys.
 
 Built on [**graphify**](https://github.com/Graphify-Labs/graphify) (AST code graph) and
 [**qmd**](https://github.com/tobi/qmd) (on-device Markdown search).
@@ -62,7 +63,10 @@ That is the whole core. Everything else is optional and off until you turn it on
 | `graph_explain` | one symbol and all its connections |
 | `graph_affected` | what depends on a symbol, across repositories |
 | `graph_routes` | several ways from A to B, with the routes on the way |
+| `review_context` | a diff: what changed, what depends on it, the routes and screens it reaches, the docs to check |
 | `search` | docs and code by meaning |
+| `code_grep` | exact text with a regular expression: config keys, SQL, error messages |
+| `repo_map` | a first look at a project: what most of the code leans on; with `unused`, dead-code candidates |
 
 Long answers come in pages with a cursor; `connections` and `problems` show the service map and its gaps.
 
@@ -87,6 +91,7 @@ what through two webhooks, [docs/access-protocol.md](docs/access-protocol.md).
 - [Install and configure](docs/install.md): requirements, the configuration, the dashboard, wiring the KB
   into each project.
 - [The shared server](docs/server.md): sign-in, access per project, speed, admin pages, metrics.
+- [Review context on pull requests](docs/server.md#review-context-on-pull-requests): what a branch touches.
 - [Writing docs the KB can use](docs/documentation-guide.md), and the `doc-organization` skill that
   applies it.
 - [Design](docs/design.md): where it sits among similar tools, the plugins, the rules, the roadmap.
@@ -94,4 +99,6 @@ what through two webhooks, [docs/access-protocol.md](docs/access-protocol.md).
 
 ## License
 
-[GPL-3.0-or-later](LICENSE) — free software: use, study, share and modify it. Copyright (C) 2026 Romans Sereda. Derivative works must also be licensed under the GPL (copyleft).
+[AGPL-3.0-or-later](LICENSE): free software, use, study, share and modify it. Copyright (C) 2026 Romans Sereda.
+Changed versions must stay under the AGPL, and that includes running a changed KB as a service for other people:
+its users can then ask for the source of what they use. Versions up to 0.13.0 were released under GPL-3.0-or-later.

@@ -7,7 +7,7 @@ name = "knowledge-index"
 dynamic = ["version"]
 description = "A read-only knowledge layer over related code projects: one cross-repo code graph plus on-device doc search, exposed to agents (MCP), scripts (HTTP) and a human (static dashboard)."
 readme = "README.md"
-license = { text = "GPL-3.0-or-later" }
+license = { text = "AGPL-3.0-or-later" }
 requires-python = ">=3.11"          # tomllib, used for the config and the alias table
 authors = [{ name = "Romans Sereda" }]
 keywords = ["code-graph", "knowledge-base", "mcp", "rag", "search", "graphify", "qmd"]
@@ -15,7 +15,7 @@ classifiers = [
   "Development Status :: 4 - Beta",
   "Environment :: Console",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+  "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
   "Programming Language :: Python :: 3.11",
   "Topic :: Software Development :: Documentation",
   "Topic :: Text Processing :: Indexing",

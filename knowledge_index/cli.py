@@ -65,6 +65,7 @@ def kb_login() -> None:
     _exec("kb-login")
 
 
+
 def kb_refresh() -> None:
     """`kb-refresh` — rebuild when an indexed checkout has a new HEAD (for cron)."""
     _exec("kb-refresh")

@@ -245,7 +245,8 @@ svg text{fill:var(--ink2);font:11px Inter,system-ui,sans-serif}svg .v{fill:var(-
 svg .grid{stroke:var(--line)}svg .bar{fill:var(--accent)}svg .badbar{fill:none;stroke:var(--crit);stroke-width:1.5}
 svg .badtxt{fill:var(--crit);font-weight:600}
 main.login{max-width:360px;margin:12vh auto;padding:0}label{display:block;font-size:12px;color:var(--ink2);margin:12px 0 4px}
-input{width:100%;padding:8px;border:1px solid var(--line);border-radius:3px;font:inherit;background:var(--page);color:var(--ink)}"""
+input{width:100%;padding:8px;border:1px solid var(--line);border-radius:3px;font:inherit;background:var(--page);color:var(--ink)}
+footer.src{margin:24px 16px;font-size:12px;color:var(--ink2)}footer.src a{color:inherit}"""
 
 
 def esc(x) -> str:
@@ -263,7 +264,8 @@ def page(title: str, body: str, base: str = "", tab: str = "", csrf: str = "", r
                f'value="{esc(csrf)}"><button>Sign out</button></form></div></header>')
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width, initial-scale=1"><title>{esc(title)}</title>'
-            f'<style>{STYLE}</style></head><body>{nav}{body}</body></html>').encode()
+            f'<style>{STYLE}</style></head><body>{nav}{body}<footer class="src"><a href="{esc(kb_core.SOURCE_URL)}">'
+            f'Source</a> · AGPL-3.0-or-later</footer></body></html>').encode()
 
 
 def panel(title: str, inner: str, note: str = "") -> str:
@@ -703,5 +705,18 @@ def usage_page(base: str, csrf: str, usage, query: dict | None = None, hours: in
             + panel("Tool usage", table, sub)
             + panel("Most asked", f'<table><tr><th>Argument</th><th class="n">Count</th></tr>{asked}</table>',
                     "the most frequent arguments")
+            + _slow_panel(usage)
             + '</div></div></main>')
     return page("KB admin · usage", body, base, "Usage", csrf)
+
+
+def _slow_panel(usage) -> str:
+    """The slowest calls of the last 48 hours: which tool, which projects, how long (bin/usage.py)."""
+    rows = usage.slow(15) if hasattr(usage, "slow") else []
+    if not rows:
+        return ""
+    trs = "".join(f'<tr><td>{esc(when[5:16])}</td><td>{esc(tool)}</td><td>{esc(project)}</td>'
+                  f'<td>{esc(user)}</td><td class="mono">{esc(arg[:60])}</td><td class="n">{secs:.2f} s</td></tr>'
+                  for when, tool, user, project, secs, arg in rows)
+    return panel("Slowest calls", '<table><tr><th>When</th><th>Tool</th><th>Projects</th><th>User</th>'
+                 f'<th>Argument</th><th class="n">Time</th></tr>{trs}</table>', "the last 48 hours")

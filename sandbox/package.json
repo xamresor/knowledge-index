@@ -3,7 +3,7 @@
   "private": true,
   "description": "run_code: agent scripts in QuickJS (WebAssembly) inside a Node process with the permission model on",
   "type": "module",
-  "license": "GPL-3.0-only",
+  "license": "AGPL-3.0-or-later",
   "dependencies": {
     "quickjs-emscripten": "0.32.0"
   }

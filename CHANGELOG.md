@@ -14,6 +14,51 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-11-20
+
+- **Changed: README intro** — what the KB is in one paragraph: one search over related projects and their docs.
+
+- **Added: `bench/graph_vs_grep.py`** — retrieval benchmark of KB answers against plain grep (expected
+  files found, text read, extra searches); the questions live outside git. First run and its three kinds
+  of misses: `docs/design.md`, "Graph vs grep, measured".
+
+- **Added: `repo_map`** — a first look at a project within a token budget (default 1500): its domains,
+  then the classes and frontend modules most of the code depends on, with their busiest methods and the
+  routes they serve (`bin/repomap.py`, idea from Aider's repo map). The budget is split between the
+  projects asked for. With `unused: true` it lists dead-code candidates instead: nothing in the graph
+  depends on them and their names appear in no other indexed file; code that Laravel or a frontend
+  framework wires by convention (jobs, listeners, policies, providers, file-system routes …) is never listed.
+- **Added: `code_grep`** — exact text search with a regular expression over the indexed code (config
+  keys, SQL, error messages, strings), only in the caller's projects; ripgrep when installed, else grep.
+
+- **Faster first call after a rebuild.** The graph worker remembers the last 8 caller views and cuts
+  them again in the background as soon as a build has finished (graph.json stopped changing and the
+  build's end mark is newer). Before, the first call of each project set after every `kb update` paid
+  2-9 s; on a server that rebuilds after each commit that was most of the slow calls. Measured on the
+  author's machine: 5 s → 0.03 s for the first `graph_routes` after a rebuild.
+
+- **Changed: usage counters live in SQLite, one row per call** (`usage-local.sqlite`, `usage.sqlite`;
+  stdlib `sqlite3`). kb-api and every session's kb-mcp write the same counters; with the JSON file each
+  saved its own copy over it and the last writer won. Rows give real p95 per tool, a "slowest calls"
+  panel on the admin usage page and p95 in the `usage` tool. An old JSON file is imported once as totals
+  and renamed `*.json.imported`. A diff passed to `review_context` is not stored as an argument.
+- **Added: `review_context`.** The tool takes a git diff and answers what it touches:
+  changed symbols (grouped by file), what depends on them in every project, the HTTP routes through
+  them with their frontend callers, the docs that name the changed code and the NOTE/WHY comments next
+  to it (`bin/review.py`, run in the graph worker on the caller's view).
+- **Licence: AGPL-3.0-or-later** instead of GPL-3.0-or-later, from this version on. The same terms, plus
+  one: whoever runs a changed KB as a network service must offer its users the source. The `version` tool
+  and the admin pages show the licence and a source link (`KB_SOURCE_URL` for a changed copy).
+  Releases up to 0.13.0 stay under GPL-3.0-or-later.
+
+- **Faster `kb update`: only what changed is rebuilt.** A project whose staged files did not change
+  (path, size, mtime, graphify version) keeps its graph; a changed one goes through graphify's
+  incremental update, and a full `--force` pass runs only when graphify refuses a smaller graph
+  (deleted code). Merging and post-processing are skipped when no input changed (project manifests,
+  route tables, docs, config, the KB's own code). The qmd collection round runs only when the
+  collection set changed. On the author's machine: 138 s → 10 s with nothing changed. `kb build` and
+  `KB_FORCE=1` rebuild everything.
+
 ## [0.13.0] — 2026-11-20
 
 - **Breaking: access protocol v1 is the only sign-in and access path** ([docs/access-protocol.md](docs/access-protocol.md)).

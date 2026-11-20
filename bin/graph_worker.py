@@ -156,7 +156,7 @@ Path.read_text = read_text
 json.loads = loads
 json_graph.node_link_graph = node_link_graph
 
-ALLOWED = {"query", "path", "explain", "affected", "routes", "neighbors"}
+ALLOWED = {"query", "path", "explain", "affected", "routes", "neighbors", "review", "map"}
 
 
 def _routes(argv: list[str]) -> str:
@@ -183,6 +183,23 @@ def handle(argv: list[str], view: dict | None = None) -> dict:
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
             if argv[0] == "routes":
                 buf.write(_routes(argv))
+            elif argv[0] == "review":  # `review '<json>' --graph <file>`: bin/review.py on the view
+                import review
+                args = _loads(argv[1])
+                graph = argv[argv.index("--graph") + 1]
+                data = json.loads(Path(graph).read_text(encoding="utf-8"))
+                changes = {p: set(v) for p, v in (args.get("changes") or {}).items()}
+                buf.write(review.analyze(data, changes, args.get("routes") or [], args.get("project") or ""))
+            elif argv[0] == "map":  # `map '<json>' --graph <file>`: bin/repomap.py on the view
+                import repomap
+                args = _loads(argv[1])
+                graph = argv[argv.index("--graph") + 1]
+                data = json.loads(Path(graph).read_text(encoding="utf-8"))
+                if args.get("unused"):
+                    buf.write(repomap.unused(data, args.get("projects"), roots=args.get("roots")))
+                else:
+                    buf.write(repomap.build(data, args.get("routes") or [], args.get("projects"),
+                                            int(args.get("budget") or 1500)))
             elif argv[0] == "neighbors":  # `neighbors <node id> --graph <file>`: every connection
                 import routes
                 graph = argv[argv.index("--graph") + 1]

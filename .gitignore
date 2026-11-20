@@ -44,3 +44,6 @@ sandbox/node_modules/
 
 # Add-ons switched on locally (kb addon install)
 /addons.json
+
+# Benchmark questions about private code (bench/graph_vs_grep.py reads them)
+/bench/local/

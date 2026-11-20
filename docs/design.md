@@ -15,7 +15,7 @@ Facts below were checked in **July 2026**; licences and pricing move, so verify 
 
 | | Indexes | Cross-repo edges | Local / on-device | Daemon needed | Licence & cost |
 |---|---|---|---|---|---|
-| **knowledge-index** | code **+ docs** | ✅ incl. frontend call site → controller | ✅ | no (CLI/MCP; API optional) | GPL-3.0, free |
+| **knowledge-index** | code **+ docs** | ✅ incl. frontend call site → controller | ✅ | no (CLI/MCP; API optional) | AGPL-3.0, free |
 | [Sourcegraph](https://sourcegraph.com) | code | ✅ (repo-wide search) | ◐ | yes | **proprietary since 2023**; free self-host deprecated, from ~$49/user/mo |
 | [Zoekt](https://github.com/sourcegraph/zoekt) / [OpenGrok](https://oracle.github.io/opengrok/) | code (**search only**, no graph) | ❌ | ✅ | yes | OSS, free |
 | [Glean (Meta)](https://glean.software/) | code, as schema-defined facts | ✅ within its schema | ✅ | yes (fact DB) | OSS, free — **compiler-grade, and heavy** |
@@ -26,7 +26,7 @@ Facts below were checked in **July 2026**; licences and pricing move, so verify 
 
 | | Indexes | Local / on-device | Daemon needed | Permissions | Licence & cost |
 |---|---|---|---|---|---|
-| **knowledge-index** | markdown docs + the code graph | ✅ embeddings on device | no | **none — one owner by design** | GPL-3.0, free |
+| **knowledge-index** | markdown docs + the code graph | ✅ embeddings on device | no | **none — one owner by design** | AGPL-3.0, free |
 | [Onyx](https://onyx.app) (ex-Danswer) | 45+ connectors | ◐ can self-host, LLM optional | yes (Docker stack) | ✅ mirrors source ACLs | MIT, free |
 | [R2R](https://github.com/SciPhi-AI/R2R) | ingested documents | ◐ | yes | users/auth built in | Apache-2.0, free |
 | [RAGFlow](https://github.com/infiniflow/ragflow) | **deep** PDF/scan parsing | ◐ | yes (Elasticsearch) | multi-tenant | Apache-2.0, free |
@@ -46,6 +46,25 @@ Facts below were checked in **July 2026**; licences and pricing move, so verify 
   markdown, and anything else is out of scope.
 - **Scale, operations, support.** A managed service is the right answer for a company; this is one
   process and a directory of generated files.
+
+### Graph vs grep, measured (2026-11-20)
+
+`bench/graph_vs_grep.py` asks the same questions twice, retrieval only: one KB tool call, one grep with the
+obvious keyword. On one Laravel + Next.js project, 8 questions (frontend caller of a route, controller of a
+route, users of a class, users of a method, screens behind a route, where objects are created, where an env
+key is read, a first look at the API):
+
+| | found the expected files | text the agent reads | extra searches |
+|---|---|---|---|
+| KB | 69% | ~5,000 chars per answer | 0 |
+| grep | 94% | ~175,000 chars per answer | 1.2 on average (a frontend URL -> route table -> controller) |
+
+So the radar's caution holds here too: grep finds more, the graph answers in a fraction of the text. The
+misses are three kinds, each with a fix on the roadmap: a method called on a typed variable
+(`$order->totalDue()`) is not linked by the AST graph (SCIP would link it); a name defined twice
+(interface and implementation) asks the agent to pick one; a frontend URL built at run time
+(`/orders/${id}/${action}`) cannot be matched to a route. Run it on your own code before you trust
+either number.
 
 ### Non-goals (decided, not pending)
 
@@ -241,6 +260,12 @@ Not aspirations — these are the properties the code already has, kept explicit
   the two hooks in a few lines. The old identity endpoint (`KB_AUTH_URL`) is gone.
 - [ ] **A token file for teams without an API**: `tokens.toml` with token → user and projects, served as
   the two webhooks by a small bundled script, for a team that has no system of its own at all.
+- [ ] **Precise PHP calls from SCIP (add-on).** Spike 2026-11-20 on one Laravel 12 API (215 files): `scip-php`
+  indexed it in 10 s (2.2 MB) and found 125 cross-file method calls against 40 in the AST graph, for example
+  calls through a typed property or an interface. Its edges would enter the graph as EXTRACTED `calls`.
+  Limits seen: `scip-php` is stale (v0.0.2, 2023) and wants the project's `vendor/`; its old PHP parser (v4)
+  clashes with Laravel's (v5), worked around by giving the indexed copy the same parser; it still missed calls
+  to Eloquent model methods (`$order->totalDue()`). `scip-typescript` (maintained) is the TS side.
 - [ ] **Docker image for the shared server**: one image (Python, graphify with rustworkx, qmd), the
   indexed code mounted read-only, add-ons switched by `KB_ADDONS`; the Laravel route table taken as a
   file from the app's own container. The `code-mode` sandbox as an optional second container without

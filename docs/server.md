@@ -80,6 +80,17 @@ Around it:
 - **`examples/server/`** — a systemd unit, an nginx vhost and a crontab, with `kb.example.com`
   placeholders.
 
+## Review context on pull requests
+
+`review_context` takes a unified diff (or a list of files with lines) and answers what a reviewer asks
+every time: the changed classes and methods, what depends on them in every project (frontend modules
+first, they are the surprises), the HTTP routes that go through them and the frontend files that call
+those routes, the docs that name the changed code and the NOTE/WHY comments next to it
+(`bin/review.py`). The graph is undirected, so each dependency edge is oriented by the file it was
+written in (the caller's file).
+
+An agent or a CI job passes `git diff origin/master...HEAD` and gets the answer as text.
+
 ## Contracts between services
 
 Three tools answer what the graph answers badly — they read indexes `kb update` builds next to the

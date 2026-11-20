@@ -136,3 +136,53 @@ class RealGraphWorker(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RewarmAfterRebuild(unittest.TestCase):
+    """After a build the worker cuts the recent views again by itself (bin/warm.py GraphWorker)."""
+
+    def setUp(self):
+        import tempfile
+        import warm
+        self.warm = warm
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.graph = os.path.join(self.tmp.name, "graph.json")
+        self.mark = os.path.join(self.tmp.name, ".kb-post-manifest")
+        for p in (self.graph, self.mark):
+            with open(p, "w") as f:
+                f.write("{}")
+        w = warm.GraphWorker.__new__(warm.GraphWorker)
+        warm._Proc.__init__(w, ["fake"])
+        w.recent, w.graph_path, w.rewarmed, w._watcher = warm.OrderedDict(), None, 0, None
+        self.sent = []
+        w.exchange = lambda m: self.sent.append(m) or {"out": "ok"}
+        w.POLL = 0.05
+        self.w = w
+
+    def touch(self, path, t):
+        os.utime(path, (t, t))
+
+    def test_recent_views_are_cut_again_once_the_build_is_done(self):
+        import time
+        self.w.run(["explain", "X", "--graph", self.graph], {"allowed": ["api"], "routes": False})
+        self.w.run(["routes", "{}", "--graph", self.graph], {"allowed": ["web"], "routes": True})
+        self.sent.clear()
+        now = time.time()
+        self.touch(self.graph, now + 10)            # a build is rewriting graph.json, the mark is old
+        time.sleep(0.3)
+        self.assertEqual(self.w.rewarmed, 0)
+        self.touch(self.mark, now + 11)             # the build has finished
+        deadline = time.time() + 3
+        while self.w.rewarmed == 0 and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(self.w.rewarmed, 1)
+        argv = [m["argv"][0] for m in self.sent]
+        self.assertEqual(argv.count("explain"), 2)  # both views
+        self.assertEqual(argv.count("routes"), 1)   # the routes graph only where routes were used
+        self.assertEqual(len(self.w.recent), 2)     # warming does not count as use
+
+    def test_recent_is_capped(self):
+        for i in range(self.w.RECENT_VIEWS + 3):
+            self.w.run(["explain", "X", "--graph", self.graph], {"allowed": [f"p{i}"], "routes": False})
+        self.assertEqual(len(self.w.recent), self.w.RECENT_VIEWS)
