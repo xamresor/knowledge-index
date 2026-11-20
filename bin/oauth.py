@@ -82,6 +82,7 @@ class Server:
         self.check_token = check_token       # token -> raises when the API no longer accepts it
         self.clients_file = clients_file
         self.now = now
+        self.on_event = None                 # (user, action, detail) -> None: the audit log, set by kb-http
         self.lock = threading.Lock()
         self.clients: dict[str, dict] = self._load_clients()
         self.txns: dict[str, dict] = {}
@@ -173,8 +174,13 @@ class Server:
     def password_step(self, txn_id: str, username: str, password: str) -> tuple[str, str | None]:
         """-> ("code", None) when a code is needed next, ("done", redirect URL) when signed in."""
         txn = self._txn(txn_id)
-        data = kb_login.post(self.env["KB_LOGIN_URL"], {"username": username, "password": password},
-                             headers=kb_login.hook_headers(self.env))
+        txn["user"] = username
+        try:
+            data = kb_login.post(self.env["KB_LOGIN_URL"], {"username": username, "password": password},
+                                 headers=kb_login.hook_headers(self.env))
+        except kb_login.LoginError as e:
+            self._event(username, "sign-in refused", str(e)[:200])
+            raise
         challenge = (data.get("two_factor") or {}).get("challenge")
         if challenge:
             txn["api_challenge"] = challenge
@@ -185,8 +191,12 @@ class Server:
         txn = self._txn(txn_id)
         if not txn.get("api_challenge"):
             raise OAuthError(400, "invalid_request", "no second step pending")
-        data = kb_login.post(self.env["KB_LOGIN_URL"], {"challenge": txn["api_challenge"], "code": code.strip()},
-                             headers=kb_login.hook_headers(self.env))
+        try:
+            data = kb_login.post(self.env["KB_LOGIN_URL"], {"challenge": txn["api_challenge"], "code": code.strip()},
+                                 headers=kb_login.hook_headers(self.env))
+        except kb_login.LoginError as e:
+            self._event(txn.get("user", "?"), "sign-in refused", f"code: {str(e)[:180]}")
+            raise
         return self._finish(txn_id, data.get("token"))
 
     def _txn(self, txn_id: str) -> dict:
@@ -208,11 +218,20 @@ class Server:
             self.codes[code] = {"token": token, "client_id": txn["client_id"],
                                 "redirect_uri": txn["redirect_uri"], "challenge": txn["challenge"],
                                 "exp": self.now() + CODE_TTL}
+        client = self.clients.get(txn["client_id"], {})
+        self._event(txn.get("user", "?"), "browser sign-in", str(client.get("client_name") or txn["client_id"])[:80])
         query = {"code": code}
         if txn["state"]:
             query["state"] = txn["state"]
         sep = "&" if "?" in txn["redirect_uri"] else "?"
         return txn["redirect_uri"] + sep + urllib.parse.urlencode(query)
+
+    def _event(self, user: str, action: str, detail: str = "") -> None:
+        if self.on_event:
+            try:
+                self.on_event(user, action, detail)
+            except Exception:  # noqa: BLE001 — the audit log never breaks a sign-in
+                pass
 
     def revoke(self, client_id: str) -> bool:
         """Forget a client and its refresh tokens (admin page). False when there is no such client."""

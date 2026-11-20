@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to **knowledge-index** are recorded here.
+All notable changes to **GGRAG** (graph-grounded RAG for code; called knowledge-index before 0.15) are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [SemVer](https://semver.org/) with `0.x` semantics: **breaking changes bump the minor**
 until the MCP tool contract stabilises at `1.0.0`.
@@ -13,6 +13,23 @@ The single source of truth for the current version is the `VERSION` file. It is 
 > diverge — don't sync them.
 
 ## [Unreleased]
+
+## [0.15.0] — 2026-11-20
+
+- **Renamed: Knowledge Index is now GGRAG** (graph-grounded RAG for code). The package name, the Python
+  module, the data folders and the `kb` commands stay as they are, so nothing breaks for an installed copy.
+
+- **Added: the `audit` add-on** (`kb addon install audit`, free core; off by default): the Audit tab of the
+  admin pages (`/admin/audit`) with sign-ins and admin actions (browser
+  sign-in, refused sign-in with the reason, admin sign-in and sign-out, rebuild, revoked client) and every
+  tool call with its user, projects, argument, time and result, filtered by user, tool or errors. Kept in
+  the usage database for 90 days.
+
+- **Added: external add-ons (plugins)** — a folder with a `plugin.py` (NAME, DESCRIPTION, TOOLS, call, and
+  optionally build) installed with `kb addon install <folder>` and switched on like any add-on. Its tools
+  join the list and go through the core's validation, paging, cursors, usage counting and per-project
+  access; its build hook runs at the end of `kb update`. A broken plugin is reported and skipped. A plugin
+  keeps its own licence, so paid add-ons can live in a private repository (`bin/plugins.py`).
 
 ## [0.14.1] — 2026-11-20
 

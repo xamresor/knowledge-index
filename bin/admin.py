@@ -30,6 +30,7 @@ import threading
 import time
 import urllib.parse
 
+import addons  # noqa: E402
 import kb_core
 import warm
 
@@ -256,9 +257,10 @@ def esc(x) -> str:
 def page(title: str, body: str, base: str = "", tab: str = "", csrf: str = "", right: str = "") -> bytes:
     nav = ""
     if csrf:
-        links = "".join(f'<a href="{base}/admin{p}" class="{"on" if tab == t else ""}">{t}</a>'
-                        for t, p in (("Status", ""), ("Index", "/index"), ("Usage", "/usage"),
-                                     ("Clients", "/clients")))
+        tabs = [("Status", ""), ("Index", "/index"), ("Usage", "/usage"), ("Audit", "/audit"), ("Clients", "/clients")]
+        if not addons.on("audit"):
+            tabs.remove(("Audit", "/audit"))
+        links = "".join(f'<a href="{base}/admin{p}" class="{"on" if tab == t else ""}">{t}</a>' for t, p in tabs)
         nav = (f'<header><span class="brand">KB admin</span><nav>{links}</nav><div class="right">{right}'
                f'<form method="post" action="{base}/admin/logout"><input type="hidden" name="csrf" '
                f'value="{esc(csrf)}"><button>Sign out</button></form></div></header>')
@@ -312,6 +314,48 @@ def status_page(base: str, csrf: str, s: dict, user: dict, note: str = "") -> by
             f'<div class=body><table>{builds}</table><p></p>{rebuild_btn}</div></section>'
             f'<section class=panel><h2>Warm helpers</h2><div class=body><table>{helpers}</table></div></section></main>')
     return page("KB admin", body, base, "Status", csrf)
+
+
+def audit_page(base: str, csrf: str, usage, query: dict | None = None) -> bytes:
+    """Who did what: sign-ins and admin actions, then every tool call with its user, projects, argument,
+    time and outcome. Filters by user, tool and errors are links (no scripts)."""
+    query = query or {}
+    if usage is None or not hasattr(usage, "calls"):
+        return page("KB admin · audit", '<main>' + panel("Audit", '<p class="muted">usage counting is off</p>')
+                    + '</main>', base, "Audit", csrf)
+    user, tool = str(query.get("user", "")), str(query.get("tool", ""))
+    errors = query.get("errors") in ("1", "true", "on")
+
+    def link(**kw) -> str:
+        q = {"user": user, "tool": tool, "errors": "1" if errors else "", **kw}
+        q = {k: v for k, v in q.items() if v}
+        return f"{base}/admin/audit" + ("?" + urllib.parse.urlencode(q) if q else "")
+
+    ev = usage.events(100, user)
+    ev_rows = "".join(f'<tr><td>{esc(w)}</td><td><a href="{esc(link(user=u))}">{esc(u)}</a></td>'
+                      f'<td>{esc(a)}</td><td class="mono">{esc(d)}</td></tr>' for w, u, a, d in ev)
+    calls = usage.calls(200, user, tool, errors)
+    call_rows = "".join(
+        f'<tr><td>{esc(w)}</td><td><a href="{esc(link(user=u))}">{esc(u)}</a></td>'
+        f'<td><a href="{esc(link(tool=t))}">{esc(t)}</a></td><td>{esc(p)}</td>'
+        f'<td class="mono">{esc(a[:80])}</td><td class="n">{s:.2f} s</td>'
+        f'<td>{"ok" if ok else "<b>error</b>"}</td></tr>' for w, u, t, p, ok, s, a in calls)
+    shown = " · ".join(x for x in (f"user {user}" if user else "", f"tool {tool}" if tool else "",
+                                    "errors only" if errors else "") if x) or "everything"
+    filters = (f'<p class="muted">Showing {esc(shown)}. <a href="{esc(link(errors="" if errors else "1"))}">'
+               f'{"all calls" if errors else "errors only"}</a> · <a href="{base}/admin/audit">reset</a></p>')
+    body = ('<main><div class="stack">' + filters
+            + panel("Sign-ins and admin actions",
+                    '<table><tr><th>When</th><th>User</th><th>Action</th><th>Detail</th></tr>'
+                    + (ev_rows or '<tr><td colspan="4" class="muted">none yet</td></tr>') + '</table>',
+                    "the last 100")
+            + panel("Tool calls",
+                    '<table><tr><th>When</th><th>User</th><th>Tool</th><th>Projects</th><th>Argument</th>'
+                    '<th class="n">Time</th><th>Result</th></tr>'
+                    + (call_rows or '<tr><td colspan="7" class="muted">none</td></tr>') + '</table>',
+                    "the last 200, kept 90 days")
+            + '</div></main>')
+    return page("KB admin · audit", body, base, "Audit", csrf)
 
 
 def clients_page(base: str, csrf: str, clients: dict, note: str = "") -> bytes:

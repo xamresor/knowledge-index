@@ -36,6 +36,9 @@ CREATE TABLE IF NOT EXISTS calls (
 CREATE INDEX IF NOT EXISTS calls_ts ON calls (ts);
 CREATE INDEX IF NOT EXISTS calls_tool_ts ON calls (tool, ts);
 CREATE TABLE IF NOT EXISTS legacy (snapshot TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS events (
+  ts REAL NOT NULL, user TEXT NOT NULL, action TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '');
+CREATE INDEX IF NOT EXISTS events_ts ON events (ts);
 """
 
 
@@ -61,6 +64,7 @@ class Usage:
         self.db.executescript(SCHEMA)
         self._import_json(path)
         self.db.execute("DELETE FROM calls WHERE ts < ?", (time.time() - USAGE_DAYS * 86400,))
+        self.db.execute("DELETE FROM events WHERE ts < ?", (time.time() - USAGE_DAYS * 86400,))
 
     def _import_json(self, path: str) -> None:
         if not path.endswith(".json") or not os.path.isfile(path):
@@ -92,6 +96,51 @@ class Usage:
 
     def save(self) -> None:
         """Every call is written when it is recorded; kept so callers need not know."""
+
+    # ------------------------------------------------------------------ audit
+    def event(self, user: str, action: str, detail: str = "") -> None:
+        """An audit event: a sign-in, a refused sign-in, an admin action (rebuild, revoke, sign-out).
+        Nothing is written while the `audit` add-on is off."""
+        try:
+            import addons
+            if not addons.on("audit"):
+                return
+        except Exception:  # noqa: BLE001
+            return
+        try:
+            with self._lock:
+                self.db.execute("INSERT INTO events (ts, user, action, detail) VALUES (?,?,?,?)",
+                                (time.time(), str(user or "?")[:120], str(action)[:60], str(detail)[:300]))
+        except sqlite3.Error as e:
+            _log(f"usage: cannot record an event: {e}")
+
+    def events(self, limit: int = 100, user: str = "") -> list[tuple]:
+        """(when, user, action, detail), newest first."""
+        sql, params = "SELECT ts, user, action, detail FROM events", []
+        if user:
+            sql += " WHERE user = ?"
+            params.append(user)
+        sql += " ORDER BY ts DESC LIMIT ?"
+        params.append(limit)
+        return [(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts)), u, a, d)
+                for ts, u, a, d in self._rows(sql, tuple(params))]
+
+    def calls(self, limit: int = 200, user: str = "", tool: str = "", errors: bool = False) -> list[tuple]:
+        """(when, user, tool, projects, ok, seconds, argument) of single calls, newest first."""
+        where, params = [], []
+        for col, val in (("user", user), ("tool", tool)):
+            if val:
+                where.append(f"{col} = ?")
+                params.append(val)
+        if errors:
+            where.append("ok = 0")
+        sql = "SELECT ts, user, tool, project, ok, seconds, arg FROM calls"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY ts DESC LIMIT ?"
+        params.append(limit)
+        return [(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts)), u, t, p, bool(ok), s, a)
+                for ts, u, t, p, ok, s, a in self._rows(sql, tuple(params))]
 
     # ------------------------------------------------------------------ reading
     def _rows(self, sql: str, params: tuple = ()) -> list[tuple]:

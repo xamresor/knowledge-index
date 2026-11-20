@@ -109,6 +109,39 @@ class Admin(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertIn("not a KB admin", page)
 
+    def test_audit_records_sign_ins_and_actions(self):
+        from usage import Usage
+        u = Usage(os.path.join(self.tmp.name, "logs", "audit-test.json"))
+        u.record("graph_explain", "ann", {"symbol": "Order"}, False, 0.4)
+        with mock.patch.object(kb_http, "USAGE", u):
+            self.sign_in(self.client(), self.base, code="000000")          # refused: wrong code
+            c = self.client()
+            self.sign_in(c, self.base)
+            self.req(c, "POST", f"{self.base}/admin/clients/revoke", {"csrf": self.csrf(c), "client_id": "kb-nope"})
+            status, _, page = self.req(c, "GET", f"{self.base}/admin/audit")
+            _, _, errors = self.req(c, "GET", f"{self.base}/admin/audit?errors=1&tool=graph_explain")
+        self.assertEqual(status, 200)
+        for text in ("admin sign-in refused", "admin sign-in", "revoke client", "kb-nope"):
+            self.assertIn(text, page)
+        self.assertIn("Order", errors)
+        self.assertIn("<b>error</b>", errors)
+        actions = [a for _, _, a, _ in u.events()]
+        self.assertIn("admin sign-in", actions)
+        self.assertIn("admin sign-in refused", actions)
+
+    def test_audit_off_records_nothing_and_has_no_page(self):
+        from usage import Usage
+        u = Usage(os.path.join(self.tmp.name, "logs", "audit-off.json"))
+        with mock.patch.object(kb_http, "USAGE", u), \
+                mock.patch.dict(os.environ, {"KB_ADDONS": "admin"}):
+            c = self.client()
+            self.sign_in(c, self.base)
+            status, _, _ = self.req(c, "GET", f"{self.base}/admin/audit")
+            _, _, home = self.req(c, "GET", f"{self.base}/admin")
+        self.assertEqual(status, 404)
+        self.assertNotIn("/admin/audit", home)
+        self.assertEqual(u.events(), [])
+
     def test_post_needs_the_sessions_csrf_token(self):
         c = self.client()
         self.sign_in(c, self.base)

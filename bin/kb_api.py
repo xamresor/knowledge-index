@@ -226,6 +226,8 @@ def make_handler(host: str, token: str | None):
                 if form.get("csrf") != CSRF:
                     raise ApiError(403, "form expired: reload the page")
                 if path == "/admin/rebuild":
+                    if kb_core.LOCAL_USAGE is not None:
+                        kb_core.LOCAL_USAGE.event("local", "rebuild")
                     self._page(200, admin.status_page(base, CSRF, admin.status(None), {"name": "local"},
                                                       admin.rebuild()))
                     return
@@ -240,6 +242,8 @@ def make_handler(host: str, token: str | None):
                 self._page(200, admin.index_page(base, CSRF, kb_core.LOCAL_USAGE))
             elif path == "/admin/usage":
                 self._page(200, admin.usage_page(base, CSRF, kb_core.LOCAL_USAGE, query))
+            elif path == "/admin/audit" and addons.on("audit"):
+                self._page(200, admin.audit_page(base, CSRF, kb_core.LOCAL_USAGE, query))
             elif path == "/admin/clients":
                 self._page(200, admin.clients_page(base, CSRF, {}, "Local mode: no browser sign-in."))
             else:

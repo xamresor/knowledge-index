@@ -392,6 +392,13 @@ addon() {
   case "$action" in
     list) "$PY" "$KB/bin/addons.py" list ;;
     install)
+      if [ -d "$name" ] && [ -f "$name/plugin.py" ]; then   # an external add-on (bin/plugins.py)
+        local pname; pname="$(basename "$(cd "$name" && pwd -P)")"
+        mkdir -p "$KB_DATA/plugins"
+        ln -sfn "$(cd "$name" && pwd -P)" "$KB_DATA/plugins/$pname"
+        "$PY" "$KB/bin/addons.py" on "$pname" && echo "$pname: plugin on (restart the KB server to load it)"
+        return 0
+      fi
       case "$name" in
         code-mode)
           command -v node >/dev/null && command -v npm >/dev/null || { echo "code-mode needs Node 22+ and npm" >&2; exit 1; }
@@ -406,7 +413,7 @@ addon() {
             uv tool install "graphifyy==$gver" --with rustworkx --reinstall
           elif command -v pipx >/dev/null; then pipx inject graphifyy rustworkx
           else echo "install rustworkx into graphify's environment: $gpy -m pip install rustworkx" >&2; exit 1; fi ;;
-        tool-multicall|metrics|admin) : ;;   # nothing to fetch
+        tool-multicall|metrics|admin|audit) : ;;   # nothing to fetch
         *) echo "kb addon install <name>: $(sed -n 's/^    "\([a-z-]*\)": .*/\1/p' "$KB/bin/addons.py" | tr '\n' ' ')" >&2; exit 1 ;;
       esac
       "$PY" "$KB/bin/addons.py" on "$name" && echo "$name: on (restart the KB server to load it)"
@@ -415,6 +422,7 @@ addon() {
       fi ;;
     remove)
       "$PY" "$KB/bin/addons.py" off "$name" && echo "$name: off"
+      if [ -L "$KB_DATA/plugins/$name" ]; then rm -f "$KB_DATA/plugins/$name" && echo "  plugin link removed"; fi
       if [ "$name" = code-mode ]; then rm -rf "$sb/node_modules" && echo "  sandbox packages removed from $sb"; fi ;;
     *) echo "kb addon {list|install <name>|remove <name>}" >&2; exit 1 ;;
   esac
@@ -422,15 +430,15 @@ addon() {
 
 case "${1:-build}" in
   --version|-V|version)
-          echo "knowledge-index $KB_VERSION"
+          echo "GGRAG (knowledge-index) $KB_VERSION"
           echo "  graphify: $(graphify --version 2>/dev/null || echo 'not found')"
           echo "  qmd:      $(qmd --version 2>/dev/null || echo 'not found')"
           "$PY" "$KB/bin/paths.py" | sed 's/^/  /'
           ;;
-  build)  BUILD_START=$(date +%s); BUILD_KIND=build; build_graph; build_kb ;;
+  build)  BUILD_START=$(date +%s); BUILD_KIND=build; build_graph; build_kb; "$PY" "$KB/bin/plugins.py" build ;;
   graph)  BUILD_START=$(date +%s); BUILD_KIND=graph; build_graph ;;
   kb)     build_kb ;;
-  update) BUILD_START=$(date +%s); BUILD_KIND=update; build_graph; build_kb >/dev/null; echo "refreshed" ;;
+  update) BUILD_START=$(date +%s); BUILD_KIND=update; build_graph; build_kb >/dev/null; "$PY" "$KB/bin/plugins.py" build; echo "refreshed" ;;
   qmd-backend) rm -f "$LOCAL_CFG"; unset QMD_BACKEND; echo "qmd backend set to: $(resolve_qmd_backend)" ;;
   label)  "$PY" "$KB/bin/label_namespaces.py" "$OUT/graph.json" "$OUT/.graphify_labels.json"
           graphify cluster-only "$KB_DATA" --no-label >/dev/null; echo "relabeled + report regenerated" ;;

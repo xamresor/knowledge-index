@@ -1,12 +1,25 @@
 <img width="1469" height="842" alt="Screenshot from 2026-07-09 22-06-41" src="https://github.com/user-attachments/assets/88c10be3-36cc-4173-b298-07163019cf17" />
-# Knowledge Index
+# GGRAG: graph-grounded RAG for code
 
 **One search over several related code projects and their docs, for AI agents.** In a few minutes it builds a
 map of the projects (for example a Laravel API and its Vue or React frontends) and answers what depends on
 what, which screen calls which route, how to get from A to B across repositories, and what a pull request
-touches, and keeps the map current within seconds of each commit. It joins a **code graph across the repositories** (every frontend API call linked to the controller
-that serves it) with an **on-device search** over the docs and the code. Agents ask it over MCP. Everything
-runs on your machine, no API keys.
+touches. It keeps the map current within seconds of each commit. Agents ask it over MCP. Everything runs on
+your machine, no API keys.
+
+### The name
+
+GGRAG is **G**raph-**G**rounded **R**etrieval-**A**ugmented **G**eneration:
+
+- **Graph**: a code graph across the repositories. Classes, methods, routes and docs are nodes; calls,
+  imports and HTTP requests are edges, and every frontend API call is linked to the controller that serves it.
+- **Grounded**: the agent's answer rests on that graph. It follows real edges: who calls this, what breaks
+  if it changes, which way leads from A to B.
+- **Retrieval**: a search over the docs and the code, by keywords and by meaning, running on your machine.
+- **Augmented Generation**: the agent gets the pieces it needs, about 5,000 characters per answer where a
+  grep returned 170,000 in our benchmark, and writes its answer from them.
+
+Before 0.15 the project was called Knowledge Index; the package and the `kb` commands keep that name.
 
 Built on [**graphify**](https://github.com/Graphify-Labs/graphify) (AST code graph) and
 [**qmd**](https://github.com/tobi/qmd) (on-device Markdown search).
@@ -81,8 +94,11 @@ Off until you install them; an add-on that is off adds no tool, page or route.
 | `fast-routes` | `graph_routes` on a Rust core, 2-3x faster | graphify via uv or pipx |
 | `metrics` | `GET /metrics` for Prometheus, Grafana or PMM | — |
 | `admin` | `/admin`: status, charts, usage, sign-in clients | on a shared server: `KB_ADMINS` |
+| `audit` | an Audit tab: sign-ins, admin actions, every tool call with user and argument | `admin` |
 
-`kb addon list` shows what is on, `kb addon remove <name>` switches one off. A team server with browser
+`kb addon list` shows what is on, `kb addon remove <name>` switches one off. An add-on can also live
+outside this repository, under its own licence: `kb addon install <folder with plugin.py>` (see
+`bin/plugins.py` for the four names a plugin defines). A team server with browser
 sign-in and access per project: [docs/server.md](docs/server.md); it asks your own system who may see
 what through two webhooks, [docs/access-protocol.md](docs/access-protocol.md).
 

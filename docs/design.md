@@ -15,7 +15,7 @@ Facts below were checked in **July 2026**; licences and pricing move, so verify 
 
 | | Indexes | Cross-repo edges | Local / on-device | Daemon needed | Licence & cost |
 |---|---|---|---|---|---|
-| **knowledge-index** | code **+ docs** | ✅ incl. frontend call site → controller | ✅ | no (CLI/MCP; API optional) | AGPL-3.0, free |
+| **GGRAG** | code **+ docs** | ✅ incl. frontend call site → controller | ✅ | no (CLI/MCP; API optional) | AGPL-3.0, free |
 | [Sourcegraph](https://sourcegraph.com) | code | ✅ (repo-wide search) | ◐ | yes | **proprietary since 2023**; free self-host deprecated, from ~$49/user/mo |
 | [Zoekt](https://github.com/sourcegraph/zoekt) / [OpenGrok](https://oracle.github.io/opengrok/) | code (**search only**, no graph) | ❌ | ✅ | yes | OSS, free |
 | [Glean (Meta)](https://glean.software/) | code, as schema-defined facts | ✅ within its schema | ✅ | yes (fact DB) | OSS, free — **compiler-grade, and heavy** |
@@ -26,7 +26,7 @@ Facts below were checked in **July 2026**; licences and pricing move, so verify 
 
 | | Indexes | Local / on-device | Daemon needed | Permissions | Licence & cost |
 |---|---|---|---|---|---|
-| **knowledge-index** | markdown docs + the code graph | ✅ embeddings on device | no | **none — one owner by design** | AGPL-3.0, free |
+| **GGRAG** | markdown docs + the code graph | ✅ embeddings on device | no | **none — one owner by design** | AGPL-3.0, free |
 | [Onyx](https://onyx.app) (ex-Danswer) | 45+ connectors | ◐ can self-host, LLM optional | yes (Docker stack) | ✅ mirrors source ACLs | MIT, free |
 | [R2R](https://github.com/SciPhi-AI/R2R) | ingested documents | ◐ | yes | users/auth built in | Apache-2.0, free |
 | [RAGFlow](https://github.com/infiniflow/ragflow) | **deep** PDF/scan parsing | ◐ | yes (Elasticsearch) | multi-tenant | Apache-2.0, free |

@@ -29,6 +29,7 @@ import os
 import re
 import secrets
 import shutil
+import sys
 import time
 from collections import OrderedDict
 import subprocess
@@ -65,7 +66,7 @@ DOCS_MODE = os.environ.get("KB_DOCS_MODE", "light")
 # and a caller pinning behaviour cares about this number only.
 # AGPL section 13: people who use the KB over a network can find its source. A changed copy points
 # KB_SOURCE_URL at its own source.
-SOURCE_URL = os.environ.get("KB_SOURCE_URL", "https://github.com/xamresor/knowledge-index")
+SOURCE_URL = os.environ.get("KB_SOURCE_URL", "https://github.com/xamresor/ggrag")
 API_CONTRACT = 2  # 2: docs_search and graph_query removed (use search)
 
 
@@ -408,7 +409,7 @@ def review_context(args: dict, allowed: set[str] | None) -> str:
         elif args.get("files"):
             changes = review.parse_files(list(args["files"]))
         else:
-            raise ToolError("review_context: pass 'diff' (git diff output) or 'files'")
+            raise ValueError("pass 'diff' (git diff output) or 'files'")
     except ValueError as e:
         raise ToolError(f"review_context: {e}") from None
     if not changes:
@@ -625,6 +626,17 @@ PAGE_CHARS = int(os.environ.get("KB_PAGE_CHARS", "6000"))
 PAGE_MIN, PAGE_MAX = 1000, 50_000
 UNPAGED = {"version"}
 SELF_PAGED = {"search"}
+# External add-ons (bin/plugins.py): their tools join the list while they are installed and on.
+PLUGIN_TOOLS: dict[str, object] = {}
+try:
+    import plugins as _plugins
+    for _mod in _plugins.active(addons.enabled()):
+        for _t in getattr(_mod, "TOOLS", []):
+            if _t.get("name") and not any(x["name"] == _t["name"] for x in TOOLS):
+                TOOLS.append({**_t, "inputSchema": json.loads(json.dumps(_t.get("inputSchema") or {"type": "object"}))})
+                PLUGIN_TOOLS[_t["name"]] = _mod
+except Exception as _e:  # noqa: BLE001 — a broken plugin never takes the core down
+    sys.stderr.write(f"kb: plugins not loaded: {_e}\n")
 for _t in TOOLS:
     if _t["name"] not in UNPAGED:
         _t["inputSchema"].setdefault("properties", {})["page"] = {
@@ -1315,6 +1327,8 @@ def _dispatch(name: str, args: dict, allowed: set[str] | None) -> str:
         return _index(contracts.connections, args.get("service", ""))
     if name == "problems":
         return _index(contracts.problems, args.get("project", ""), allowed)
+    if name in PLUGIN_TOOLS:
+        return str(PLUGIN_TOOLS[name].call(name, args, allowed, sys.modules[__name__]))
     if name == "version":
         info = version_info()
         if allowed is not None:  # a limited caller learns only its own project names

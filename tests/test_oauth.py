@@ -264,3 +264,21 @@ class Off(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SignInAudit(unittest.TestCase):
+    """Browser sign-ins and refusals reach the audit log through Server.on_event."""
+
+    def test_refused_and_finished_sign_ins_are_reported(self):
+        seen = []
+        srv = oauth.Server({"KB_LOGIN_URL": "http://hooks/login"}, lambda t: None)
+        srv.on_event = lambda user, action, detail: seen.append((user, action))
+        srv.clients["c1"] = {"client_name": "Claude Code"}
+        srv.txns["t1"] = {"client_id": "c1", "redirect_uri": "http://127.0.0.1:9/cb", "challenge": "x",
+                          "state": "", "exp": srv.now() + 600}
+        with mock.patch.object(oauth.kb_login, "post", side_effect=oauth.kb_login.LoginError("HTTP 401: wrong")):
+            with self.assertRaises(oauth.kb_login.LoginError):
+                srv.password_step("t1", "ann", "bad")
+        with mock.patch.object(oauth.kb_login, "post", return_value={"token": "tok"}):
+            srv.password_step("t1", "ann", "pw")
+        self.assertEqual(seen, [("ann", "sign-in refused"), ("ann", "browser sign-in")])

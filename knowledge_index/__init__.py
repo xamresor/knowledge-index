@@ -1,4 +1,4 @@
-"""knowledge-index — a read-only knowledge layer over a set of related code projects.
+"""GGRAG (package knowledge-index) — a read-only knowledge layer over a set of related code projects.
 
 This package exists so the tool can be installed with `uv tool install` / `pipx install` and get its
 commands onto `PATH`. It deliberately stays a **thin launcher**: the implementation lives in the

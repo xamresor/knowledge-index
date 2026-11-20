@@ -7,8 +7,8 @@ metadata:
 
 # Doc organization
 
-The full guide with reasons and examples is `docs/documentation-guide.md` in the knowledge-index repo
-(github.com/xamresor/knowledge-index). This skill is the checklist. Follow the repo's own docs rules
+The full guide with reasons and examples is `docs/documentation-guide.md` in the GGRAG repo
+(github.com/xamresor/ggrag). This skill is the checklist. Follow the repo's own docs rules
 first when it has them (its CLAUDE.md, AGENTS.md or `docs/README.md`); use this where they are silent.
 
 ## Before you write

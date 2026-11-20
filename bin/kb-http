@@ -74,7 +74,7 @@ SUPPORTED_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 AUTH_HINT = os.environ.get(
     "KB_AUTH_HINT",
     "Sign in through your MCP client (it opens a browser page), or get a token with bin/kb-login "
-    "(github.com/xamresor/knowledge-index) and pass it as 'Authorization: Bearer <token>'.")
+    "(github.com/xamresor/ggrag) and pass it as 'Authorization: Bearer <token>'.")
 
 
 def login_env(env: dict | None = None) -> dict:
@@ -97,6 +97,15 @@ GRAPH_JOBS = threading.BoundedSemaphore(int(os.environ.get("KB_MAX_GRAPH_JOBS", 
 DOCS_JOBS = threading.BoundedSemaphore(int(os.environ.get("KB_MAX_DOCS_JOBS", "1")))
 DOCS_TOOLS = {"search", "docs_get"}  # qmd loads a model: fewer of these at once
 NAME_FIELDS = ("name", "uname", "username", "id", "uid")
+
+
+def _audit(user: str, action: str, detail: str = "") -> None:
+    """An audit event in the usage database (admin pages, Audit). Never breaks the request."""
+    try:
+        if USAGE is not None:
+            USAGE.event(user, action, detail)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def log(msg: str) -> None:
@@ -427,6 +436,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_page(403, admin.page("KB admin", "<main><section>Form expired: reload the page.</section></main>"))
                 return
             if path == "/admin/logout":
+                _audit(admin_name(session["user"]), "admin sign-out")
                 self.sessions.drop(sid)
                 self.send_response(302)
                 for k, v in {**self._set_cookie("", 0), "Location": f"{base}/admin/login"}.items():
@@ -436,6 +446,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/admin/rebuild":
                 log(f"admin: rebuild by {admin_name(session['user'])}")
+                _audit(admin_name(session["user"]), "rebuild")
                 self._send_page(200, admin.status_page(base, session["csrf"], admin.status(self.oauth),
                                                        session["user"], admin.rebuild()))
                 return
@@ -443,6 +454,7 @@ class Handler(BaseHTTPRequestHandler):
                 cid = str(form.get("client_id", ""))
                 note = "Revoked." if self.oauth.revoke(cid) else "No such client."
                 log(f"admin: revoke {cid[:12]} by {admin_name(session['user'])}")
+                _audit(admin_name(session["user"]), "revoke client", f"{cid[:12]} {note}")
                 self._send_page(200, admin.clients_page(base, session["csrf"], self.oauth.clients, note))
                 return
             self._send(404, {"error": "not found"})
@@ -452,6 +464,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/admin/usage":
             q = {k: v[0] for k, v in urllib.parse.parse_qs(self.path.partition("?")[2]).items()}
             self._send_page(200, admin.usage_page(base, session["csrf"], USAGE, q))
+        elif path == "/admin/audit" and addons.on("audit"):
+            q = {k: v[0] for k, v in urllib.parse.parse_qs(self.path.partition("?")[2]).items()}
+            self._send_page(200, admin.audit_page(base, session["csrf"], USAGE, q))
         elif path == "/admin/clients":
             self._send_page(200, admin.clients_page(base, session["csrf"], self.oauth.clients))
         elif path == "/admin/index":
@@ -484,14 +499,17 @@ class Handler(BaseHTTPRequestHandler):
             ident = self.auth.check(f"Bearer {token}")
         except (oauth.kb_login.LoginError, AuthError) as e:
             log(f"admin: sign-in refused: {str(e)[:120]}")
+            _audit(str(form.get("username", "")) or "?", "admin sign-in refused", str(e)[:200])
             self._send_page(200, admin.login_page(base, error=str(e)))
             return
         if not admin.is_admin(ident.user, self.admins):
             log(f"admin: {admin_name(ident.user)} is not an admin")
+            _audit(admin_name(ident.user), "admin sign-in refused", "not an admin")
             self._send_page(403, admin.login_page(base, error="This account is not a KB admin."))
             return
         sid = self.sessions.create(ident.user, token)
         log(f"admin: signed in {admin_name(ident.user)}")
+        _audit(admin_name(ident.user), "admin sign-in")
         self.send_response(302)
         for k, v in {**self._set_cookie(sid, admin.SESSION_TTL), "Location": f"{base}/admin"}.items():
             self.send_header(k, v)
@@ -648,6 +666,8 @@ def make_server(host: str = HOST, port: int = PORT, auth: Authenticator | None =
 
     srv_oauth = oauth.Server(env, check, os.path.join(kb_core.KB, "logs", "oauth-clients.json")) \
         if env else None
+    if srv_oauth is not None:
+        srv_oauth.on_event = _audit
     handler = type("KbHandler", (Handler,), {"auth": auth, "oauth": srv_oauth,
                                               "admins": admin.admins() if admins is None else admins,
                                               "sessions": admin.Sessions(), "logins": admin.Logins()})
