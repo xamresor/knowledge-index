@@ -220,22 +220,23 @@ def graph_call(cmd: list[str], args: dict, allowed: set[str] | None, *terms: str
     if cmd[1] == "affected":
         extra = [x for r in AFFECTED_RELATIONS for x in ("--relation", r)]
 
-    def ask(projects: set[str] | None) -> tuple[str, dict]:
+    def ask(projects: set[str] | None, c: list[str] | None = None) -> tuple[str, dict]:
         """-> (output, how to suggest labels). The warm worker cuts the caller's view of the main
         graph in memory; without it, a filtered file per project set is written and read."""
+        c = c or cmd
         worker = warm.graph()
         if worker is not None and os.path.exists(GRAPH):
             full = projects is None or set(PROJECTS) <= set(projects)
             view = {"allowed": None if full else sorted(projects),
-                    "routes": cmd[1] in ("path", "affected", "query")}
-            out = worker.run([*cmd[1:], "--graph", GRAPH, *extra], view)  # cmd[0] is "graphify"
+                    "routes": c[1] in ("path", "affected", "query")}
+            out = worker.run([*c[1:], "--graph", GRAPH, *extra], view)  # c[0] is "graphify"
             if out is not None:
                 out = out.strip()
                 return (out[:MAX_OUT] or "(no results)"), {
                     "graph": GRAPH, "repos": None if full else set(projects),
                     "no_domain": view["routes"]}
         graph = graph_of(projects)
-        return run([*cmd, "--graph", graph, *extra]), {"graph": graph}
+        return run([*c, "--graph", graph, *extra]), {"graph": graph}
 
     projects, label, auto = scope_projects(args, allowed)
     out, where = ask(projects)
@@ -246,6 +247,22 @@ def graph_call(cmd: list[str], args: dict, allowed: set[str] | None, *terms: str
         out = _full_connections(out, projects if not (auto and "all (" in label) else allowed)
     if terms:
         out = with_suggestions(out, *terms, **where)
+    if cmd[1] in ("explain", "affected") and "EXACT labels" in out:
+        # A name defined twice (an interface and its implementation, a model method and a helper)
+        # used to stop here and cost the agent a second call. Answer for each match instead (up to 3).
+        def norm(x: str) -> str:
+            return x.strip().strip(".").removesuffix("()").lower()
+        want = norm(terms[0]) if terms else ""
+        exact = [r for r in labels(GRAPH) if norm(r[0]) == want and r[1] != "domain" and r[4]
+                 and (projects is None or r[2] in projects)]
+        parts = []
+        for lab, typ, repo, file, nid in exact[:AMBIGUOUS_MAX]:
+            sub, _ = ask(projects, [cmd[0], cmd[1], nid])
+            parts.append(f"### {lab}  ({typ}, {repo} {file})\n{sub}")
+        if parts:
+            more = f"\n\n(+{len(exact) - AMBIGUOUS_MAX} more matches: name one exactly)" if len(exact) > AMBIGUOUS_MAX else ""
+            out = (f"'{terms[0] if terms else ''}' names {len(exact)} symbols; the answer for each:\n\n"
+                   + "\n\n".join(parts) + more)
     if cmd[1] == "query":
         out = _mcp_hint(out)
     return f"[projects: {label}]\n\n{out}"
@@ -407,6 +424,7 @@ def review_context(args: dict, allowed: set[str] | None) -> str:
     return _worker(["review", payload, "--graph", GRAPH], view, "review_context")
 
 
+AMBIGUOUS_MAX = 3   # a name matching several symbols is answered for this many of them
 CODE_BUDGET, CODE_BUDGET_MAX = 1800, 8000
 # graphify's own advice names CLI options and tools this server does not have.
 _CLI_HINT = re.compile(r"Narrow with context_filter=\[[^\]]*\] or use get_node for a specific symbol")
@@ -732,8 +750,8 @@ def warm_qmd() -> None:
 _LABELS: dict[str, tuple[float, list[tuple[str, str, str, str]]]] = {}
 
 
-def labels(graph: str | None = None) -> list[tuple[str, str, str, str]]:
-    """Node labels (label, type, repo, source_file) of one graph file, cached by mtime, so an
+def labels(graph: str | None = None) -> list[tuple[str, str, str, str, str]]:
+    """Node labels (label, type, repo, source_file, id) of one graph file, cached by mtime, so an
     ambiguous graphify match can suggest exact labels. A filtered graph has its own cache entry."""
     graph = graph or GRAPH
     try:
@@ -747,7 +765,7 @@ def labels(graph: str | None = None) -> list[tuple[str, str, str, str]]:
         with open(graph, encoding="utf-8") as f:
             nodes = json.load(f).get("nodes", [])
         rows = [(n.get("label", ""), n.get("type", ""), n.get("repo", ""),
-                 n.get("source_file", "")) for n in nodes if n.get("label")]
+                 n.get("source_file", ""), n.get("id", "")) for n in nodes if n.get("label")]
     except Exception:  # noqa: BLE001
         rows = []
     _LABELS[graph] = (mtime, rows)
@@ -774,7 +792,7 @@ def suggest(term: str, limit: int = 20, graph: str | None = None, repos: set[str
     if not hits:
         return ""
 
-    def rank(row: tuple[str, str, str, str]) -> tuple[int, int]:
+    def rank(row: tuple) -> tuple[int, int]:
         label = row[0].lower()
         if label == t:
             return (0, len(label))
@@ -789,7 +807,7 @@ def suggest(term: str, limit: int = 20, graph: str | None = None, repos: set[str
             seen.add(row[0])
             uniq.append(row)
     lines = []
-    for label, typ, repo, src in uniq[:limit]:
+    for label, typ, repo, src, _id in uniq[:limit]:
         meta = " ".join(p for p in (typ, repo, src) if p)
         lines.append(f"  {label}" + (f"  [{meta}]" if meta else ""))
     more = f"\n(+{len(uniq) - limit} more — refine the term)" if len(uniq) > limit else ""

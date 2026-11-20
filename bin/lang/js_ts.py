@@ -41,6 +41,12 @@ CALL_RE = re.compile(r"\bapi\.(" + "|".join(VERBS) + r")\(\s*[`'\"]([^`'\"]+)", 
 #: A TypeScript type argument may sit between the name and the call: $api<Page<Item>>('v2/items').
 WRAPPER_RE = re.compile(
     r"(?<![\w.])(\$api|apiFetch|apiUpload|apiDownload|fetch)(?:<.*?>)?\(\s*[`'\"]([^`'\"]+)")
+#: The same two shapes with the URL on the next line, as Prettier writes a long call:
+#:   const data = await apiFetch<ReservationActionResponse>(
+#:     `/auth/reservations/${id}/dispute`,
+WRAPPER_OPEN_RE = re.compile(r"(?<![\w.])(\$api|apiFetch|apiUpload|apiDownload|fetch)(?:<.*?>)?\(\s*$")
+CALL_OPEN_RE = re.compile(r"\bapi\.(" + "|".join(VERBS) + r")(?:<.*?>)?\(\s*$", re.IGNORECASE)
+URL_ARG_RE = re.compile(r"^\s*[`'\"]([^`'\"]+)[`'\"]")
 METHOD_RE = re.compile(r"\bmethod\s*:\s*['\"](" + "|".join(VERBS) + r")['\"]", re.IGNORECASE)
 #: A versioned API path handed to any other function — a list or export composable, a store helper:
 #:   usePaginatedList(() => `v2/customers/${id}/drivers`, {…})     exportTable(`v2/…/export`, {…})
@@ -69,6 +75,14 @@ def iter_calls(lines: list[str]):
             if name == "fetch" and not raw.startswith("${"):
                 continue
             yield i, _verb(line[match.end():], lines, i), raw
+        if i < len(lines):
+            nxt = URL_ARG_RE.match(lines[i])
+            opened = WRAPPER_OPEN_RE.search(line) if nxt else None
+            dotted = CALL_OPEN_RE.search(line) if nxt else None
+            if dotted:
+                yield i, dotted.group(1).lower(), nxt.group(1)
+            elif opened and not (opened.group(1) == "fetch" and not nxt.group(1).startswith("${")):
+                yield i, _verb(lines[i][nxt.end():], lines, i + 1), nxt.group(1)
         for name, raw, end in _versioned(line, lines, i):
             if name not in NOT_A_CLIENT:
                 yield i, _verb(line[end:], lines, i), raw

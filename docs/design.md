@@ -50,21 +50,22 @@ Facts below were checked in **July 2026**; licences and pricing move, so verify 
 ### Graph vs grep, measured (2026-11-20)
 
 `bench/graph_vs_grep.py` asks the same questions twice, retrieval only: one KB tool call, one grep with the
-obvious keyword. On one Laravel + Next.js project, 8 questions (frontend caller of a route, controller of a
+obvious keyword (one per step for a chain). On one Laravel + Next.js project, 10 questions, two of them chains
+(a frontend function to the payment service; a service to the screens that reach it) (frontend caller of a route, controller of a
 route, users of a class, users of a method, screens behind a route, where objects are created, where an env
 key is read, a first look at the API):
 
 | | found the expected files | text the agent reads | extra searches |
 |---|---|---|---|
-| KB | 69% | ~5,000 chars per answer | 0 |
-| grep | 94% | ~175,000 chars per answer | 1.2 on average (a frontend URL -> route table -> controller) |
+| KB | 100% (was 69% before the fixes below) | ~5,300 chars per answer | 0 |
+| grep | 95% | ~174,000 chars per answer | 1.5 on average (a frontend URL -> route table -> controller) |
 
-So the radar's caution holds here too: grep finds more, the graph answers in a fraction of the text. The
-misses are three kinds, each with a fix on the roadmap: a method called on a typed variable
-(`$order->totalDue()`) is not linked by the AST graph (SCIP would link it); a name defined twice
-(interface and implementation) asks the agent to pick one; a frontend URL built at run time
-(`/orders/${id}/${action}`) cannot be matched to a route. Run it on your own code before you trust
-either number.
+The first run found 69% for the KB, and each miss was a graph gap that is now fixed: a method called on a
+typed variable (`$order->totalDue()`, now linked from parameter and property types), a name defined twice
+(now answered for each match), a frontend call whose URL Prettier moved to the next line (now read), and
+a call linked from its file instead of its function (now from the function). The same person wrote the
+questions and the fixes, so treat 100% as "these gaps are closed", not as a measured hit rate: run it on
+your own code with questions written before looking at the answers.
 
 ### Non-goals (decided, not pending)
 

@@ -74,6 +74,21 @@ class IterCalls(unittest.TestCase):
         self.assertEqual(calls("myfetch(`${API_BASE}/x`)"), [])
 
 
+class UrlOnTheNextLine(unittest.TestCase):
+    """Prettier puts a long call's URL on the next line: before 2026-11-20 those were not seen."""
+
+    def test_wrapper_with_type_argument_and_method_below(self):
+        src = ("  const data = await apiFetch<ReservationActionResponse>(\n"
+               "    `/auth/reservations/${encodeURIComponent(id)}/dispute`,\n"
+               "    {\n      method: 'POST',\n")
+        self.assertEqual(calls(src), [("post", "/auth/reservations/${encodeURIComponent(id)}/dispute")])
+
+    def test_dotted_client_and_plain_fetch(self):
+        self.assertEqual(calls("api.patch(\n  '/v1/orders/1',\n  body)"), [("patch", "/v1/orders/1")])
+        self.assertEqual(calls("fetch(\n  '/static/a.json')"), [])            # not a base-URL template
+        self.assertEqual(calls("fetch(\n  `${API}/orders`)"), [("get", "${API}/orders")])
+
+
 class NormPath(unittest.TestCase):
     def test_strip_leading_base_url_interpolation(self):
         self.assertEqual(lh.norm_path("${API_BASE}/categories"), "categories")
@@ -194,3 +209,47 @@ class LoadRoutes(unittest.TestCase):
         self.addCleanup(os.unlink, fh.name)
         self.assertEqual(lh.load_routes(fh.name),
                          {("get", "api/orders"): ("Http/Controllers/OrderController.php", "index")})
+
+
+class CallSourceIsTheFunction(unittest.TestCase):
+    """A frontend call is linked from its enclosing function, not from the whole file (2026-11-20):
+    with the file as source, every function of an API module shared all of the module's routes."""
+
+    def test_each_function_gets_its_own_route(self):
+        import json
+        import os
+        import subprocess
+        import sys
+        import tempfile
+        from _kbtest import BIN
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "web", "src")
+            os.makedirs(src)
+            with open(os.path.join(src, "api.ts"), "w") as f:
+                f.write("export function createOrder() {\n  return apiFetch(`/orders`, { method: 'POST' });\n}\n"
+                        "export function listOrders() {\n  return apiFetch(`/orders`);\n}\n")
+            g = {"directed": False, "multigraph": False, "graph": {}, "links": [], "nodes": [
+                {"id": "api::ctl", "label": "OrderController", "repo": "api", "type": "class",
+                 "source_file": "app/Http/Controllers/OrderController.php", "source_location": "L5"},
+                {"id": "api::store", "label": ".store()", "repo": "api", "type": "method",
+                 "source_file": "app/Http/Controllers/OrderController.php", "source_location": "L9"},
+                {"id": "api::index", "label": ".index()", "repo": "api", "type": "method",
+                 "source_file": "app/Http/Controllers/OrderController.php", "source_location": "L14"},
+                {"id": "web::file", "label": "api.ts", "repo": "web", "type": "file",
+                 "source_file": "src/api.ts", "source_location": "L1"},
+                {"id": "web::create", "label": "createOrder()", "repo": "web", "type": "symbol",
+                 "source_file": "src/api.ts", "source_location": "L1"},
+                {"id": "web::list", "label": "listOrders()", "repo": "web", "type": "symbol",
+                 "source_file": "src/api.ts", "source_location": "L4"}]}
+            gp, rp = os.path.join(d, "graph.json"), os.path.join(d, "routes.json")
+            with open(gp, "w") as f:
+                json.dump(g, f)
+            with open(rp, "w") as f:
+                json.dump([{"method": "POST", "uri": "orders", "action": "App\\Http\\Controllers\\OrderController@store"},
+                           {"method": "GET|HEAD", "uri": "orders", "action": "App\\Http\\Controllers\\OrderController@index"}], f)
+            p = subprocess.run([sys.executable, os.path.join(BIN, "link_http.py"), gp, rp, "api", src],
+                               capture_output=True, text=True)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            with open(gp) as f:
+                edges = {(e["source"], e["target"]) for e in json.load(f)["links"] if e.get("relation") == "http_request"}
+        self.assertEqual(edges, {("web::create", "api::store"), ("web::list", "api::index")})

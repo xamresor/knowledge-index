@@ -149,7 +149,24 @@ def main() -> int:
                 return nid
         return None
 
-    def fe_node_for(rel: str):
+    # A frontend call's source is its enclosing function (the function node with the latest start line
+    # not after the call), else the file. Linking the file made every function of an API module share
+    # all of its routes, so a path from one function could leave through another function's route.
+    fe_funcs: dict[str, list[tuple[int, str]]] = {}
+    for n in graph.nodes(g):
+        sf = (n.get("source_file") or "").lstrip("/")
+        loc = str(n.get("source_location") or "")
+        if (n.get("repo") != target_repo and sf.endswith(lang.FRONTEND) and loc.startswith("L")
+                and str(n.get("label", "")).endswith("()") and loc[1:].isdigit()):
+            fe_funcs.setdefault(sf, []).append((int(loc[1:]), n["id"]))
+
+    def fe_node_for(rel: str, line: int = 0):
+        if line:
+            for sf, funcs in fe_funcs.items():
+                if sf.endswith(rel) or rel.endswith(sf):
+                    before = [f for f in funcs if f[0] <= line]
+                    if before:
+                        return max(before)[1]
         for n in fe_nodes:
             sf = n["source_file"].lstrip("/")
             if sf.endswith(rel) or rel.endswith(sf):
@@ -178,10 +195,8 @@ def main() -> int:
                     calls = list(php_laravel.iter_backend_calls(text))
                 else:
                     calls = list(iter_calls(text.splitlines()))
-                    src_node = fe_node_for(rel)
                 for i, verb, raw in calls:
-                    if backend:
-                        src_node = php_node_for(rel, i)
+                    src_node = php_node_for(rel, i) if backend else fe_node_for(rel, i)
                     ap = match_route(routes, verb, norm_path(raw))
                     if not ap:
                         unmatched += 1

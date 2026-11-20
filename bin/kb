@@ -223,6 +223,8 @@ build_graph() {
   "$PY" "$KB/bin/enrich.py" "$OUT/graph.json" "$KB_DATA/repos"
   echo "==> Adding data-layer links (eloquent model rels, FK table->table, SQL code->table)"
   "$PY" "$KB/bin/link_data.py" "$OUT/graph.json" "$KB_DATA/repos"
+  echo "==> Linking PHP calls through typed variables and properties"
+  "$PY" "$KB/bin/link_php_calls.py" "$OUT/graph.json" "$KB_DATA/repos"
   # Docs as graph nodes (bin/lang/markdown.py): [[wikilink]] and relative links are EXTRACTED edges,
   # a bare symbol mention is INFERRED and capped. Runs after the code plugins — it points at their nodes.
   if [ "${#doc_roots[@]}" -gt 0 ]; then

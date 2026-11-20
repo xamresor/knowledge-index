@@ -211,7 +211,9 @@ def analyze(graph: dict, changes: dict[str, set[int]], routes: list[dict] | None
             # one class per file in Laravel: the controller is the file's name
             stem = str(n.get("source_file") or "").rsplit("/", 1)[-1].split(".", 1)[0]
             hit_method = meth and label.strip(".").rstrip("()") == meth and stem == short
-            hit_class = not meth and label == short
+            # the controller class itself depends on the change (constructor injection, a property, a
+            # parent): every action of it does
+            hit_class = label == short and n.get("type") in CONTAINER_TYPES
             if hit_method or hit_class:
                 route_hits.append((r, "changed" if nid in seeds else "depends on the change"))
                 break

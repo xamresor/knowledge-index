@@ -14,6 +14,8 @@ keyword, scored by
 Questions live in a JSON file outside git (they name your code):
   [{"id": "...", "question": "...", "kb": {"tool": "contracts_search", "args": {...}},
     "grep": {"pattern": "...", "root": "/path/to/checkout", "hops": 1}, "gold": ["path/part", ...]}]
+A chain question (A -> route -> controller -> service) lists one grep per step as "patterns"; the agent reads
+all their outputs, and "hops" defaults to their number.
 
   python3 bench/graph_vs_grep.py bench/local/questions.json
 """
@@ -54,9 +56,11 @@ def main(path: str) -> int:
         t = time.monotonic()
         k = kb_answer(q["kb"]["tool"], q["kb"].get("args", {}))
         kt = time.monotonic() - t
-        g = grep_answer(q["grep"]["pattern"], q["grep"]["root"])
+        # a chain question needs several greps, one per step: their outputs add up
+        pats = q["grep"].get("patterns") or [q["grep"]["pattern"]]
+        g = "\n".join(grep_answer(p, q["grep"]["root"]) for p in pats)
         rows.append((q["id"], recall(k, q["gold"]), len(k), kt, recall(g, q["gold"]), len(g),
-                     q["grep"].get("hops", 1)))
+                     q["grep"].get("hops", len(pats))))
     print(f"{'question':<28} {'kb recall':>9} {'kb chars':>9} {'kb s':>6}   {'grep recall':>11} {'grep chars':>10} {'hops':>4}")
     for r in rows:
         print(f"{r[0]:<28} {r[1]:>9.2f} {r[2]:>9} {r[3]:>6.2f}   {r[4]:>11.2f} {r[5]:>10} {r[6]:>4}")

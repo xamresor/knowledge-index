@@ -14,6 +14,25 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+## [0.14.1] — 2026-11-20
+
+- **Fixed: a frontend call is linked from its enclosing function**, not from the whole file. With the file
+  as the source, every function of an API module shared all its routes: `graph_routes` from one function
+  could leave through another function's route, and `review_context` listed every importer of the module
+  instead of the screens that call the changed route.
+- **Fixed: `review_context` counts a controller whose class depends on the change** (constructor
+  injection, a property) for all its routes, not only the actions that call it directly.
+- **Fixed: frontend calls whose URL is on the next line** (`apiFetch<T>(` then the URL, as Prettier writes
+  a long call) were not seen. On the author's Next.js app: 69 -> 111 linked calls.
+- **Added: PHP calls through typed variables and properties** (`bin/link_php_calls.py`): `Rental $rental`
+  then `$rental->total()`, or a promoted `private Payouts $payouts` then `$this->payouts->book()`, become
+  INFERRED `calls` edges. 179 new edges on the author's Laravel app.
+- **`graph_explain` / `graph_affected` on a name defined several times** answer for each match (up to
+  3) instead of asking the agent to pick one.
+- Benchmark questions can be chains (one grep per step). After these fixes, on the author's 10 questions:
+  KB 100% of the expected files, grep 95%, with ~33x less text from the KB. The questions were written
+  by the same person who fixed the misses they showed: a fresh set is needed before trusting 100%.
+
 ## [0.14.0] — 2026-11-20
 
 - **Changed: README intro** — what the KB is in one paragraph: one search over related projects and their docs.
