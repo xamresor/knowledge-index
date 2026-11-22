@@ -277,6 +277,20 @@ Not aspirations — these are the properties the code already has, kept explicit
   `endswith`, drop the shortest-suffix sort — and confirm the suite *fails* on
   each (every mutant killed). Keep it dependency-light (a small stdlib harness +
   `make mutation`) or wire up `mutmut` in a venv.
+- [ ] **An "is this enough?" check and an honest refusal for `search`.** Today `search` always returns
+  the nearest hits, also when nothing fits. Grade the result; on a low grade drop it and either run a
+  fallback search or answer "not found". Report a third number beside recall and precision: the share
+  of confident wrong answers. No query rewriting here: LLM expansion was switched off for these
+  searches because it added noise.
+- [ ] **A data dictionary over the tables the graph already knows (add-on).** Tables come from the PHP
+  source (`Schema::create`, `DB::table`); `.sql` is still not parsed. Give a table node its meaning:
+  the grain (what one row stands for), which columns may be summed, the business term for it. The
+  source is a small hand-written file per project, like `aliases.toml`. Then the KB answers "which
+  table holds revenue per customer", not only "where is this table in the code". Check before
+  building more: 20 questions about data, before and after; keep it only if the answers get better.
+- [ ] **Golden-set questions from the team's real use.** The current set was written by the author.
+  Ten or so questions that developers really asked, each with the expected answer, show where the KB
+  misses in daily work.
 
 ## Footprint
 
