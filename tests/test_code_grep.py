@@ -19,7 +19,9 @@ class CodeGrep(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         for proj, rel, text in (("api", "config/billing.php", "'key' => env('BILLING_SECRET'),\n"),
                                 ("api", "graphify-out/cache.php", "BILLING_SECRET in a cache\n"),
-                                ("web", "src/pay.ts", "const k = 'BILLING_SECRET';\n")):
+                                ("web", "src/pay.ts", "const k = 'BILLING_SECRET';\n"),
+                                ("web", "src/stores/SOSAlarm.js", "export const useSOSAlarmStore = 1;\n"),
+                                ("api", "bootstrap/cache/routes-v7.php", "BILLING_SECRET route cache\n")):
             p = os.path.join(self.tmp.name, "repos", proj, rel)
             os.makedirs(os.path.dirname(p), exist_ok=True)
             with open(p, "w") as f:
@@ -31,6 +33,20 @@ class CodeGrep(unittest.TestCase):
 
     def grep(self, allowed=None, **args):
         return kb_core.call_tool("code_grep", args, allowed)
+
+    def test_a_path_glob_works_with_and_without_ripgrep(self):
+        for rg in ("/usr/bin/rg", None):
+            if rg and not shutil.which("rg"):
+                continue
+            with mock.patch.object(kb_core.shutil, "which", lambda name, _r=rg: _r):
+                out = self.grep(pattern="SOS|sos_alarm", glob="src/stores/*")
+                self.assertIn("web:src/stores/SOSAlarm.js:1:", out, rg)
+                self.assertIn("(no matches)", self.grep(pattern="SOS", glob="lib/*"))
+
+    def test_generated_laravel_caches_are_skipped(self):
+        for rg in (shutil.which("rg"), None):
+            with mock.patch.object(kb_core.shutil, "which", lambda name, _r=rg: _r):
+                self.assertNotIn("bootstrap/cache", self.grep(pattern="BILLING_SECRET"))
 
     def test_finds_text_in_every_visible_project(self):
         out = self.grep(pattern="BILLING_[A-Z]+")

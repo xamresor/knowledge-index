@@ -430,7 +430,7 @@ addon() {
 
 case "${1:-build}" in
   --version|-V|version)
-          echo "GGRAG (knowledge-index) $KB_VERSION"
+          echo "knowledge-index $KB_VERSION"
           echo "  graphify: $(graphify --version 2>/dev/null || echo 'not found')"
           echo "  qmd:      $(qmd --version 2>/dev/null || echo 'not found')"
           "$PY" "$KB/bin/paths.py" | sed 's/^/  /'

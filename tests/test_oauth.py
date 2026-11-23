@@ -282,3 +282,33 @@ class SignInAudit(unittest.TestCase):
         with mock.patch.object(oauth.kb_login, "post", return_value={"token": "tok"}):
             srv.password_step("t1", "ann", "pw")
         self.assertEqual(seen, [("ann", "sign-in refused"), ("ann", "browser sign-in")])
+
+
+class ClientUsers(unittest.TestCase):
+    """The admin clients page shows who signed in through each client."""
+
+    def test_sign_in_and_refresh_note_the_user(self):
+        import tempfile as tf
+        d = tf.mkdtemp()
+        clock = [1000.0]
+        path = os.path.join(d, "clients.json")
+        srv = oauth.Server({"KB_LOGIN_URL": "http://hooks/login"}, lambda t: None, path, now=lambda: clock[0])
+        srv.clients["c1"] = {"client_name": "Claude Code"}
+        srv.txns["t1"] = {"client_id": "c1", "redirect_uri": "http://127.0.0.1:9/cb", "challenge": "x",
+                          "state": "", "exp": clock[0] + 600}
+        with mock.patch.object(oauth.kb_login, "post", return_value={"token": "tok"}):
+            srv.password_step("t1", "ann", "pw")
+        self.assertEqual(srv.clients["c1"]["users"], {"ann": 1000})
+        code = next(iter(srv.codes))
+        verifier = "v" * 43
+        srv.codes[code]["challenge"] = oauth.b64url_sha256(verifier)
+        rt = srv.token({"grant_type": "authorization_code", "code": code, "code_verifier": verifier,
+                        "redirect_uri": "http://127.0.0.1:9/cb"})["refresh_token"]
+        clock[0] = 2000.0
+        srv.token({"grant_type": "refresh_token", "refresh_token": rt})
+        self.assertEqual(srv.clients["c1"]["users"], {"ann": 2000})
+        again = oauth.Server({}, lambda t: None, path)
+        self.assertEqual(again.clients["c1"]["users"], {"ann": 2000})
+        import admin
+        self.assertIn("ann", admin.client_users(again.clients["c1"]))
+        self.assertEqual(admin.client_users({}), "—")

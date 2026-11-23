@@ -508,6 +508,8 @@ class ProblemTests(unittest.TestCase):
         self.assertNotIn("[fe]", out)
         self.assertEqual(contracts.problems("", {"other"}, self.path), "(no problems in your projects)")
         self.assertIn("Problems: fe/unknown-route 1", contracts.problems("unknown-route", None, self.path))
+        self.assertIn("Problems: fe/unknown-route 1", contracts.problems("fe/unknown-route", None, self.path))
+        self.assertEqual(contracts.problems("api/unknown-route", None, self.path), "(no problems)")
 
 
 class UsageTests(unittest.TestCase):
@@ -530,6 +532,17 @@ class UsageTests(unittest.TestCase):
         self.assertIn("2  UserController", public)
         self.assertNotIn("ann", public)
         self.assertIn("ann: 2 (connections 1, graph_explain 1)", u.report(with_users=True))
+
+    def test_mcp_report_shows_only_own_arguments(self):
+        u = kb_http.Usage(self.path, flush_every=3600)
+        u.record("search", "ann", {"q": "ann secret query"}, True, 0.1)
+        u.record("search", "bob", {"q": "bob private query"}, True, 0.1)
+        mine = u.report(with_users=False, only_user="ann")
+        self.assertIn("search                 2", mine)          # totals stay shared
+        self.assertIn("ann secret query", mine)
+        self.assertNotIn("bob private query", mine)
+        self.assertIn("Your top search arguments:", mine)
+        self.assertNotIn("query", u.report(with_users=False, only_user="carol"))
 
     def test_saved_and_reloaded(self):
         u = kb_http.Usage(self.path, flush_every=0)  # every call saves

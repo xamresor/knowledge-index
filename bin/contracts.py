@@ -392,7 +392,10 @@ def problems(project: str, allowed: set[str] | None, path: str | None = None) ->
     if allowed is not None:
         rows = [r for r in rows if r["project"] in allowed]
     p = project.strip().lower()
-    if p:
+    if "/" in p:      # "api/missing-contract", the form the summary line prints
+        proj, _, kind = p.partition("/")
+        rows = [r for r in rows if r["project"] == proj and r["kind"] == kind]
+    elif p:
         rows = [r for r in rows if r["project"] == p or r["kind"] == p]
     if not rows:
         return "(no problems" + (" in your projects)" if allowed is not None else ")")

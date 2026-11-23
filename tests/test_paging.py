@@ -75,6 +75,19 @@ class Paginate(unittest.TestCase):
                 with self.assertRaises(kb_core.ToolError):
                     kb_core.call_tool(tool, {"cursor": token, "page": 2}, projects, who)
 
+    def test_cursor_alone_walks_the_pages_with_a_frozen_size(self):
+        with mock.patch.object(kb_core, "_index", lambda fn, *a: "\n".join("row %d" % i for i in range(3000))):
+            first = kb_core.call_tool("contracts_search", {"query": "x", "page_length": 5000}, {"api"}, "ann")
+            token = re.search(r'cursor: "([^"]+)"', first).group(1)
+            total = re.search(r"page 1 of (\d+)", first).group(1)
+            p2 = kb_core.call_tool("contracts_search", {"cursor": token}, {"api"}, "ann")
+            self.assertIn(f"[page 2 of {total}", p2)
+            p3 = kb_core.call_tool("contracts_search", {"cursor": token, "page_length": 1000}, {"api"}, "ann")
+            self.assertIn(f"[page 3 of {total}", p3)   # page_length cannot re-cut an answer behind a cursor
+            back = kb_core.call_tool("contracts_search", {"cursor": token, "page": 1}, {"api"}, "ann")
+            self.assertIn(f"[page 1 of {total}", back)
+            self.assertIn(f"[page 2 of {total}", kb_core.call_tool("contracts_search", {"cursor": token}, {"api"}, "ann"))
+
     def test_cursor_expires(self):
         store = kb_core.Cursors(ttl=0.0, cap=10)
         token = store.put("x", "search", (None, None))

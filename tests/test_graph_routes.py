@@ -113,6 +113,18 @@ class _Stubbed(_Sandbox):
         self.assertEqual(len(self.calls), 1)
         return self.calls[0]
 
+    def view_given_to_path(self, args: dict, allowed=None) -> dict:
+        """graph_path runs bin/routes.py (k=1) on a view of the main graph: the view is the access cut."""
+        seen = []
+        with mock.patch.object(kb_core.warm, "graph", lambda: None), \
+                mock.patch.object(kb_core.warm, "graph_once", lambda argv, view: seen.append((argv, view)) or "Path 1"):
+            kb_core.call_tool("graph_path", args, allowed)
+        self.assertEqual(len(seen), 1)
+        argv, view = seen[0]
+        self.assertEqual(argv[0], "routes")
+        self.assertEqual(json.loads(argv[1])["k"], 1)
+        return view
+
     @staticmethod
     def ids(g: dict) -> set[str]:
         return {n["id"] for n in g["nodes"]}
@@ -129,12 +141,8 @@ class AccessGuards(_Stubbed):
     """Must pass before and after the path fix."""
 
     def test_limited_caller_path_graph_has_no_hidden_project(self):
-        _, g = self.graph_given_to("graph_path", PATH_ARGS, {"web"})
-        self.assertNotIn("admin::Secret", self.ids(g))
-        self.assertNotIn("api::UserRepo", self.ids(g))      # api internals stay hidden
-        self.assertIn("api::LoginCtl", self.ids(g))         # the called endpoint is the contract
-        for e in g["links"]:
-            self.assertNotIn("admin::Secret", (e["source"], e["target"]))
+        view = self.view_given_to_path(PATH_ARGS, {"web"})
+        self.assertEqual(view, {"allowed": ["web"], "routes": True})
 
     def test_limited_caller_affected_and_explain_have_no_hidden_project(self):
         for tool in ("graph_affected", "graph_explain"):
@@ -146,8 +154,8 @@ class AccessGuards(_Stubbed):
             kb_core.call_tool("graph_path", {**PATH_ARGS, "project": "admin"}, {"web"})
 
     def test_project_argument_narrows_a_full_caller(self):
-        _, g = self.graph_given_to("graph_path", {**PATH_ARGS, "project": "web"}, None)
-        self.assertNotIn("admin::Secret", self.ids(g))
+        view = self.view_given_to_path({**PATH_ARGS, "project": "web"}, None)
+        self.assertEqual(view["allowed"], ["web"])
 
     def test_main_graph_file_is_never_rewritten(self):
         before = self.digest()
@@ -166,7 +174,7 @@ class AccessGuards(_Stubbed):
 
     def test_real_relations_survive_in_the_path_graph(self):
         for allowed in (None, {"api", "web"}):
-            _, g = self.graph_given_to("graph_path", PATH_ARGS, allowed)
+            _, g = self.graph_given_to("graph_affected", {"symbol": "LoginCtl"}, allowed)
             self.assertTrue({"calls", "http_request", "imports"} <= self.relations(g))
 
 
@@ -174,12 +182,10 @@ class PathTargets(_Stubbed):
     """Bug 1: path search must not walk `in_domain`."""
 
     def test_full_caller_path_graph_has_no_domain_edges(self):
-        _, g = self.graph_given_to("graph_path", PATH_ARGS, None)
-        self.assertNotIn("in_domain", self.relations(g))
+        self.assertTrue(self.view_given_to_path(PATH_ARGS, None)["routes"])   # routes view = no anchors
 
     def test_limited_caller_path_graph_has_no_domain_edges(self):
-        _, g = self.graph_given_to("graph_path", PATH_ARGS, {"web"})
-        self.assertNotIn("in_domain", self.relations(g))
+        self.assertTrue(self.view_given_to_path(PATH_ARGS, {"web"})["routes"])
 
 
 class AffectedTargets(_Stubbed):
@@ -216,7 +222,7 @@ class RealGraphify(_Sandbox):
 
     def test_connected_symbols_get_a_path(self):
         out = self.ask("graph_path", {"from": "LoginPage", "to": "UserRepo"})
-        self.assertIn("Shortest path", out)
+        self.assertIn("Path 1:", out)
 
     def test_path_is_the_call_chain_not_the_domain_shortcut(self):
         """Both routes are 3 hops; the one through the domain anchor used to win."""
@@ -236,7 +242,7 @@ class RealGraphify(_Sandbox):
 
     def test_same_domain_only_is_not_a_path(self):
         out = self.ask("graph_path", {"from": "Report", "to": "Mailer"})
-        self.assertIn("No path found", out)
+        self.assertNotIn("Path 1:", out)          # a domain anchor is no node of a path
 
     def test_affected_lists_the_frontend_caller(self):
         self.assertIn("LoginPage", self.ask("graph_affected", {"symbol": "LoginCtl"}))

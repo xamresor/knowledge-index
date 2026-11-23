@@ -358,9 +358,18 @@ def audit_page(base: str, csrf: str, usage, query: dict | None = None) -> bytes:
     return page("KB admin · audit", body, base, "Audit", csrf)
 
 
+def client_users(c: dict) -> str:
+    """Who signed in through a client, newest first, with the time of the last sign-in or refresh."""
+    users = c.get("users") or {}
+    if not users:
+        return "—"
+    return "<br>".join(f"{esc(u)} <small>({esc(time.strftime('%Y-%m-%d %H:%M', time.localtime(t)))})</small>"
+                       for u, t in sorted(users.items(), key=lambda kv: -kv[1]))
+
+
 def clients_page(base: str, csrf: str, clients: dict, note: str = "") -> bytes:
     rows = "".join(
-        f"<tr><td>{esc(c.get('client_name') or '—')}</td><td><code>{esc(cid)}</code></td>"
+        f"<tr><td>{esc(c.get('client_name') or '—')}</td><td>{client_users(c)}</td><td><code>{esc(cid)}</code></td>"
         f"<td>{esc(time.strftime('%Y-%m-%d %H:%M', time.localtime(c.get('client_id_issued_at', 0))))}</td>"
         f"<td>{esc(', '.join(c.get('redirect_uris', [])))}</td>"
         f'<td><form method="post" action="{base}/admin/clients/revoke"><input type="hidden" name="csrf" '
@@ -368,10 +377,10 @@ def clients_page(base: str, csrf: str, clients: dict, note: str = "") -> bytes:
         f'<button>Revoke</button></form></td></tr>'
         for cid, c in sorted(clients.items(), key=lambda kv: -kv[1].get("client_id_issued_at", 0)))
     body = (f'<main>{f"<div class=note>{esc(note)}</div>" if note else ""}<section class=panel><h2>Sign-in clients</h2><div class=body>'
-            f'<p>MCP clients that registered for the browser sign-in. Revoking one ends its refresh tokens: '
+            f'<p>MCP clients that registered for the browser sign-in, with who signed in through each and when. Revoking one ends its refresh tokens: '
             f'it has to sign in again. A token it already holds lives until the API ends it.</p>'
-            f'<table><tr><th>Name</th><th>Client id</th><th>Registered</th><th>Redirect</th><th></th></tr>'
-            f'{rows or "<tr><td colspan=5>none</td></tr>"}</table></div></section></main>')
+            f'<table><tr><th>Name</th><th>Users</th><th>Client id</th><th>Registered</th><th>Redirect</th><th></th></tr>'
+            f'{rows or "<tr><td colspan=6>none</td></tr>"}</table></div></section></main>')
     return page("KB admin · clients", body, base, "Clients", csrf)
 
 

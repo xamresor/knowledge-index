@@ -40,7 +40,8 @@ Environment:
   KB_DOCS_MODE (light|full|bm25), KB_CONTRACT_EDGES (1|0): see kb_core.py / access.py
   KB_USAGE_FILE (<data>/logs/usage.json)   tool usage counters, saved every 30 s
 
-`kb-http usage` prints the usage report with user names; the MCP tool `usage` shows it without them.
+`kb-http usage` prints the usage report with user names; the MCP tool `usage` shows the totals and only
+the caller's own arguments.
 """
 from __future__ import annotations
 
@@ -74,7 +75,7 @@ SUPPORTED_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 AUTH_HINT = os.environ.get(
     "KB_AUTH_HINT",
     "Sign in through your MCP client (it opens a browser page), or get a token with bin/kb-login "
-    "(github.com/xamresor/ggrag) and pass it as 'Authorization: Bearer <token>'.")
+    "(github.com/xamresor/knowledge-index) and pass it as 'Authorization: Bearer <token>'.")
 
 
 def login_env(env: dict | None = None) -> dict:
@@ -222,9 +223,9 @@ class Authenticator:
 
 USAGE: Usage | None = None  # set by make_server()
 
-USAGE_TOOL = {"name": "usage", "description": "How the KB is used: calls per tool, per day, and "
-              "the most frequent arguments (the symbols, queries and services people ask about "
-              "most). No user names.",
+USAGE_TOOL = {"name": "usage", "description": "How the KB is used: calls per tool and per day for "
+              "everyone, and your own most frequent arguments. Never shows what other people asked, "
+              "and no user names.",
               "inputSchema": {"type": "object", "properties": {}}}
 
 
@@ -280,7 +281,7 @@ def handle_message(msg: dict, ident: Identity) -> dict | None:
             return rpc_error(mid, -32602, "params must be an object")
         name, args = params.get("name", ""), params.get("arguments") or {}
         if name == USAGE_TOOL["name"]:
-            text = USAGE.report(with_users=False) if USAGE else "(usage counting is off)"
+            text = USAGE.report(with_users=False, only_user=ident.name) if USAGE else "(usage counting is off)"
             return rpc_result(mid, {"content": [{"type": "text", "text": text}], "isError": False})
         if name not in kb_core.TOOLS_BY_NAME:
             return rpc_error(mid, -32602, f"unknown tool: {name}")

@@ -1,25 +1,13 @@
 <img width="1469" height="842" alt="Screenshot from 2026-07-09 22-06-41" src="https://github.com/user-attachments/assets/88c10be3-36cc-4173-b298-07163019cf17" />
-# GGRAG: graph-grounded RAG for code
+# Knowledge Index — GraphRAG for code
+
+**Documentation: [knowledge-index.sereda.lv](https://knowledge-index.sereda.lv)** — getting started, every setting, the shared server.
 
 **One search over several related code projects and their docs, for AI agents.** In a few minutes it builds a
 map of the projects (for example a Laravel API and its Vue or React frontends) and answers what depends on
 what, which screen calls which route, how to get from A to B across repositories, and what a pull request
 touches. It keeps the map current within seconds of each commit. Agents ask it over MCP. Everything runs on
 your machine, no API keys.
-
-### The name
-
-GGRAG is **G**raph-**G**rounded **R**etrieval-**A**ugmented **G**eneration:
-
-- **Graph**: a code graph across the repositories. Classes, methods, routes and docs are nodes; calls,
-  imports and HTTP requests are edges, and every frontend API call is linked to the controller that serves it.
-- **Grounded**: the agent's answer rests on that graph. It follows real edges: who calls this, what breaks
-  if it changes, which way leads from A to B.
-- **Retrieval**: a search over the docs and the code, by keywords and by meaning, running on your machine.
-- **Augmented Generation**: the agent gets the pieces it needs, about 5,000 characters per answer where a
-  grep returned 170,000 in our benchmark, and writes its answer from them.
-
-Before 0.15 the project was called Knowledge Index; the package and the `kb` commands keep that name.
 
 Built on [**graphify**](https://github.com/Graphify-Labs/graphify) (AST code graph) and
 [**qmd**](https://github.com/tobi/qmd) (on-device Markdown search).
@@ -104,6 +92,8 @@ what through two webhooks, [docs/access-protocol.md](docs/access-protocol.md).
 
 ## More
 
+- [The documentation site](https://knowledge-index.sereda.lv): everything below, with search, and the
+  [configuration reference](https://knowledge-index.sereda.lv/configuration) of every setting.
 - [Install and configure](docs/install.md): requirements, the configuration, the dashboard, wiring the KB
   into each project.
 - [The shared server](docs/server.md): sign-in, access per project, speed, admin pages, metrics.

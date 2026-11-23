@@ -208,8 +208,20 @@ class Usage:
     def data(self) -> dict:
         return self.snapshot()
 
-    def report(self, with_users: bool, days: int = 30, top: int = 15) -> str:
+    def own_args(self, user: str) -> dict:
+        """{tool: {argument: count}} of one user's calls: what the MCP tool shows instead of everyone's."""
+        out: dict = {}
+        for tool, arg in self._rows("SELECT tool, arg FROM calls WHERE user = ? AND arg != ''", (user,)):
+            a = out.setdefault(tool, {})
+            a[arg] = a.get(arg, 0) + 1
+        return out
+
+    def report(self, with_users: bool, days: int = 30, top: int = 15, only_user: str | None = None) -> str:
+        """with_users: the user list (the CLI). only_user: the arguments are that user's own, never anyone
+        else's (the MCP tool: callers see the totals, but not what their colleagues asked)."""
         d = self.snapshot()
+        if only_user is not None:
+            d["args"] = self.own_args(only_user)
         if not d["tools"]:
             return f"(no tool calls since {d['since']})"
         lines = [f"KB tool usage since {d['since']}", "", "Tool               calls  errors  avg s    p95 s"]
@@ -223,7 +235,8 @@ class Usage:
                   + ", ".join(f"{day} {sum(d['days'][day].values())}" for day in recent)]
         for name, args in sorted(d["args"].items()):
             best = sorted(args.items(), key=lambda kv: -kv[1])[:top]
-            lines += ["", f"Top {name} arguments:"] + [f"  {n:>4}  {a}" for a, n in best]
+            title = f"Your top {name} arguments:" if only_user is not None else f"Top {name} arguments:"
+            lines += ["", title] + [f"  {n:>4}  {a}" for a, n in best]
         if with_users:
             lines += ["", "Users:"]
             for user, tools in sorted(d["users"].items(), key=lambda kv: -sum(kv[1].values())):

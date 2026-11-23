@@ -217,7 +217,8 @@ class Server:
             code = secrets.token_urlsafe(32)
             self.codes[code] = {"token": token, "client_id": txn["client_id"],
                                 "redirect_uri": txn["redirect_uri"], "challenge": txn["challenge"],
-                                "exp": self.now() + CODE_TTL}
+                                "exp": self.now() + CODE_TTL, "user": txn.get("user", "")}
+        self._seen(txn["client_id"], txn.get("user", ""))
         client = self.clients.get(txn["client_id"], {})
         self._event(txn.get("user", "?"), "browser sign-in", str(client.get("client_name") or txn["client_id"])[:80])
         query = {"code": code}
@@ -225,6 +226,21 @@ class Server:
             query["state"] = txn["state"]
         sep = "&" if "?" in txn["redirect_uri"] else "?"
         return txn["redirect_uri"] + sep + urllib.parse.urlencode(query)
+
+    def _seen(self, client_id: str, user: str) -> None:
+        """Note who signed in through a client and when (shown on the admin clients page). A client
+        registers before anyone signs in, so its record has no user until this."""
+        if not user:
+            return
+        with self.lock:
+            client = self.clients.get(client_id)
+            if client is None:
+                return
+            client.setdefault("users", {})[user] = int(self.now())
+            try:
+                self._save_clients()
+            except OSError:
+                pass
 
     def _event(self, user: str, action: str, detail: str = "") -> None:
         if self.on_event:
@@ -261,7 +277,7 @@ class Server:
                 raise OAuthError(400, "invalid_grant", "redirect_uri does not match")
             if b64url_sha256(form.get("code_verifier", "")) != entry["challenge"]:
                 raise OAuthError(400, "invalid_grant", "PKCE verification failed")
-            return self._issue(entry["token"], entry["client_id"])
+            return self._issue(entry["token"], entry["client_id"], entry.get("user", ""))
         if grant == "refresh_token":
             with self.lock:
                 entry = self.refresh.pop(form.get("refresh_token", ""), None)  # rotated on use
@@ -273,13 +289,14 @@ class Server:
                 self.check_token(entry["token"])
             except Exception:  # noqa: BLE001 — expired or revoked: sign in again
                 raise OAuthError(400, "invalid_grant", "the API token expired: sign in again") from None
-            return self._issue(entry["token"], entry["client_id"])
+            self._seen(entry["client_id"], entry.get("user", ""))
+            return self._issue(entry["token"], entry["client_id"], entry.get("user", ""))
         raise OAuthError(400, "unsupported_grant_type", "use authorization_code or refresh_token")
 
-    def _issue(self, token: str, client_id: str) -> dict:
+    def _issue(self, token: str, client_id: str, user: str = "") -> dict:
         rt = secrets.token_urlsafe(32)
         with self.lock:
-            self.refresh[rt] = {"token": token, "client_id": client_id}
+            self.refresh[rt] = {"token": token, "client_id": client_id, "user": user}
         return {"access_token": token, "token_type": "Bearer", "expires_in": TOKEN_TTL,
                 "refresh_token": rt}
 

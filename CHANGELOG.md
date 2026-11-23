@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to **GGRAG** (graph-grounded RAG for code; called knowledge-index before 0.15) are recorded here.
+All notable changes to **knowledge-index** are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [SemVer](https://semver.org/) with `0.x` semantics: **breaking changes bump the minor**
 until the MCP tool contract stabilises at `1.0.0`.
@@ -13,6 +13,15 @@ The single source of truth for the current version is the `VERSION` file. It is 
 > diverge — don't sync them.
 
 ## [Unreleased]
+
+## [0.15.1] — 2026-11-20
+
+- **Added: the documentation site** [knowledge-index.sereda.lv](https://knowledge-index.sereda.lv), built
+  with VitePress from `docs/` (`npm run docs:build`; Node is needed only for the site), with a new
+  [configuration reference](docs/configuration.md) of every setting and the project file.
+- **The name is Knowledge Index again.** The rename to GGRAG in 0.15.0 is undone: the repository is
+  github.com/xamresor/knowledge-index again (the old links never stopped working). The add-ons and the audit
+  of 0.15.0 stay.
 
 ## [0.15.0] — 2026-11-20
 

@@ -24,6 +24,7 @@ every tool (see bin/access.py). `allowed=None` means everything: the local stdio
 """
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -66,7 +67,7 @@ DOCS_MODE = os.environ.get("KB_DOCS_MODE", "light")
 # and a caller pinning behaviour cares about this number only.
 # AGPL section 13: people who use the KB over a network can find its source. A changed copy points
 # KB_SOURCE_URL at its own source.
-SOURCE_URL = os.environ.get("KB_SOURCE_URL", "https://github.com/xamresor/ggrag")
+SOURCE_URL = os.environ.get("KB_SOURCE_URL", "https://github.com/xamresor/knowledge-index")
 API_CONTRACT = 2  # 2: docs_search and graph_query removed (use search)
 
 
@@ -240,6 +241,27 @@ def graph_call(cmd: list[str], args: dict, allowed: set[str] | None, *terms: str
         return run([*c, "--graph", graph, *extra]), {"graph": graph}
 
     projects, label, auto = scope_projects(args, allowed)
+    if cmd[1] in ("explain", "affected") and terms:
+        picked = _pick_classes(terms[0], projects if projects is not None else allowed)
+        if picked:
+            classes, others = picked
+            parts = []
+            for lab, typ, repo, file, nid in classes[:AMBIGUOUS_MAX]:
+                if cmd[1] == "explain":   # graphify's explain finds nodes by label only, never by ID
+                    sub = _explain_node((lab, typ, repo, file, nid), projects)
+                else:
+                    sub, _ = ask(projects, [cmd[0], cmd[1], nid])
+                parts.append(sub if len(classes) == 1 else f"### {lab}  ({typ}, {repo} {file})\n{sub}")
+            out = parts[0] if len(classes) == 1 else (
+                f"'{terms[0]}' names {len(classes)} classes; the answer for each:\n\n" + "\n\n".join(parts))
+            if len(classes) > AMBIGUOUS_MAX:
+                out += f"\n\n(+{len(classes) - AMBIGUOUS_MAX} more classes with this name: pin one as repo:Name)"
+            if others:
+                shown = "; ".join(f"{r[0]} ({r[1]}, {r[2]} {r[3]})" for r in others[:5])
+                more = f" and {len(others) - 5} more" if len(others) > 5 else ""
+                out += (f"\n\n(Also named like this, not shown: {shown}{more}. Ask for one by its node ID "
+                        "or as Class.method.)")
+            return f"[projects: {label}]\n\n{out}"
     out, where = ask(projects)
     if auto and _no_match(out):
         out, where = ask(allowed)
@@ -267,6 +289,42 @@ def graph_call(cmd: list[str], args: dict, allowed: set[str] | None, *terms: str
     if cmd[1] == "query":
         out = _mcp_hint(out)
     return f"[projects: {label}]\n\n{out}"
+
+
+CLASS_TYPES = {"model", "controller", "class", "service", "interface", "trait", "enum"}
+
+
+def _pick_classes(term: str, projects: set[str] | None):
+    """A name typed exactly as a class (`Customer`, `ObjectController`) means the class, not the
+    methods and templates that share it in lower case (`.customer()`). -> (classes, others), or None
+    when no class has exactly this name (then graphify's own matching answers, as before)."""
+    name = term.strip()
+    if not name or ":" in name or "(" in name or "." in name:
+        return None
+
+    def norm(x: str) -> str:
+        return x.strip().strip(".").removesuffix("()").lower()
+    rows = [r for r in labels(GRAPH) if r[1] != "domain" and r[4]
+            and (projects is None or r[2] in projects) and norm(r[0]) == name.lower()]
+    classes = [r for r in rows if r[0].strip() == name and r[1] in CLASS_TYPES]
+    if not classes or len(rows) < 2:
+        return None
+    others = [r for r in rows if r not in classes]
+    return classes, others
+
+
+def _explain_node(row: tuple, projects: set[str] | None) -> str:
+    """graph_explain for one node picked by ID: its header and every connection (bin/routes.py)."""
+    lab, typ, repo, file, nid = row
+    full = projects is None or set(PROJECTS) <= set(projects)
+    view = {"allowed": None if full else sorted(projects), "routes": False}
+    argv = ["neighbors", nid, "--graph", GRAPH]
+    worker = warm.graph()
+    lst = worker.run(argv, view) if worker is not None else None
+    if lst is None:
+        lst = warm.graph_once(argv, view)
+    lst = (lst or "").strip() or "All connections (0):"
+    return f"Node: {lab}\n  ID:        {nid}\n  Source:    {file}\n  Type:      {typ}\n  Project:   {repo}\n\n{lst}"
 
 
 def _full_connections(out: str, projects: set[str] | None) -> str:
@@ -335,12 +393,14 @@ def code_grep(args: dict, allowed: set[str] | None) -> str:
             cmd += ["-g", glob]
         if args.get("ignore_case"):
             cmd.append("-i")
+        cmd += ["-g", "!bootstrap/cache/**"]          # Laravel's generated route/config caches
     else:
         cmd = ["grep", "-rEnHI", "--exclude-dir=graphify-out", "-m", "20", "-e", pattern]
-        if glob:
+        if glob and "/" not in glob:  # grep's --include sees the file name only; a path glob is matched below
             cmd.append(f"--include={glob}")
         if args.get("ignore_case"):
             cmd.append("-i")
+    path_glob = glob if glob and "/" in glob and not rg else ""
     lines: list[str] = []
     for name, root in roots:
         try:
@@ -353,7 +413,12 @@ def code_grep(args: dict, allowed: set[str] | None) -> str:
             raise ToolError(f"code_grep: bad pattern: {p.stderr.strip()[:200]}")
         for ln in p.stdout.splitlines():
             path, _, rest = ln.partition(":")
-            lines.append(f"{name}:{path.removeprefix('./')}:{rest[:300]}")
+            path = path.removeprefix("./")
+            if path.startswith("bootstrap/cache/"):
+                continue
+            if path_glob and not fnmatch.fnmatch(path, path_glob.removeprefix("./")):
+                continue
+            lines.append(f"{name}:{path}:{rest[:300]}")
             if len(lines) >= limit:
                 break
         if len(lines) >= limit:
@@ -501,8 +566,9 @@ TOOLS = [
                                                      "max 8000); raise it when the result says it was truncated"}},
          "required": ["q"]}},
     {"name": "graph_path",
-     "description": "Shortest path between two symbols/files in the code graph, traversing real "
-                    "relations incl. cross-repo http_request (frontend↔controller).",
+     "description": "The one best path between two symbols/files in the code graph: calls and HTTP "
+                    "requests (frontend -> controller) are cheap, busy hub classes dear, so it reads "
+                    "like a real chain. For several alternatives use graph_routes.",
      "inputSchema": {"type": "object", "properties": {"from": {"type": "string"}, "project": {"type": "string", "description": "limit to these project(s): a name, several comma-separated, or 'all'. Default: the session's project(s), widening to all when nothing is found"},
                                                      "to": {"type": "string"}},
                      "required": ["from", "to"]}},
@@ -643,9 +709,9 @@ for _t in TOOLS:
             "type": "integer", "description": "page of a long answer, 1-based (default 1); an answer "
                                               "with more says so at its end"}
         _t["inputSchema"]["properties"]["cursor"] = {
-            "type": "string", "description": "the cursor a long answer ends with: the next pages come "
-                                             "from that same answer (kept 10 minutes), the other "
-                                             "arguments are not needed again"}
+            "type": "string", "description": "the cursor a long answer ends with: alone it gives the "
+                                             "next page of that same answer (kept 10 minutes); add "
+                                             "`page` to jump. Other arguments are not needed again"}
         _t["inputSchema"]["properties"]["page_length"] = {
             "type": "integer", "description": f"characters per page (default {PAGE_CHARS}, "
                                               f"{PAGE_MIN}-{PAGE_MAX}); for search: the size of the code "
@@ -1099,6 +1165,7 @@ def _call_tool(name: str, args: dict, allowed: set[str] | None = None, caller: s
     if allowed is not None:
         allowed = set(allowed)
     page = args.pop("page", None)
+    page_given = page is not None
     page = 1 if page is None else page
     if page < 1:
         raise ToolError(f"{name}: 'page' must be 1 or more")
@@ -1112,13 +1179,17 @@ def _call_tool(name: str, args: dict, allowed: set[str] | None = None, caller: s
         first = paginate(text, page, length)
         if "[page " not in first:
             return first
-        return paginate(text, page, length, CURSORS.put(text, name, (caller, frozenset(allowed) if allowed is not None else None)))
+        return paginate(text, page, length, CURSORS.put(text, name, (caller, frozenset(allowed) if allowed is not None else None),
+                                                        length, page))
     if name in UNPAGED:
         return _dispatch(name, args, allowed)
     owner = (caller, frozenset(allowed) if allowed is not None else None)
     if cursor:
-        text = CURSORS.get(cursor, name, owner)
-        return paginate(text, page, length, cursor)
+        text, state = CURSORS.get(cursor, name, owner)
+        if not page_given:          # a cursor alone: the page after the last one served
+            page = state["page"] + 1
+        state["page"] = page
+        return paginate(text, page, state["size"], cursor)  # the size the answer was cut with
     if name in SELF_PAGED:
         if length and "budget" not in args:  # ~4 characters per token
             args["budget"] = max(300, min(length // 4, CODE_BUDGET_MAX))
@@ -1132,7 +1203,7 @@ def _call_tool(name: str, args: dict, allowed: set[str] | None = None, caller: s
     first = paginate(text, page, length)
     if "[page " not in first:
         return first
-    token = CURSORS.put(text, name, owner)
+    token = CURSORS.put(text, name, owner, length, page)
     return paginate(text, page, length, token)
 
 
@@ -1146,23 +1217,26 @@ class Cursors:
         self.items: "OrderedDict[str, tuple[str, str, tuple, float]]" = OrderedDict()
         self.lock = threading.Lock()
 
-    def put(self, text: str, tool: str, owner: tuple) -> str:
+    def put(self, text: str, tool: str, owner: tuple, size: int | None = None, page: int = 1) -> str:
         token = "c_" + secrets.token_urlsafe(12)
         with self.lock:
             self._expire()
             while len(self.items) >= self.cap:
                 self.items.popitem(last=False)
-            self.items[token] = (text, tool, owner, time.monotonic() + self.ttl)
+            self.items[token] = (text, tool, owner, time.monotonic() + self.ttl,
+                                 {"size": size, "page": page})
         return token
 
-    def get(self, token: str, tool: str, owner: tuple) -> str:
+    def get(self, token: str, tool: str, owner: tuple) -> tuple[str, dict]:
+        """-> (text, state); state holds the page size the answer was cut with and the last page served,
+        so a cursor alone gives the next page and the page count never changes under it."""
         with self.lock:
             self._expire()
             hit = self.items.get(token)
         if not hit or hit[1] != tool or hit[2] != owner:
             raise ToolError("cursor expired or unknown: run the query again (cursors live "
                             f"{int(self.ttl // 60)} minutes)")
-        return hit[0]
+        return hit[0], hit[4]
 
     def _expire(self) -> None:
         now = time.monotonic()
@@ -1204,7 +1278,7 @@ def paginate(text: str, page: int, size: int | None = None, cursor: str | None =
     nav = f"\n\n[page {page} of {len(pages)}"
     if page < len(pages):
         nav += f" — next: page: {page + 1}"
-        nav += f', cursor: "{cursor}" (kept {int(CURSOR_TTL // 60)} min, no other arguments needed)]' \
+        nav += f', cursor: "{cursor}" (kept {int(CURSOR_TTL // 60)} min; the cursor alone gives the next page)]' \
             if cursor else " for the rest]"
     else:
         nav += "]"
@@ -1306,6 +1380,14 @@ def _dispatch(name: str, args: dict, allowed: set[str] | None) -> str:
     if name == "search":
         return search(args, allowed)
     if name == "graph_path":
+        # The cheapest weighted path (bin/routes.py), not graphify's fewest hops: hop counting went
+        # through hub classes, framework interfaces and `.index()` (5 of 10 paths were nonsense in the
+        # 2026-11-20 run). Without graphify's Python (networkx) the old unweighted path answers.
+        try:
+            return graph_routes({**args, "k": 1}, allowed)
+        except ToolError as e:
+            if "networkx" not in str(e):
+                raise
         return graph_call(["graphify", "path", args["from"], args["to"]], args, allowed,
                           args["from"], args["to"])
     if name == "graph_routes":

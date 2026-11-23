@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "knowledge-index"
 dynamic = ["version"]
-description = "GGRAG, graph-grounded RAG for code: a read-only knowledge layer over related code projects: one cross-repo code graph plus on-device doc search, exposed to agents (MCP), scripts (HTTP) and a human (static dashboard)."
+description = "GraphRAG for code: a read-only knowledge layer over related code projects: one cross-repo code graph plus on-device doc search, exposed to agents (MCP), scripts (HTTP) and a human (static dashboard)."
 readme = "README.md"
 license = { text = "AGPL-3.0-or-later" }
 requires-python = ">=3.11"          # tomllib, used for the config and the alias table
@@ -27,8 +27,9 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/xamresor/ggrag"
-Changelog = "https://github.com/xamresor/ggrag/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/xamresor/knowledge-index"
+Documentation = "https://knowledge-index.sereda.lv"
+Changelog = "https://github.com/xamresor/knowledge-index/blob/main/CHANGELOG.md"
 
 [project.scripts]
 kb = "knowledge_index.cli:kb"

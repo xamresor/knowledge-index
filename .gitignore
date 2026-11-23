@@ -50,3 +50,8 @@ sandbox/node_modules/
 
 # External add-ons installed here (links to their own folders, often private)
 /plugins/
+
+# Documentation site (npm run docs:build)
+/node_modules/
+/docs/.vitepress/dist/
+/docs/.vitepress/cache/

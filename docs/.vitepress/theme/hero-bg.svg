@@ -1,0 +1,219 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="640" viewBox="0 0 1440 640" preserveAspectRatio="xMidYMid slice">
+  <title>Code graph clusters and vectors in an embedding space</title>
+  <defs>
+    <linearGradient id="kbbg-fade" x1="0" y1="0" x2="1440" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="var(--kbbg-dot,#cbd5e1)" stop-opacity="0"/>
+      <stop offset="0.3473" stop-color="var(--kbbg-dot,#cbd5e1)" stop-opacity="0"/>
+      <stop offset="0.625" stop-color="var(--kbbg-dot,#cbd5e1)" stop-opacity="1"/>
+      <stop offset="0.91" stop-color="var(--kbbg-dot,#cbd5e1)" stop-opacity="1"/>
+      <stop offset="1" stop-color="var(--kbbg-dot,#cbd5e1)" stop-opacity="0.15"/>
+    </linearGradient>
+    <mask id="kbbg-mask" x="0" y="0" width="1440" height="640" maskUnits="userSpaceOnUse" mask-type="alpha">
+      <rect width="1440" height="640" fill="url(#kbbg-fade)"/>
+    </mask>
+    <marker id="kbbg-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1 1L7 4L1 7" fill="none" stroke="var(--kbbg-vec,#0ea5e9)" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <g mask="url(#kbbg-mask)">
+    <g fill="var(--kbbg-dot,#cbd5e1)" opacity="0.35">
+      <circle cx="720" cy="70" r="1"/>
+      <circle cx="820" cy="70" r="1"/>
+      <circle cx="920" cy="70" r="1"/>
+      <circle cx="1020" cy="70" r="1"/>
+      <circle cx="1120" cy="70" r="1"/>
+      <circle cx="1220" cy="70" r="1"/>
+      <circle cx="1320" cy="70" r="1"/>
+      <circle cx="1420" cy="70" r="1"/>
+      <circle cx="720" cy="150" r="1"/>
+      <circle cx="820" cy="150" r="1"/>
+      <circle cx="920" cy="150" r="1"/>
+      <circle cx="1020" cy="150" r="1"/>
+      <circle cx="1120" cy="150" r="1"/>
+      <circle cx="1220" cy="150" r="1"/>
+      <circle cx="1320" cy="150" r="1"/>
+      <circle cx="1420" cy="150" r="1"/>
+      <circle cx="720" cy="230" r="1"/>
+      <circle cx="820" cy="230" r="1"/>
+      <circle cx="920" cy="230" r="1"/>
+      <circle cx="1020" cy="230" r="1"/>
+      <circle cx="1120" cy="230" r="1"/>
+      <circle cx="1220" cy="230" r="1"/>
+      <circle cx="1320" cy="230" r="1"/>
+      <circle cx="1420" cy="230" r="1"/>
+      <circle cx="720" cy="310" r="1"/>
+      <circle cx="820" cy="310" r="1"/>
+      <circle cx="920" cy="310" r="1"/>
+      <circle cx="1020" cy="310" r="1"/>
+      <circle cx="1120" cy="310" r="1"/>
+      <circle cx="1220" cy="310" r="1"/>
+      <circle cx="1320" cy="310" r="1"/>
+      <circle cx="1420" cy="310" r="1"/>
+      <circle cx="720" cy="390" r="1"/>
+      <circle cx="820" cy="390" r="1"/>
+      <circle cx="920" cy="390" r="1"/>
+      <circle cx="1020" cy="390" r="1"/>
+      <circle cx="1120" cy="390" r="1"/>
+      <circle cx="1220" cy="390" r="1"/>
+      <circle cx="1320" cy="390" r="1"/>
+      <circle cx="1420" cy="390" r="1"/>
+      <circle cx="720" cy="470" r="1"/>
+      <circle cx="820" cy="470" r="1"/>
+      <circle cx="920" cy="470" r="1"/>
+      <circle cx="1020" cy="470" r="1"/>
+      <circle cx="1120" cy="470" r="1"/>
+      <circle cx="1220" cy="470" r="1"/>
+      <circle cx="1320" cy="470" r="1"/>
+      <circle cx="1420" cy="470" r="1"/>
+      <circle cx="720" cy="550" r="1"/>
+      <circle cx="820" cy="550" r="1"/>
+      <circle cx="920" cy="550" r="1"/>
+      <circle cx="1020" cy="550" r="1"/>
+      <circle cx="1120" cy="550" r="1"/>
+      <circle cx="1220" cy="550" r="1"/>
+      <circle cx="1320" cy="550" r="1"/>
+      <circle cx="1420" cy="550" r="1"/>
+    </g>
+
+    <g fill="none" stroke="var(--kbbg-edge,#94a3b8)" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" opacity="0.32">
+      <path d="M758 190L797 126L846 99L889 143L923 207L875 246L813 252L758 190
+               M797 126L827 193L889 143
+               M827 193L813 252
+               M827 193L875 246
+               M813 252L777 301L849 325L929 296L923 207
+               M875 246L849 325
+               M889 143L958 135L923 207"/>
+      <path d="M1021 88L1078 62L1143 88L1194 132L1150 176L1079 173L1044 132L1021 88
+               M1044 132L1110 118L1143 88
+               M1110 118L1079 173
+               M1110 118L1194 132
+               M1194 132L1230 77L1143 88
+               M1194 132L1268 164L1219 219L1150 176
+               M1078 62L1110 118"/>
+      <path d="M990 331L1039 284L1106 284L1151 331L1128 394L1072 425L1006 399L990 331
+               M990 331L1050 350L1106 284
+               M1050 350L1128 394
+               M1050 350L1006 399
+               M1128 394L1168 441L1122 491L1072 425
+               M1122 491L1000 487L962 439L1006 399"/>
+      <path d="M1225 310L1280 265L1343 293L1380 353L1327 393L1261 386L1225 310
+               M1225 310L1300 336L1343 293
+               M1300 336L1327 393
+               M1261 386L1230 460L1299 473L1370 449L1327 393
+               M1370 449L1380 353"/>
+      <path d="M754 427L806 390L860 407L901 456L857 505L796 505L754 427
+               M806 390L835 455L857 505
+               M835 455L796 505
+               M796 505L765 554
+               M857 505L896 556
+               M835 455L901 456"/>
+    </g>
+
+    <g fill="none" stroke="var(--kbbg-edge,#94a3b8)" stroke-width="1.1" opacity="0.28">
+      <path d="M958 135C984 112 994 103 1021 88"/>
+      <path d="M923 207C986 215 996 261 1039 284"/>
+      <path d="M1150 176C1161 225 1137 252 1106 284"/>
+      <path d="M1219 219C1238 237 1257 250 1280 265"/>
+      <path d="M1151 331C1175 316 1197 309 1225 310"/>
+      <path d="M1168 441C1190 452 1204 459 1230 460"/>
+      <path d="M849 325C846 360 851 382 860 407"/>
+      <path d="M901 456C928 467 950 477 1000 487"/>
+    </g>
+
+    <g fill="var(--kbbg-node,#2563eb)" opacity="0.5">
+      <circle cx="758" cy="190" r="3"/>
+      <circle cx="797" cy="126" r="3.2"/>
+      <circle cx="846" cy="99" r="2.6"/>
+      <circle cx="889" cy="143" r="4"/>
+      <circle cx="923" cy="207" r="3.4"/>
+      <circle cx="875" cy="246" r="3"/>
+      <circle cx="813" cy="252" r="3.8"/>
+      <circle cx="777" cy="301" r="2.6"/>
+      <circle cx="849" cy="325" r="3"/>
+      <circle cx="929" cy="296" r="2.8"/>
+      <circle cx="958" cy="135" r="3"/>
+      <circle cx="827" cy="193" r="4.8"/>
+
+      <circle cx="990" cy="331" r="3.2"/>
+      <circle cx="1039" cy="284" r="3"/>
+      <circle cx="1106" cy="284" r="3.6"/>
+      <circle cx="1151" cy="331" r="3.2"/>
+      <circle cx="1128" cy="394" r="4"/>
+      <circle cx="1072" cy="425" r="3.4"/>
+      <circle cx="1006" cy="399" r="3"/>
+      <circle cx="1050" cy="350" r="5"/>
+      <circle cx="1168" cy="441" r="2.8"/>
+      <circle cx="1122" cy="491" r="3"/>
+      <circle cx="1000" cy="487" r="2.6"/>
+      <circle cx="962" cy="439" r="2.6"/>
+
+      <circle cx="1225" cy="310" r="3.2"/>
+      <circle cx="1280" cy="265" r="3"/>
+      <circle cx="1343" cy="293" r="3.2"/>
+      <circle cx="1380" cy="353" r="2.8"/>
+      <circle cx="1327" cy="393" r="3.6"/>
+      <circle cx="1261" cy="386" r="3"/>
+      <circle cx="1300" cy="336" r="4.8"/>
+      <circle cx="1370" cy="449" r="2.6"/>
+      <circle cx="1299" cy="473" r="2.8"/>
+      <circle cx="1230" cy="460" r="3"/>
+    </g>
+
+    <g fill="var(--kbbg-node2,#7c3aed)" opacity="0.45">
+      <circle cx="1021" cy="88" r="3"/>
+      <circle cx="1078" cy="62" r="2.6"/>
+      <circle cx="1143" cy="88" r="3.2"/>
+      <circle cx="1194" cy="132" r="3.8"/>
+      <circle cx="1150" cy="176" r="3.2"/>
+      <circle cx="1079" cy="173" r="3"/>
+      <circle cx="1044" cy="132" r="3"/>
+      <circle cx="1110" cy="118" r="4.6"/>
+      <circle cx="1230" cy="77" r="2.6"/>
+      <circle cx="1268" cy="164" r="2.8"/>
+      <circle cx="1219" cy="219" r="3"/>
+
+      <circle cx="754" cy="427" r="2.8"/>
+      <circle cx="806" cy="390" r="3"/>
+      <circle cx="860" cy="407" r="3.2"/>
+      <circle cx="901" cy="456" r="3"/>
+      <circle cx="857" cy="505" r="3.4"/>
+      <circle cx="796" cy="505" r="3"/>
+      <circle cx="765" cy="554" r="2.4"/>
+      <circle cx="896" cy="556" r="2.6"/>
+      <circle cx="835" cy="455" r="4.4"/>
+    </g>
+
+    <g fill="none" stroke-width="1" opacity="0.2">
+      <g stroke="var(--kbbg-node,#2563eb)">
+        <circle cx="827" cy="193" r="11"/>
+        <circle cx="1050" cy="350" r="12"/>
+        <circle cx="1300" cy="336" r="11"/>
+      </g>
+      <g stroke="var(--kbbg-node2,#7c3aed)">
+        <circle cx="1110" cy="118" r="10"/>
+        <circle cx="835" cy="455" r="10"/>
+      </g>
+    </g>
+
+    <g fill="none" stroke="var(--kbbg-vec,#0ea5e9)" stroke-width="1" stroke-linecap="round" marker-end="url(#kbbg-arrow)" opacity="0.38">
+      <line x1="713" y1="354" x2="755" y2="330"/>
+      <line x1="897" y1="91" x2="942" y2="67"/>
+      <line x1="963" y1="239" x2="1014" y2="213"/>
+      <line x1="963" y1="239" x2="1002" y2="251"/>
+      <line x1="1082" y1="237" x2="1129" y2="217"/>
+      <line x1="1282" y1="101" x2="1320" y2="72"/>
+      <line x1="1309" y1="225" x2="1361" y2="209"/>
+      <line x1="1182" y1="373" x2="1214" y2="346"/>
+      <line x1="938" y1="544" x2="985" y2="518"/>
+      <line x1="1178" y1="552" x2="1228" y2="529"/>
+      <line x1="1178" y1="552" x2="1193" y2="509"/>
+      <line x1="1314" y1="544" x2="1364" y2="518"/>
+    </g>
+
+    <g fill="var(--kbbg-vec,#0ea5e9)" opacity="0.3">
+      <circle cx="963" cy="239" r="1.8"/>
+      <circle cx="1178" cy="552" r="1.8"/>
+    </g>
+  </g>
+</svg>
