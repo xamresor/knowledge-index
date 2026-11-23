@@ -17,11 +17,10 @@ from collections import Counter, defaultdict
 
 
 def domain(node: dict) -> str | None:
-    """Derive a namespace/domain string from a node's source file + repo."""
+    """Derive a namespace/domain string from a node's source file (the label adds the repo)."""
     sf = (node.get("source_file") or "").lstrip("/")
     if not sf:
         return None
-    repo = node.get("repo", "?")
     p = sf.split("/")
 
     # Laravel package: packages/<Pkg>/src/... -> <Pkg>
@@ -30,13 +29,11 @@ def domain(node: dict) -> str | None:
     # Component domain: app/Components/<Domain>/... -> Components\<Domain>
     if len(p) > 2 and p[0] == "app" and p[1] == "Components":
         return f"Components\\{p[2]}"
-    # app/<Layer>/<Sub?> -> Layer (or Layer\Sub for Http/Controllers/V2 etc.)
-    if p[0] in ("app", "src") and len(p) > 1:
+    # app/<Layer>/..., src/<area>/... (a package or a frontend), assets-js/<area>/... -> the second
+    # segment; Http gets one or two levels more (Http\Controllers\V2, Http\Requests).
+    if p[0] in ("app", "src", "assets-js") and len(p) > 1:
         if p[1] == "Http" and len(p) > 3:
             return f"Http\\{p[2]}\\{p[3]}" if p[2] == "Controllers" else f"Http\\{p[2]}"
-        return p[1]
-    # frontend: src/<area>/... or assets-js/<area>/...
-    if p[0] in ("src", "assets-js") and len(p) > 1:
         return p[1]
     return p[0]
 

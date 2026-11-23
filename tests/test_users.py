@@ -207,6 +207,17 @@ class StoreTest(unittest.TestCase):
         self.clock[0] += users.LOCK_SECONDS + 1
         self.assertTrue(self.store.login("ann@example.com", "correct horse battery").startswith(users.SIGNIN_PREFIX))
 
+    def test_two_uses_of_one_reset_link_cannot_both_set_the_password(self):
+        # both requests pass the first check; the second must fail when it saves (the hash runs unlocked)
+        self.store.add("ann@example.com", ["api"], key=False)
+        value = self.store.start_reset("ann@example.com")
+        self.assertEqual(self.store.reset_user(value), "ann@example.com")
+        self.store.finish_reset(value, "correct horse battery")
+        with self.assertRaises(users.UserError):
+            self.store.set_password("ann@example.com", "the late request", reset_value=value)
+        self.assertEqual(self.store.login("ann@example.com", "correct horse battery")[:len(users.SIGNIN_PREFIX)],
+                         users.SIGNIN_PREFIX)
+
     def test_a_reset_link_works_once_and_for_a_short_time(self):
         self.store.add("ann@example.com", ["api"], key=False)
         value = self.store.start_reset("ann@example.com")
@@ -250,12 +261,16 @@ class StoreTest(unittest.TestCase):
         def replace(src, dst):
             if not nested:
                 nested.append(1)
-                other.add("bob", ["api"])
+                # The file lock now keeps B's whole change out of A's; B's bare save still must not share
+                # A's temporary file.
+                other._load()
+                other._save()
             return real_replace(src, dst)
 
         with mock.patch.object(users.os, "replace", side_effect=replace):
             self.store.add("cid", ["api"])
-        self.assertEqual([n for n in os.listdir(self.tmp.name) if n != "users.json"], [])  # no temporary file left
+        self.assertEqual([n for n in os.listdir(self.tmp.name) if n not in ("users.json", "users.json.lock")],
+                         [])  # no temporary file left
 
     def test_one_store_for_concurrent_first_calls(self):
         with mock.patch.object(users, "STORE", None), mock.patch.object(users, "Store") as cls:
@@ -280,7 +295,7 @@ class HttpTest(unittest.TestCase):
                        mock.patch.object(kb_core, "GRAPH", os.path.join(cls.tmp.name, "graph.json")),
                        mock.patch.object(kb_core, "PROJECTS", {"api": [], "web": []}),
                        mock.patch.object(kb_core, "warm_qmd", lambda: None),
-                       mock.patch.dict(os.environ, {"KB_ADDONS": "admin"}),
+                       mock.patch.dict(os.environ, {"KB_ADDONS": "none"}),
                        mock.patch.object(plugins, "access", lambda enabled: users),   # the plugin is installed and on
                        mock.patch.object(users, "STORE", users.Store(os.path.join(cls.tmp.name, "users.json"))),
                        mock.patch.object(users, "mail_config", lambda core=None: dict(cls.cfg)),
@@ -309,6 +324,10 @@ class HttpTest(unittest.TestCase):
         for p in cls.patches:
             p.stop()
         cls.tmp.cleanup()
+
+    def setUp(self):
+        # Requests of this machine count against the password limit: a fresh limit per test.
+        self.srv.RequestHandlerClass.login_limit = kb_http.admin.login_throttle()
 
     def post_json(self, path, body, token=None):
         r = urllib.request.Request(self.base + path, data=json.dumps(body).encode(), method="POST",

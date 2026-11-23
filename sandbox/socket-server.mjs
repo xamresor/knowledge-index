@@ -33,13 +33,28 @@ const server = net.createServer((sock) => {
     process.execPath, "--permission", `--allow-fs-read=${DIR}`, join(DIR, "runner.mjs")],
     { cwd: DIR, env: { PATH: process.env.PATH || "/usr/bin:/bin", NODE_OPTIONS: "" } });
   let err = "";
+  let done = false;  // "error" and "close" may both come: free the slot and answer once
+  const finish = () => {
+    if (done) return false;
+    done = true;
+    busy--;
+    return true;
+  };
   child.stderr.on("data", (d) => { err = (err + d).slice(-400); });
   child.stdin.on("error", () => {});
   sock.pipe(child.stdin);
   child.stdout.pipe(sock);
   sock.on("close", () => { if (child.exitCode === null) child.kill("SIGKILL"); });
+  // A runner that cannot start (no shell, no folder, no free process) emits "error": without a handler
+  // the whole service would stop. The caller gets an answer in the runner's own shape instead.
+  child.on("error", (e) => {
+    if (!finish()) return;
+    log(`runner did not start: ${e.code || e.message}`);
+    sock.end(JSON.stringify({ done: true, output: "", value: null, calls: 0,
+      error: "the sandbox could not start a runner; try again" }) + "\n");
+  });
   child.on("close", (code, signal) => {
-    busy--;
+    if (!finish()) return;
     if (code !== 0) log(`runner stopped (${signal || code}): ${err.trim() || "no message"}`);
     sock.end();
   });

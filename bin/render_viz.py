@@ -31,6 +31,8 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
+import zlib
 from collections import Counter, defaultdict
 
 import graph as graph_io
@@ -53,13 +55,32 @@ STATUS = "kb-status.js"
 
 
 def color_for(domain: str) -> str:
-    h = (hash(domain) % 360) / 360.0
+    """A colour per domain that stays the same between builds. `hash()` of a str is salted per
+    process, so it gave every domain a new colour on each build."""
+    h = (zlib.crc32(domain.encode("utf-8")) % 360) / 360.0
     r, g, b = colorsys.hls_to_rgb(h, 0.55, 0.65)
     return f"#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}"
 
 
 def safe(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", name)
+
+
+def file_names(domains: list[str]) -> dict[str, str]:
+    """domain -> data file name (no extension), unique: `a b` and `a/b` both make `a_b`, so a
+    later one gets a crc32 suffix. Names that start with `_` stay clear of `_cross` and `_index`."""
+    out: dict[str, str] = {}
+    used: set[str] = set()
+    for d in sorted(domains):
+        base = safe(d)
+        if base.startswith("_"):
+            base = "d" + base
+        name = base
+        if name.lower() in used:
+            name = f"{base}-{zlib.crc32(d.encode('utf-8')):08x}"
+        used.add(name.lower())
+        out[d] = name
+    return out
 
 
 def _js_call(fn: str, *args) -> str:
@@ -70,8 +91,22 @@ def _js_call(fn: str, *args) -> str:
 
 
 def write_js(path: str, fn: str, *args) -> None:
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(_js_call(fn, *args))
+    """Write atomically: a temp file in the same folder, then `os.replace`. A failed run keeps the
+    old file, and the page never loads a half-written one."""
+    text = _js_call(fn, *args)
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=f".{os.path.basename(path)}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.chmod(tmp, 0o644)   # mkstemp makes 0600; a web server under another user must read it
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def build_members(real: list[dict], dom_of: dict, palette: dict) -> dict:
@@ -133,22 +168,25 @@ def _cli_version(binary: str) -> str:
 
 
 def _qmd_collection_stats(collection: str) -> dict:
-    """Files + freshness for our collection, parsed out of `qmd status`. Best-effort: a missing qmd
-    must leave the panel empty rather than fail the build."""
+    """Files + freshness of our docs, parsed out of `qmd status`. bin/kb makes one collection per
+    project (`<collection>-<project>`); the files are summed over them, and `updated` is the one of the
+    first. Best-effort: a missing qmd must leave the panel empty rather than fail the build."""
     try:
         out = subprocess.run(["qmd", "status"], capture_output=True, text=True, timeout=60).stdout
     except Exception:  # noqa: BLE001
         return {}
-    block = re.search(rf"^\s*{re.escape(collection)} \(qmd://.*?\n((?:\s{{4}}.*\n)+)",
-                      out, re.MULTILINE)
-    if not block:
-        return {"collection": collection}
-    files = re.search(r"Files:\s+(\d+)\s*(?:\(updated ([^)]+)\))?", block.group(1))
-    stats = {"collection": collection}
-    if files:
-        stats["files"] = int(files.group(1))
-        if files.group(2):
-            stats["updated"] = files.group(2)
+    stats: dict = {"collection": collection}
+    blocks = re.findall(rf"^\s*{re.escape(collection)}(?:-\S+)? \(qmd://.*?\n((?:\s{{4}}.*\n)+)",
+                        out, re.MULTILINE)
+    if not blocks:
+        return stats
+    stats["collections"] = len(blocks)
+    for block in blocks:
+        files = re.search(r"Files:\s+(\d+)\s*(?:\(updated ([^)]+)\))?", block)
+        if files:
+            stats["files"] = stats.get("files", 0) + int(files.group(1))
+            if files.group(2):
+                stats.setdefault("updated", files.group(2))
     return stats
 
 
@@ -161,9 +199,10 @@ def _aliases() -> list[list[str]]:
         return []
 
 
-def _quality(kb_root: str) -> dict:
-    """Search-quality numbers, if a benchmark result was left next to the index."""
-    path = os.path.join(kb_root, "graphify-out", "bench-latest.json")
+def _quality(out_dir: str) -> dict:
+    """Search-quality numbers, if a benchmark result was left next to the graph (the data dir, not
+    the package: installed, the package is read-only)."""
+    path = os.path.join(out_dir, "bench-latest.json")
     if not os.path.isfile(path):
         return {}
     try:
@@ -196,7 +235,7 @@ def write_status(out_dir: str, kb_root: str, g: dict, domains: list[str], counts
                   "domains": len(domains), "projects": projects, "built_at": built},
         "docs": _qmd_collection_stats(os.environ.get("KB_COLLECTION", "kb")),
         "aliases": _aliases(),
-        "quality": _quality(kb_root),
+        "quality": _quality(out_dir),
         "versions": {"knowledge-index": repo_version,
                      "graphify": _cli_version("graphify"), "qmd": _cli_version("qmd")},
         "takenAt": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -220,7 +259,7 @@ def main() -> int:
     domains = sorted(set(dom_of.values()))
     palette = {d: color_for(d) for d in domains}
     counts = Counter(dom_of.values())
-    fname = {d: safe(d) for d in domains}
+    fname = file_names(domains)
 
     members = build_members(real, dom_of, palette)
     intra, cross = split_edges(g["links"], by_id, dom_of)

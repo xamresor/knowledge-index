@@ -24,7 +24,10 @@ import tempfile
 from typing import Any, Iterable
 
 # --- node ids -----------------------------------------------------------------------------------
-# graphify ids look like `repo::relative/path.php::Symbol` (the symbol part is optional).
+# A node id is `repo::slug`. graphify builds the slug from the file path and the symbol, lower-cased,
+# with `/` and `.` turned into `_` (`shop-api::app_models_order_order`), so an id cannot be split
+# back into a path: read `repo`, `source_file` and `label` from the node instead. Doc nodes
+# (bin/lang/markdown.py) use `repo::relative/path.md`. Only the repo part is safe to parse.
 ID_SEP = "::"
 
 
@@ -52,24 +55,35 @@ class Confidence:
 
 
 def node_id(repo: str, path: str, symbol: str | None = None) -> str:
-    """Build a node id. The inverse of `parse_id`."""
+    """Build the id of a node this project adds itself (a doc node): `repo::path[::symbol]`."""
     parts = [repo, path] + ([symbol] if symbol else [])
     return ID_SEP.join(parts)
-
-
-def parse_id(nid: str) -> tuple[str, str, str | None]:
-    """Split a node id into (repo, path, symbol|None). Tolerates ids without a symbol."""
-    parts = nid.split(ID_SEP)
-    if len(parts) == 1:
-        return parts[0], "", None
-    if len(parts) == 2:
-        return parts[0], parts[1], None
-    return parts[0], parts[1], ID_SEP.join(parts[2:])
 
 
 def repo_of(nid: str) -> str:
     """The repo tag a node belongs to — the cheap question, asked everywhere."""
     return nid.split(ID_SEP, 1)[0]
+
+
+def repo_file(path: str, repos_dir: str) -> tuple[str, str]:
+    """A staged file `<repos_dir>/<repo>/<source_file>` -> (repo, source_file), the key that
+    matches a node's `repo` and `source_file` exactly."""
+    rel = os.path.relpath(path, repos_dir).replace(os.sep, "/")
+    repo, _, sf = rel.partition("/")
+    return repo, sf
+
+
+def tag_repo(g: dict, repo: str) -> dict:
+    """Give a one-project graph the shape `graphify merge-graphs` gives a merged one: every node gets
+    `repo`, every id the prefix `<repo>::`, and the links follow the new ids."""
+    def new(i):
+        return i if isinstance(i, str) and i.startswith(repo + "::") else f"{repo}::{i}"
+    for n in nodes(g):
+        n["id"] = new(n["id"])
+        n.setdefault("repo", repo)
+    for e in links(g):
+        e["source"], e["target"] = new(e["source"]), new(e["target"])
+    return g
 
 
 # --- I/O ----------------------------------------------------------------------------------------
@@ -128,3 +142,11 @@ def links(graph: dict) -> list[dict]:
 
 def ids(graph: dict) -> Iterable[str]:
     return (n["id"] for n in graph["nodes"])
+
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) == 5 and sys.argv[1] == "tag-repo":   # graph.py tag-repo <in> <out> <repo>
+        save(tag_repo(load(sys.argv[2]), sys.argv[4]), sys.argv[3])
+    else:
+        sys.exit("usage: graph.py tag-repo <in.json> <out.json> <repo>")

@@ -97,16 +97,21 @@ def _build(data: dict) -> tuple[nx.Graph, dict]:
     return g, nodes
 
 
-def _pin(repo_label: str) -> tuple[str | None, str]:
-    """`api:Customer` -> ("api", "Customer"); `Customer` -> (None, "Customer")."""
-    m = re.match(r"^([\w-]+):(.+)$", repo_label.strip())
-    return (m.group(1), m.group(2).strip()) if m else (None, repo_label.strip())
+def _pin(repo_label: str, known: set[str] | None = None) -> tuple[str | None, str]:
+    """`api:Customer` -> ("api", "Customer"); `Customer` -> (None, "Customer").
+
+    The prefix is a project pin only when it is a known project followed by one ':', so
+    `OrderService::create` stays a name."""
+    m = re.match(r"^([\w-]+):(?!:)(.+)$", repo_label.strip())
+    if m and (known is None or m.group(1) in known):
+        return m.group(1), m.group(2).strip()
+    return None, repo_label.strip()
 
 
 def resolve(term: str, nodes: dict, g: nx.Graph) -> tuple[str | None, list[dict]]:
     """The node a name means: exact label first (case-insensitive), then a word match, then a
     substring; a class or model before a file or method; then the better connected one."""
-    repo, name = _pin(term)
+    repo, name = _pin(term, {n.get("repo") for n in nodes.values() if n.get("repo")})
     low = name.lower()
     cands = [n for n in nodes.values() if n["id"] in g and (repo is None or n.get("repo") == repo)]
 
@@ -119,7 +124,43 @@ def resolve(term: str, nodes: dict, g: nx.Graph) -> tuple[str | None, list[dict]
         return (exact, TYPE_RANK.get(n.get("type", ""), 5), -g.degree(n["id"]), len(label))
 
     hits = sorted((n for n in cands if low in n.get("label", "").lower()), key=score)
+    if not (hits and score(hits[0])[0] <= 1):     # no node carries the name: maybe Class::method
+        member = _member(name, cands, g)
+        if member:
+            return member[0]["id"], member[:6]
     return (hits[0]["id"] if hits else None), hits[:6]
+
+
+_MEMBER = re.compile(r"^([A-Za-z_\\][\w\\]*)(?:::|\.)([A-Za-z_$][\w$]*)(?:\(\))?$")
+_FILE_EXT = {"php", "vue", "ts", "tsx", "js", "jsx", "mjs", "md", "json", "blade"}
+_CLASS_TYPES = {"model", "controller", "class", "service", "interface", "trait", "enum"}
+
+
+def _member(name: str, cands: list[dict], g: nx.Graph) -> list[dict]:
+    """`OrderService::create` / `OrderService.create()`: the methods `create` of the classes named
+    `OrderService`, reached through the class's `method`/`contains` edge; the best connected first.
+    The weighted graph keeps one relation per pair, so a member is also a neighbour of the class
+    from the same file."""
+    m = _MEMBER.match(name)
+    if not m or m.group(2).lower() in _FILE_EXT:
+        return []
+    cls, member = m.group(1).rsplit("\\", 1)[-1], m.group(2)
+    by_id = {n["id"]: n for n in cands}
+
+    def bare(n: dict) -> str:
+        return str(n.get("label", "")).strip().lstrip(".").removesuffix("()")
+    found: list[dict] = []
+    for c in cands:
+        if c.get("type") not in _CLASS_TYPES or str(c.get("label", "")).strip() != cls:
+            continue
+        for nb in g.neighbors(c["id"]):
+            kid = by_id.get(nb)
+            if kid is None or kid in found or kid.get("type") in _CLASS_TYPES or bare(kid) != member:
+                continue
+            rel = g.edges[c["id"], nb]["edge"].get("relation")
+            if rel in ("method", "contains") or kid.get("source_file") == c.get("source_file"):
+                found.append(kid)
+    return sorted(found, key=lambda n: -g.degree(n["id"]))
 
 
 def _describe(n: dict) -> str:

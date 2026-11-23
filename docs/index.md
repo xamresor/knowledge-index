@@ -26,5 +26,5 @@ features:
   - title: A team server
     details: One index for a team, access per project from your own system through two webhooks, browser sign-in, admin pages, audit and Prometheus metrics.
   - title: Add-ons and plugins
-    details: Batch calls, code mode in a sandbox, fast routes, metrics, admin and audit. Plugins can live outside the core under their own licence.
+    details: Batch calls, code mode in a sandbox, fast routes, metrics, audit and questions. Plugins can live outside the core under their own licence.
 ---

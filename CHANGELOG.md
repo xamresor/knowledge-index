@@ -14,6 +14,86 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+Audit of 2026-11-23 (four reviews: security, query tools, build, server). Each fix has a test.
+
+- **Security: docs results are authorized on qmd's own hits.** A document line that looked like a result
+  header (`qmd://kb-other/...`) could carry text of a hidden project past the filter. The "not found" grade
+  and its "in no document" words now count only the caller's collections and contract docs.
+- **Security: sessions follow their key.** Every request with a session checks the key again: a removed key,
+  a password reset or a lost admin right ends the session. A password reset drops the user's sessions.
+- **Security: limits.** Sign-in attempts per address and in total (`KB_LOGIN_LIMIT*`, answer 429); OAuth
+  client registration, redirect URIs, open sign-ins, unused clients and refresh tokens (`KB_OAUTH_*`).
+  Loopback redirect URIs with a backslash, a user part or control characters are refused. A full list
+  of clients or sign-ins pushes out the oldest unused entry instead of blocking new ones.
+  `KB_TRUSTED_PROXIES` names a proxy outside loopback (Docker) whose `X-Forwarded-For` counts.
+  A reset link is checked and used up in one step.
+- **Security: job and memory limits.** Graph, docs and sandbox processes are limited where they start, so
+  `batch` and `run_code` cannot pass the limits (`KB_MAX_*_JOBS`, `KB_JOB_WAIT`, then "busy"). The value a
+  `run_code` program returns is capped; cursors have a byte budget and a cap per caller; `code_grep` stops
+  reading at its limit.
+- **Security: `kb-api --token` asks for the token on the dashboard files too.** Extraction never writes
+  through a symlink, and docs staging drops links that leave the source tree.
+- **Fixed: build.** A failed graphify run no longer marks the old graph as up to date. A missing or empty
+  code folder, two code folders with one name, or a broken config fail loudly and keep the previous graph.
+  Route-table output that is not JSON keeps the last good table. New migrations rebuild the FK edges. A KB
+  with only docs projects builds; a one-project KB gets the project tags its links need. The `scip` add-on no longer forces a rebuild on every run. The config is
+  read with `tomllib`.
+- **Fixed: graph links.** A call, a rationale comment or an SQL use attaches to its own project, not to a
+  same-path file of another one. Controllers in `packages/` get their HTTP edges. FK edges work in the
+  installed and Docker layouts. `declutter` keeps the project's own classes. More HTTP clients are
+  recognised (`axios`, `$http`, `http`). Docs link method mentions and links with an anchor. Domain colours
+  stay the same between builds.
+- **Fixed: tools.** `page: 2` without a cursor continues where page 1 ended. `search` over a project without
+  docs searches its code. A small project's docs search finds its own documents in a large corpus. A name
+  defined twice is answered for each definition. `Class::method` finds the method. `repo_map unused` sees
+  uses from other projects. A hung graph worker no longer blocks every caller for minutes.
+- **Fixed: server.** Any error inside a tool call gets a JSON-RPC answer instead of a closed connection.
+  A broken answer of the login webhook is a sign-in error. The admin "Rebuild now" button works (it tested
+  the lock file, which always exists). An OAuth refresh during a webhook outage keeps the refresh token.
+  Wrong passwords no longer slow the key checks of everyone. A CLI change of `users.json` is no longer lost
+  while the server saves. Notifications get no answer. The Questions page keys on the question itself.
+- **Second audit round (2026-11-24).**
+  - Security: the Settings page cannot switch off the active access plugin or switch on a second one; an
+    admin cannot save their own row without a project; wrong passwords count per name and address; the
+    global sign-in and registration caps only tighten each address; a flood of `GET /authorize` cannot push
+    out another person's sign-in; requests from the same machine count against the password limit.
+  - Security: OAuth access tokens are server tokens (`kbo_...`) that end after `KB_OAUTH_TOKEN_TTL` (8 h);
+    the client refreshes them. A restart of the server means one more browser sign-in.
+  - Security: an MCP batch has at most 50 messages and 16 MB of answers; permission-webhook checks are
+    capped (`KB_AUTH_MAX_CHECKS`); malformed tokens get 401 without a webhook call; `review_context`
+    refuses inputs over 1000 files, 200000 lines or 1 MB.
+  - Security: a project added without a restart stays filtered; the data dictionary no longer tells
+    whether a hidden project has a symbol; a contract doc that links out of its project is not indexed;
+    `code_grep` never shows `.env` files; code staging never copies `.env*` or `bootstrap/cache/`; docs are
+    read only as regular files inside the docs root, at most 2 MiB, in linear time.
+  - Fixed: Eloquent relations resolve inside each project (two Laravel projects with the same model names);
+    a project that serves itself gets its HTTP edges; staged copies of removed projects are deleted;
+    declutter keeps a memberless base class; typed PHP calls stay in their project; `kb-refresh` logs a
+    broken config instead of a traceback each minute; an unreadable docs folder warns and the build goes on;
+    duplicate or reserved project names are refused.
+  - Fixed: `search` `page: N` without a cursor gives the cursor's page N (`limit` 1-50 for more documents);
+    `run_code` and `batch` calls get whole answers and keep no cursor; `Class::method` finds the method;
+    `repo_map unused` handles two classes with one name; the add-on cache race; the sandbox service
+    survives a failed start; `kb-api /mcp` follows the same message rules as `kb-http`.
+  - Changed: `.graphifyignore` is removed; the staging copy is the only file filter, so a checkout, a pip
+    install and Docker build the same graph.
+  - Security: a caller with a list of projects always gets that list as the graph view, also when the list
+    holds every project: only a `"*"` grant and a local caller use the unfiltered graph (a rebuild with a new
+    project between the check and the answer showed that project).
+  - Security: OAuth: a client revoked during a refresh gets no tokens, a token of a removed client stops at
+    once, revoking drops the sign-ins in progress; the access token a refresh replaces ends 60 s later, and a
+    client keeps at most `KB_OAUTH_TOKENS_PER_CLIENT` (50) tokens. A refresh checks the token behind the
+    wrapper as it is, also when it starts with `kbo_`.
+  - Security: the self-call header goes only to this server's own port, not to another service on loopback;
+    the Settings page protects the access plugin the server started with by its name, and a plugin can say
+    `ACCESS = True` in `plugin.py`.
+  - Fixed: the password limit keeps at most 10000 addresses and drops expired ones without a rebuild; two
+    processes that cut one filtered graph copy no longer break each other (unique temporary files, a lock);
+    a changed document whose extraction fails leaves the index; the `repo_map unused` file scan stops at
+    its deadline inside one large folder and says it is incomplete.
+- **Docs:** the design doc no longer says the tool has no permissions; server, access protocol and tools
+  docs list the new settings.
+
 - **Fixed: a sign-in refused at random with "permission webhook answered 503".** Two copies of the users
   store could write `users.json` through one temporary file, and one of them failed with `FileNotFoundError`.
   Every save now takes its own temporary file, and the plugin and the store load once per process under a lock.
@@ -69,6 +149,21 @@ The single source of truth for the current version is the `VERSION` file. It is 
   the path or symbol that must be found, "no answer in the corpus" or "skip". A yellow mark beside the tab counts
   the questions without a label. The labelled questions are a golden set from real use
   (`/admin/questions.json`). Labels live in the usage database and stay after the calls are deleted.
+- **Added: the setting `contracts`** (`all` | `own`, env `KB_CONTRACTS`). `all` is the default and keeps the
+  old behaviour: every signed-in user sees every contract. `own` shows a limited caller only the contracts
+  that touch an allowed project: `contracts_search` cuts a hidden route to its method and URI and drops the
+  call sites of hidden projects, `connections` shows the hidden end as `(hidden)`, contract docs of hidden
+  projects stay out of `search` and `docs_get`, and the filtered graph keeps no node of another project.
+  `KB_CONTRACT_EDGES=0` works as before. A local session is not affected.
+- **Added: `bin/settings.py` and the Settings page of the admin** (`/admin/settings`). Settings an admin
+  changes at run time live in `<config>/settings.json` (atomic writes, read again when the file changes);
+  an env variable wins and locks the value on the page. The page also switches the add-ons (`addons.json`,
+  now written atomically), marks the ones that need a restart (`fast-routes`, plugins, the access plugin),
+  and says when `code-mode` or `scip` misses a piece. Each change is logged with the admin's name.
+- **Changed: the admin pages are part of the core, not an add-on.** kb-http shows them when it has admins
+  (`KB_ADMINS`, `admins.txt` or an access plugin with roles); kb-api on loopback without a token. An
+  `addons.json` or `KB_ADDONS` that still names `admin` works: the name is ignored. `kb addon install admin`
+  and `kb addon remove admin` say so and change nothing.
 
 ## [0.15.1] — 2026-11-20
 

@@ -50,8 +50,10 @@ qmd query --help >/dev/null 2>&1 && echo "qmd: query CLI ok" || echo "qmd: WRONG
 ## Configuration
 
 Copy `kb.projects.toml.example` to `kb.projects.toml` and edit it to add/remove a project or change
-which paths are scanned/indexed. No symlinks — paths are explicit. `.graphifyignore` controls what
-graphify excludes.
+which paths are scanned/indexed. No symlinks — paths are explicit. The staging copy (`bin/kb`) decides
+what graphify sees; the list is in [configuration](configuration.md). The file is real TOML.
+A missing or empty code folder, or two code folders with the same folder name, make the build exit
+non-zero; the project keeps its previous graph until the folder is back.
 
 ### qmd embedding backend
 

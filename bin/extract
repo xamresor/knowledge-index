@@ -2,8 +2,18 @@
 """Extract documents that are not markdown into markdown, so the doc index can see them.
 
     kb-extract <file> [...]            print the extracted markdown (with provenance) to stdout
-    kb-extract --into <dir> <file>...  write <dir>/<name>.md instead
+    kb-extract --into <dir> [--root <docs>] [--prune] [--from0] <file>...
+                                       write <dir>/<path>.md instead (bin/kb uses this)
     kb-extract --list                  which formats can be extracted on this machine, and why not
+
+--into writes each file to <dir>/<path relative to --root><suffix>.md, e.g. docs/guide.pdf becomes
+<dir>/docs/guide.pdf.md: the suffix stays, so guide.pdf never overwrites an authored guide.md, and
+a/x.pdf and b/x.pdf stay apart. Without --root the path is the bare file name. --from0 reads more
+file names from stdin, separated by NUL (find -print0). A file whose size and mtime did not change
+is not extracted again: <dir>/.kb-extracted.json remembers what was written, and also a file whose
+extraction failed, so a broken PDF is tried again only when it changes. --prune removes the
+files written by an earlier run whose source is not in this run. A write never follows a symlink:
+it goes to a temp file and replaces the target, and a target outside <dir> is refused.
 
 Design: one parser per format in bin/parsers/, each a thin wrapper over an external CLI. A missing tool
 means the format is unsupported — reported, never fatal. Every output carries a provenance header, so
@@ -11,10 +21,77 @@ an OCR'd scan can never be mistaken for something a human wrote.
 """
 from __future__ import annotations
 
+import json
+import os
+import re
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 import parsers
+
+MANIFEST = ".kb-extracted.json"   # in the --into dir: target -> source, size, mtime, parser
+_STAMP = re.compile(r"(?m)^extracted_at: .*$")
+
+
+def _parser_name(module) -> str:
+    return module.__name__.rsplit(".", 1)[-1]
+
+
+def _inside(path: Path, root: Path) -> bool:
+    """True when the real path of `path` lies under the real path of `root`."""
+    real, base = os.path.realpath(path), os.path.realpath(root)
+    return real == base or real.startswith(base + os.sep)
+
+
+def _write(target: Path, text: str, into: Path) -> None:
+    """Write without following a symlink: a temp file in the target folder, then os.replace."""
+    existing = target.parent
+    while not existing.exists():
+        existing = existing.parent
+    if not _inside(existing, into):         # checked before mkdir, so no folder is made outside
+        raise OSError(f"{target} is outside {into}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not _inside(target.parent, into):
+        raise OSError(f"{target} is outside {into}")
+    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=".kb-extract-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, target)
+    except BaseException:
+        if os.path.lexists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def _load_manifest(into: Path) -> dict:
+    path = into / MANIFEST
+    if path.is_symlink() or not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _remove(target: Path, into: Path) -> None:
+    """Remove a file written by an earlier run. A symlinked folder on the way is not followed."""
+    if _inside(target.parent, into) and (target.is_symlink() or target.is_file()):
+        target.unlink()
+
+
+def _target(path: Path, root: Path | None, into: Path) -> Path | None:
+    """<into>/<path relative to root>.md, or None when the source lies outside the root."""
+    if root is None:
+        return into / (path.name + ".md")
+    try:
+        rel = Path(os.path.abspath(path)).relative_to(os.path.abspath(root))
+    except ValueError:
+        return None
+    return into / (str(rel) + ".md")
 
 
 def main(argv: list[str]) -> int:
@@ -36,14 +113,98 @@ def main(argv: list[str]) -> int:
         return 0
 
     into: Path | None = None
+    root: Path | None = None
+    prune = from0 = False
     if args[0] == "--into":
-        if len(args) < 3:
-            print("--into needs a directory and at least one file", file=sys.stderr)
+        if len(args) < 2:
+            print("--into needs a directory", file=sys.stderr)
             return 2
         into = Path(args[1])
         into.mkdir(parents=True, exist_ok=True)
         args = args[2:]
+        while args and args[0] in ("--root", "--prune", "--from0"):
+            flag = args.pop(0)
+            if flag == "--root":
+                if not args:
+                    print("--root needs a directory", file=sys.stderr)
+                    return 2
+                root = Path(args.pop(0))
+            elif flag == "--prune":
+                prune = True
+            else:
+                from0 = True
+        if from0:
+            args += [n for n in sys.stdin.read().split("\0") if n]
+        if not args and not prune:
+            print("--into needs at least one file", file=sys.stderr)
+            return 2
+    if into is None:
+        return _to_stdout(args)
 
+    manifest, kept = _load_manifest(into), {}
+    for name in args:
+        path = Path(name)
+        if path.is_symlink() or not path.is_file():
+            print(f"skip {name}: not a regular file", file=sys.stderr)
+            continue
+        target = _target(path, root, into)
+        if target is None:
+            print(f"skip {name}: outside {root}", file=sys.stderr)
+            continue
+        key = str(target.relative_to(into))
+        if root is not None and (root / key).exists():
+            print(f"skip {path.name}: the authored {key} has the same name", file=sys.stderr)
+            continue
+        st = path.stat()
+        module = parsers.for_path(path)
+        old = manifest.get(key) or {}
+        same = old.get("size") == st.st_size and old.get("mtime_ns") == st.st_mtime_ns
+        if same and old.get("failed") and module is not None and old.get("parser") == _parser_name(module):
+            kept[key] = old                 # failed before and unchanged since: do not try every build
+            continue
+        if (old.get("size") == st.st_size and old.get("mtime_ns") == st.st_mtime_ns
+                and (module is None or old.get("parser") == _parser_name(module))
+                and target.is_file() and not target.is_symlink()):
+            kept[key] = old                 # unchanged since the last run: keep the text as it is
+            continue
+        if module is None:
+            needed = parsers.MISSING_TOOLS.get(path.suffix.lower())
+            why = f"install {', '.join(needed)}" if needed else "no parser for this format"
+            print(f"skip {path.name}: {why}", file=sys.stderr)
+            continue
+        try:
+            text = parsers.with_provenance(module.extract(path), path, module)
+        except parsers.ExtractError as exc:
+            print(f"skip {path.name}: {exc} (not tried again until the file changes)", file=sys.stderr)
+            # The text of the earlier version no longer describes the file: it leaves the index. The
+            # failure is remembered for this size and mtime only.
+            _remove(target, into)
+            kept[key] = {"source": os.path.abspath(path), "size": st.st_size, "mtime_ns": st.st_mtime_ns,
+                         "parser": _parser_name(module), "failed": str(exc)[:200]}
+            continue
+        # The source mtime, not the clock: the same source gives the same text, so the doc index
+        # does not embed it again on every build.
+        stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(st.st_mtime))
+        text = _STAMP.sub(lambda _m: f"extracted_at: {stamp}", text, count=1)
+        try:
+            _write(target, text, into)
+        except OSError as exc:
+            print(f"skip {path.name}: cannot write {target}: {exc}", file=sys.stderr)
+            continue
+        kept[key] = {"source": os.path.abspath(path), "size": st.st_size, "mtime_ns": st.st_mtime_ns,
+                     "parser": _parser_name(module)}
+        print(f"{path.name} -> {target}  ({len(text)} chars, {module.CONFIDENCE})")
+    if prune:
+        for key in set(manifest) - set(kept):
+            if root is None or not (root / key).exists():     # never an authored file of that name
+                _remove(into / key, into)
+    else:
+        kept = {**manifest, **kept}
+    _write(into / MANIFEST, json.dumps(kept, indent=1, sort_keys=True) + "\n", into)
+    return 0
+
+
+def _to_stdout(args: list[str]) -> int:
     failures = 0
     for name in args:
         path = Path(name)
@@ -59,18 +220,11 @@ def main(argv: list[str]) -> int:
             failures += 1
             continue
         try:
-            text = parsers.with_provenance(module.extract(path), path, module)
+            sys.stdout.write(parsers.with_provenance(module.extract(path), path, module))
         except parsers.ExtractError as exc:
             print(f"skip {path.name}: {exc}", file=sys.stderr)
             failures += 1
-            continue
-        if into is None:
-            sys.stdout.write(text)
-        else:
-            target = into / (path.stem + ".md")
-            target.write_text(text, encoding="utf-8")
-            print(f"{path.name} -> {target}  ({len(text)} chars, {module.CONFIDENCE})")
-    return 1 if failures and not into else 0
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

@@ -28,6 +28,9 @@ export GRAPHIFY_VIZ_NODE_LIMIT="${GRAPHIFY_VIZ_NODE_LIMIT:-20000}"
 
 # Set while build_graph rewrites graph.json; on a failed exit the previous graph comes back.
 GRAPH_PREV=""
+# Projects whose code could not be staged or built this run. The build goes on with their previous
+# graph and exits non-zero at the end ("Failures are loud", docs/design.md).
+BUILD_ERRORS=""
 BUILD_START=""
 BUILD_KIND=""
 # Seconds per build step: `step "title"` closes the open step, prints its time and opens the next one.
@@ -65,51 +68,140 @@ keep_graph() {
 }
 trap keep_graph EXIT
 
+# The parsed project file (parse_projects), read once by require_cfg.
+PROJECTS=""
 require_cfg() {
-  [ -f "$CFG" ] && return
-  echo "error: $CFG not found." >&2
-  echo "Run 'kb-install' (or copy $KB_PACKAGE/kb.projects.toml.example to $CFG)" >&2
-  echo "then edit it with your projects' paths." >&2
-  exit 1
+  if [ ! -f "$CFG" ]; then
+    echo "error: $CFG not found." >&2
+    echo "Run 'kb-install' (or copy $KB_PACKAGE/kb.projects.toml.example to $CFG)" >&2
+    echo "then edit it with your projects' paths." >&2
+    exit 1
+  fi
+  PROJECTS="$(parse_projects)" || exit 1   # a broken file stops the build here, with the reason
 }
 
-# --- tiny TOML reader: emits "name|code(csv)|docs|routes|calls(csv)|serves" per project
-read_projects() { "$PY" - "$CFG" <<'PY'
-import re, sys
-txt = open(sys.argv[1]).read()
-blocks = re.split(r'(?m)^\[\[project\]\]\s*$', txt)[1:]
-def val(b, k):
-    m = re.search(rf'(?m)^\s*{k}\s*=\s*(.+)$', b)
-    if not m: return ""
-    raw = m.group(1).split('#',1)[0].strip()
-    if raw.startswith('['):
-        return ",".join(re.findall(r'"([^"]+)"', raw))
-    return raw.strip('"')
-for b in blocks:
-    print("|".join(val(b,k) for k in ("name","code","docs","routes","calls","serves")))
+# --- kb.projects.toml, read with tomllib: one line "name|code(csv)|docs|routes|calls(csv)|serves(csv)"
+# per project. A list key also takes one string. `|`, `,` and newlines in a value are refused: they
+# would split the line.
+parse_projects() { "$PY" - "$CFG" <<'PY'
+import sys, tomllib
+cfg = sys.argv[1]
+try:
+    with open(cfg, "rb") as fh:
+        projects = tomllib.load(fh).get("project", [])
+except (OSError, tomllib.TOMLDecodeError) as e:
+    sys.exit(f"error: {cfg}: {e}")
+LISTS = ("code", "calls", "serves")
+KEYS = ("name", "code", "docs", "routes", "calls", "serves")
+# Node repo tags the build gives its own nodes (db::<table>, domain::<name>): a project of that name
+# would mix its nodes with them.
+RESERVED = ("db", "domain")
+def val(p, k):
+    v = p.get(k, "")
+    vals = [v] if isinstance(v, str) else v
+    if not isinstance(vals, list) or not all(isinstance(x, str) for x in vals) \
+            or (k not in LISTS and not isinstance(v, str)):
+        sys.exit(f"error: {cfg}: project {p.get('name')!r}: `{k}` must be "
+                 + ("a string or a list of strings" if k in LISTS else "a string"))
+    for x in vals:
+        if any(c in x for c in "|,\n"):
+            sys.exit(f"error: {cfg}: project {p.get('name')!r}: `{k}` value {x!r} has '|', ',' or a newline")
+    return ",".join(x for x in vals if x)
+if not isinstance(projects, list) or not all(isinstance(p, dict) for p in projects):
+    sys.exit(f"error: {cfg}: use [[project]] blocks")
+seen = set()
+for i, p in enumerate(projects, 1):
+    name = p.get("name")
+    if not isinstance(name, str) or not name.strip():
+        sys.exit(f"error: {cfg}: [[project]] block {i} has no `name`")
+    if name in RESERVED:
+        sys.exit(f"error: {cfg}: project name {name!r} is reserved (the build uses it for its own nodes)")
+    if name in seen:
+        # both would stage into repos/<name>/ and every repo tag of the merged graph would be wrong
+        sys.exit(f"error: {cfg}: project {name!r} is named twice")
+    seen.add(name)
+    for k in sorted(set(p) - set(KEYS)):
+        print(f"warning: {cfg}: project {name!r}: unknown key `{k}` (known: {', '.join(KEYS)})",
+              file=sys.stderr)
+for p in projects:
+    print("|".join(val(p, k) for k in KEYS))
 PY
 }
+read_projects() { [ -z "$PROJECTS" ] || printf '%s\n' "$PROJECTS"; }
 
+# The migration folders of the Laravel projects (`routes` = an app folder). bin/link_data.py reads
+# them for the FK edges, and the build signature hashes them. Keep in step with
+# lang/php_laravel.py (MIGRATIONS_SUBDIR).
+migration_dirs() {
+  local name code docs routes calls serves
+  while IFS='|' read -r name code docs routes calls serves; do
+    if [ -n "$routes" ] && [ -d "$routes/database/migrations" ]; then echo "$routes/database/migrations"; fi
+  done < <(read_projects)
+}
+
+# Stage one project's code folders into repos/<name>/ and build its graph there. A missing folder, a
+# failed copy, two folders with one name or a stage without files is an error: the project keeps its
+# previous graph, its name goes into BUILD_ERRORS, and the build exits non-zero at the end.
 stage_and_build() {
   local name="$1" code_csv="$2"
   local dest="$KB_DATA/repos/$name"
+  local out="$dest/graphify-out"
+  local d base rc err files dirs=()
+  local -A seen=()
+  IFS=',' read -ra dirs <<< "$code_csv"
+  # Check every folder before the old copy is removed: a broken config must not wipe the last good one.
+  for d in "${dirs[@]}"; do
+    d="${d%/}"
+    if [ ! -d "$d" ]; then
+      echo "  [$name] error: code folder $d is missing — kept the previous graph of this project" >&2
+      BUILD_ERRORS+=" $name"; return 0
+    fi
+    # Each folder lands in repos/<name>/<folder name>/: two folders with one name overwrite each other.
+    base="$(basename "$d")"
+    if [ -n "${seen[$base]:-}" ]; then
+      echo "  [$name] error: code folders ${seen[$base]} and $d have the same folder name '$base' and would" \
+           "overwrite each other in repos/$name/$base — kept the previous graph of this project" >&2
+      BUILD_ERRORS+=" $name"; return 0
+    fi
+    seen[$base]="$d"
+  done
   # Keep repos/<name>/graphify-out/ between runs: its cache makes `graphify update` re-extract only
   # changed files. Everything else (the staged sources) is re-copied; rsync -a keeps source mtimes.
   mkdir -p "$dest"
   find "$dest" -mindepth 1 -maxdepth 1 ! -name graphify-out -exec rm -rf {} +
-  IFS=',' read -ra dirs <<< "$code_csv"
   for d in "${dirs[@]}"; do
     # Build output and caches are not source: `.next` of a Next.js app alone was 2.1 GB per build.
-    [ -d "$d" ] && rsync -a --exclude vendor --exclude node_modules --exclude storage \
+    # Secrets never reach the KB: bootstrap/cache/config.php holds the DB password and APP_KEY after
+    # `config:cache`, and .env files hold the rest (.env.example stays: it names the keys, no values).
+    # These excludes are the only filter: the same graph in a checkout, a pip install and Docker.
+    rc=0
+    err=$(rsync -a --include .env.example --exclude '.env' --exclude '.env.*' \
+      --exclude bootstrap/cache --exclude .git \
+      --exclude vendor --exclude node_modules --exclude storage --exclude public \
       --exclude dist --exclude build --exclude .next --exclude .nuxt --exclude .output \
-      --exclude coverage --exclude .turbo --exclude .cache \
-      --exclude tests --exclude '*.png' --exclude '*.svg' --exclude '*.jpg' --exclude '*.jpeg' \
-      --exclude '*.gif' --exclude '*.ico' --exclude '*.webp' "$d" "$dest/" 2>/dev/null || true
+      --exclude coverage --exclude .turbo --exclude .cache --exclude tests \
+      --exclude '*.png' --exclude '*.svg' --exclude '*.jpg' --exclude '*.jpeg' --exclude '*.gif' \
+      --exclude '*.ico' --exclude '*.webp' --exclude '*.bmp' --exclude '*.pdf' --exclude '*.woff' \
+      --exclude '*.woff2' --exclude '*.ttf' --exclude '*.eot' --exclude '*.map' --exclude '*.min.js' \
+      --exclude '*.min.css' --exclude '*.lock' --exclude '*.json' \
+      "${d%/}" "$dest/" 2>&1) || rc=$?
+    # Exit 24: files vanished during the copy (a checkout in the middle of a pull). The copy is usable.
+    if [ "$rc" -ne 0 ] && [ "$rc" -ne 24 ]; then
+      echo "  [$name] error: copying $d failed (rsync exit $rc): $(tail -1 <<<"$err") — kept the previous graph" >&2
+      rm -f "$out/.kb-manifest"   # the half-staged copy must not count as built
+      BUILD_ERRORS+=" $name"; return 0
+    fi
   done
+  files=$(find "$dest" -path "$out" -prune -o -type f -print | wc -l)
+  if [ "$files" -eq 0 ]; then
+    echo "  [$name] error: no files staged from $code_csv — kept the previous graph of this project" >&2
+    rm -f "$out/.kb-manifest"
+    BUILD_ERRORS+=" $name"; return 0
+  fi
   echo "  [$name] staged $(find "$dest" -type f \( -name '*.php' -o -name '*.js' -o -name '*.vue' -o -name '*.ts' -o -name '*.tsx' -o -name '*.py' -o -name '*.kt' \) | wc -l) source files"
   # Skip graphify when no staged file changed since the last build (path, size, mtime + the graphify
   # version): an unchanged project cost 3-15 s for nothing. `kb build` and KB_FORCE=1 always rebuild.
-  local out="$dest/graphify-out" manifest sig
+  local manifest sig
   manifest=$( { graphify --version 2>&1 | head -1
                 find "$dest" -path "$out" -prune -o -type f -printf '%P %s %T@\n' | LC_ALL=C sort; } | sha256sum)
   sig="$out/.kb-manifest"
@@ -118,28 +210,54 @@ stage_and_build() {
     echo "  [$name] unchanged — graph kept"
     return 0
   fi
+  # No signature while graphify runs: a run that dies here must not leave one that matches.
+  rm -f "$sig"
   # Incremental first: graphify's cache re-extracts only changed files (about half the time of a full
   # pass). graphify refuses to write a graph with fewer nodes than before (its guard against partial
   # rebuilds), and deleted code is exactly that case: then it says "Refusing to overwrite" and we run
   # the full pass with --force, because the staged copy is the truth.
+  # Success is exit 0 and a graph.json. Do not ask for a newer graph.json: graphify leaves it
+  # untouched when a code change does not change the graph.
   local log
+  rc=0
   if [ "${BUILD_KIND:-}" = "build" ] || [ "${KB_FORCE:-0}" = "1" ]; then
-    graphify update "$dest" --force >/dev/null 2>&1 || true
+    log=$(graphify update "$dest" --force 2>&1) || rc=$?
   else
-    log=$(graphify update "$dest" 2>&1) || true
+    log=$(graphify update "$dest" 2>&1) || rc=$?
     if grep -q "Refusing to overwrite" <<<"$log" || [ ! -f "$out/graph.json" ]; then
       echo "  [$name] code was removed — full pass"
-      graphify update "$dest" --force >/dev/null 2>&1 || true
+      rc=0
+      log=$(graphify update "$dest" --force 2>&1) || rc=$?
     fi
   fi
-  [ -f "$out/graph.json" ] && printf '%s' "$manifest" > "$sig"
+  if [ "$rc" -ne 0 ] || [ ! -f "$out/graph.json" ]; then
+    echo "  [$name] WARNING: graphify failed (exit $rc): $(tail -1 <<<"$log")" >&2
+    echo "  [$name] the previous graph of this project stays; the next build of this project tries again" >&2
+    [[ " $BUILD_ERRORS " == *" $name "* ]] || BUILD_ERRORS+=" $name"
+    return 0
+  fi
+  printf '%s' "$manifest" > "$sig"
   return 0
 }
 
 build_graph() {
   require_cfg
   step "Building per-project graphs"
-  local merge_inputs=() routes_specs=() scip_specs=()
+  local merge_inputs=() scip_specs=() sroot
+  # Drop the staged copy of a project that left the config (or lost its code): the linkers walk all
+  # of repos/, and a stale copy would give false edges. Direct children only; `rm -rf` on a symlink
+  # removes the link, never what it points to.
+  if [ -d "$KB_DATA/repos" ]; then
+    local keep_repos=" " stale
+    while IFS='|' read -r name code docs routes calls serves; do
+      [ -n "$code" ] && keep_repos+="$name "
+    done < <(read_projects)
+    while IFS= read -r -d '' stale; do
+      [[ "$keep_repos" == *" $(basename "$stale") "* ]] && continue
+      echo "  [$(basename "$stale")] no longer a code project — removed its staged copy"
+      rm -rf -- "$stale"
+    done < <(find "$KB_DATA/repos" -mindepth 1 -maxdepth 1 -print0)
+  fi
   while IFS='|' read -r name code docs routes calls serves; do
     [ -z "$name" ] && continue
     if [ -z "$code" ]; then
@@ -147,7 +265,12 @@ build_graph() {
       continue
     fi
     stage_and_build "$name" "$code"
-    merge_inputs+=("$KB_DATA/repos/$name/graphify-out/graph.json")
+    if [ -f "$KB_DATA/repos/$name/graphify-out/graph.json" ]; then
+      merge_inputs+=("$KB_DATA/repos/$name/graphify-out/graph.json")
+    else
+      echo "  [$name] error: no graph for this project yet — left out of the merged graph" >&2
+      [[ " $BUILD_ERRORS " == *" $name "* ]] || BUILD_ERRORS+=" $name"
+    fi
     if [ -n "$routes" ]; then
       # Route table feeds the frontend->controller edges. A silent failure here means the graph
       # quietly loses its cross-repo half, so say so instead of swallowing it.
@@ -162,9 +285,10 @@ build_graph() {
       if [ -n "${KB_ROUTES_DIR:-}" ] && [ -f "$KB_ROUTES_DIR/$name.json" ]; then rfile="$KB_ROUTES_DIR/$name.json"
       elif [ "${routes%.json}" != "$routes" ]; then rfile="$routes"; fi
       [ -n "$rfile" ] && how="reading the route table $rfile"
-      if { [ -n "$rfile" ] && "$PY" -c 'import json,sys; assert isinstance(json.load(open(sys.argv[1])), list)' "$rfile" 2>/dev/null \
-             && cp "$rfile" "$KB_DATA/routes.$name.json.new"; } \
-         || { [ -z "$rfile" ] && env -C "$routes" LOG_CHANNEL=null php artisan route:list --json >"$KB_DATA/routes.$name.json.new" 2>/dev/null; }; then
+      # Both ways must give a JSON list: a PHP notice on stdout must not replace the last good table.
+      if { { [ -n "$rfile" ] && cp "$rfile" "$KB_DATA/routes.$name.json.new"; } \
+             || { [ -z "$rfile" ] && env -C "$routes" LOG_CHANNEL=null php artisan route:list --json >"$KB_DATA/routes.$name.json.new" 2>/dev/null; }; } \
+         && "$PY" -c 'import json,sys; assert isinstance(json.load(open(sys.argv[1])), list)' "$KB_DATA/routes.$name.json.new" 2>/dev/null; then
         mv -f "$KB_DATA/routes.$name.json.new" "$KB_DATA/routes.$name.json"
       else
         rm -f "$KB_DATA/routes.$name.json.new"
@@ -176,33 +300,63 @@ build_graph() {
         fi
       fi
     fi
-    [ -n "$calls" ] && [ -n "$serves" ] && routes_specs+=("$serves|$calls")
     # The project root for the SCIP add-on: the Laravel app when it has one, else the parent of the
-    # first code folder (where composer.json, vendor/ or a ready index.scip live).
-    scip_specs+=("$name=${routes:-$(dirname "${code%%,*}")}")
+    # first code folder (where composer.json, vendor/ or a ready index.scip live). A `routes` that
+    # names a ready .json route table is no app folder.
+    sroot="$routes"
+    if [ -z "$sroot" ] || [ "${sroot%.json}" != "$sroot" ]; then sroot="$(dirname "${code%%,*}")"; fi
+    scip_specs+=("$name=$sroot")
   done < <(read_projects)
+  if [ "${#merge_inputs[@]}" -eq 0 ]; then
+    if [ -n "$BUILD_ERRORS" ]; then
+      echo "error: no project has a graph (failed:$BUILD_ERRORS)" >&2
+      exit 1
+    fi
+    echo "    no code projects — graph steps skipped"
+    mkdir -p "$OUT"
+    build_contracts   # contract docs still reach connections and problems
+    return 0
+  fi
 
   # Everything below is a pure function of these inputs: the per-project manifests (staged code), the
   # route tables, the docs, the config and the KB's own code. When none changed, the merged graph from
   # the last run is still exact, and the 40-odd seconds of merging and post-processing are skipped.
   mkdir -p "$OUT"
-  local post_sig post_file="$OUT/.kb-post-manifest" doc_roots=() m
+  local post_sig post_file="$OUT/.kb-post-manifest" doc_roots=() mig_dirs=() mig_args=() m
   while IFS='|' read -r name code docs routes calls serves; do
     [ -n "$docs" ] && [ -d "$docs" ] && doc_roots+=("$name=$docs")
   done < <(read_projects)
+  while read -r m; do
+    mig_dirs+=("$m"); mig_args+=(--migrations "$m")
+  done < <(migration_dirs)
   post_sig=$( {
       for m in "${merge_inputs[@]}"; do echo "$m"; cat "$(dirname "$m")/.kb-manifest" 2>/dev/null || echo none; echo; done
       for m in "$KB_DATA"/routes.*.json "$KB_CONFIG/kb.projects.toml" "$KB_CONFIG/kb.hubs.txt" "$KB/kb.hubs.txt"; do
         [ -f "$m" ] && sha256sum "$m"
       done
+      # the KB's own contract docs (build_contracts reads them)
+      [ -d "$KB_DATA/docs/$CONTRACT_DIR" ] && find "$KB_DATA/docs/$CONTRACT_DIR" -type f -name '*.md' \
+        -printf 'kb-contracts %P %s %T@\n' 2>/dev/null | LC_ALL=C sort
       for m in "${doc_roots[@]}"; do
         echo "$m"; find "${m#*=}" -type f -name '*.md' -not -path '*/node_modules/*' -not -path '*/.git/*' \
           -not -path '*/vendor/*' -printf '%P %s %T@\n' 2>/dev/null | LC_ALL=C sort
       done
+      # the migrations that bin/link_data.py reads for the FK edges
+      for m in "${mig_dirs[@]}"; do
+        echo "$m"; find "$m" -type f -name '*.php' -printf '%P %s %T@\n' 2>/dev/null | LC_ALL=C sort
+      done
       find "$KB/bin" -type f \( -name '*.py' -o -name kb \) -printf '%P %s %T@\n' | LC_ALL=C sort
       # the add-ons that change the graph (scip) and its ready indexes
       echo "scip=$("$PY" -c 'import sys; sys.path.insert(0, sys.argv[1]); import addons; print(addons.on("scip"))' "$KB/bin")"
-      find "$KB_DATA/scip" -type f -printf '%P %s %T@\n' 2>/dev/null | LC_ALL=C sort || true
+      # A store file that bin/link_scip.py wrote comes from the staged code (already above), and this
+      # build writes it again: leave it out, or no build is ever "unchanged". Line 2 of its <file>.key
+      # is "<size> <mtime>" of the file (link_scip.store_is_derived). A store file without a matching
+      # key is a ready index from the user, and it counts.
+      for m in "$KB_DATA"/scip/*.scip; do
+        [ -f "$m" ] || continue
+        [ "$(sed -n 2p "$m.key" 2>/dev/null)" = "$(stat -c '%s %Y' "$m")" ] && continue
+        echo "$m"; stat -c '%s %Y' "$m"
+      done
       for m in "${scip_specs[@]}"; do
         if [ -f "${m#*=}/index.scip" ]; then echo "$m"; stat -c '%s %Y' "${m#*=}/index.scip"; fi
       done
@@ -224,8 +378,10 @@ build_graph() {
   if [ "${#merge_inputs[@]}" -ge 2 ]; then
     graphify merge-graphs "${merge_inputs[@]}" --out "$OUT/graph.json" >/dev/null
   else
-    # a single-project KB is legitimate — merge-graphs needs >=2, so just adopt the one graph
-    cp "${merge_inputs[0]}" "$OUT/graph.json"
+    # a single-project KB is legitimate — merge-graphs needs >=2, so adopt the one graph and tag it the
+    # way merge-graphs does (`repo`, ids `<repo>::<id>`): the linkers look nodes up by (repo, file).
+    "$PY" "$KB/bin/graph.py" tag-repo "${merge_inputs[0]}" "$OUT/graph.json" \
+      "$(basename "$(dirname "$(dirname "${merge_inputs[0]}")")")"
   fi
 
   step "Injecting HTTP edges (frontend -> controllers)"
@@ -237,7 +393,8 @@ build_graph() {
     # each call site is matched against every listed route table.
     IFS=',' read -ra apis <<< "$serves"
     for api in "${apis[@]}"; do
-      "$PY" "$KB/bin/link_http.py" "$OUT/graph.json" "$KB_DATA/routes.$api.json" "$api" "${fe[@]}"
+      # --from: the calling project, so two projects with one relative path each get their edges.
+      "$PY" "$KB/bin/link_http.py" --from "$name" "$OUT/graph.json" "$KB_DATA/routes.$api.json" "$api" "${fe[@]}"
     done
   done < <(read_projects)
 
@@ -260,7 +417,8 @@ build_graph() {
   step "Enriching with node types, domains, db_table nodes + domain anchors"
   "$PY" "$KB/bin/enrich.py" "$OUT/graph.json" "$KB_DATA/repos"
   step "Adding data-layer links (eloquent model rels, FK table->table, SQL code->table)"
-  "$PY" "$KB/bin/link_data.py" "$OUT/graph.json" "$KB_DATA/repos"
+  # --migrations <dir>, once per folder: the FK edges come from there, wherever the config lives.
+  "$PY" "$KB/bin/link_data.py" "$OUT/graph.json" "$KB_DATA/repos" "${mig_args[@]}"
   # Add-on `scip` (off by default): precise calls from a SCIP index. Before the typed-call linker,
   # so that one does not add an INFERRED copy of an edge the index proves.
   "$PY" "$KB/bin/link_scip.py" "$OUT/graph.json" "$KB_DATA/repos" "${scip_specs[@]}"
@@ -297,7 +455,12 @@ build_contracts() {
   # The KB service's own contract docs, if this checkout has any (<data>/docs/contracts/).
   [ -d "$KB_DATA/docs/$CONTRACT_DIR" ] && docs_specs+=("$SELF_DOCS=$KB_DATA/docs")
   step "Building the contract index (routes + frontend call sites)"
-  "$PY" "$KB/bin/contracts.py" contracts "$OUT/graph.json" "$OUT/contracts.json" "${specs[@]}"
+  if [ -f "$OUT/graph.json" ]; then
+    "$PY" "$KB/bin/contracts.py" contracts "$OUT/graph.json" "$OUT/contracts.json" "${specs[@]}"
+  else
+    echo "[]" >"$OUT/contracts.json"   # no code graph (a docs-only KB): no routes and no call sites
+    echo "    no graph — no contracts from code"
+  fi
   step "Building the connection map (contract docs + HTTP calls)"
   "$PY" "$KB/bin/contracts.py" connections "$OUT/contracts.json" "$OUT/connections.json" "${docs_specs[@]}"
   step "Finding problems (contract docs, unknown routes)"
@@ -349,6 +512,16 @@ qmd_embed() {
   esac
 }
 
+# rsync protect rules for the extracted docs: "P *.[pP][dD][fF].md" and so on, one per format that
+# the find in build_kb hands to bin/extract. Case-blind, like `find -iname`.
+EXTRACTED_PROTECT=()
+for _ext in pdf docx odt rtf epub png jpg jpeg tif tiff; do
+  _glob=""
+  for (( _i = 0; _i < ${#_ext}; _i++ )); do _c="${_ext:_i:1}"; _glob+="[${_c}${_c^^}]"; done
+  EXTRACTED_PROTECT+=("--filter=P *.${_glob}.md")
+done
+unset _ext _glob _i _c
+
 build_kb() {
   require_cfg
   step "Staging + indexing docs into qmd collection '$COLLECTION'"
@@ -367,20 +540,43 @@ build_kb() {
     name="${root%%|*}"; docs="${root#*|}"
     keep+=("$name")
     mkdir -p "$DOCS_STAGE/$name"
-    rsync -a --delete --prune-empty-dirs \
+    # --safe-links: a symlink that points out of the docs tree is not staged (report.md -> a secret).
+    # The protect rules (P) keep the extracted files (<file>.<ext>.md, below) from --delete, so an
+    # unchanged PDF is not extracted again on every run; bin/extract removes the stale ones itself.
+    # A folder that holds only extracted files cannot be deleted (they are protected): rsync says so
+    # on every build, and it is expected, so that line is dropped.
+    { rsync -a --delete --prune-empty-dirs --safe-links "${EXTRACTED_PROTECT[@]}" \
       --exclude='node_modules/' --exclude='.git/' --exclude='vendor/' \
       --include='*/' --include='*.md' --exclude='*' \
-      "$docs/" "$DOCS_STAGE/$name/" 2>/dev/null || true
+      "$docs/" "$DOCS_STAGE/$name/" 2>/dev/null || true; } | { grep -v '^cannot delete non-empty directory: ' || true; }
     # Non-markdown documents (PDF, docx, scans) are extracted into the same staged tree, so the doc
-    # index sees them too. One parser per format lives in bin/parsers/; a format whose external tool
-    # is absent is reported and skipped, never fatal. Extracted files carry a provenance header, so an
-    # OCR'd scan is never mistaken for authored text. Opt out with KB_EXTRACT=0.
+    # index sees them too: docs/guide.pdf becomes docs/guide.pdf.md. One parser per format lives in
+    # bin/parsers/; a format whose external tool is absent is reported and skipped, never fatal.
+    # Extracted files carry a provenance header, so an OCR'd scan is never mistaken for authored
+    # text. bin/extract skips a source whose size and mtime did not change, and --prune removes the
+    # extract of a deleted source. KB_EXTRACT=0 switches extraction off and removes the extracts.
     if [ "${KB_EXTRACT:-1}" != "0" ]; then
+      # An unreadable folder under the docs root makes find exit 1: warn and go on, so the other
+      # projects' docs and the qmd update still run. Without a full list, --prune is left out: the
+      # extracts of the unreadable folder stay until it can be read again.
+      local find_rc=0 list prune=--prune
+      list="$(mktemp)"
       find "$docs" -type f \( -iname '*.pdf' -o -iname '*.docx' -o -iname '*.odt' -o -iname '*.rtf' \
         -o -iname '*.epub' -o -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' \
         -o -iname '*.tif' -o -iname '*.tiff' \) \
-        -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/vendor/*' -print0 2>/dev/null \
-        | xargs -0 -r "$PY" "$KB/bin/extract" --into "$DOCS_STAGE/$name" 2>&1 | sed 's/^/    /'
+        -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/vendor/*' -print0 \
+        >"$list" 2>/dev/null || find_rc=$?
+      if [ "$find_rc" -ne 0 ]; then
+        echo "  [$name] warning: some folders under $docs could not be read (find exit $find_rc); their documents are left out" >&2
+        prune=""
+      fi
+      if [ -n "$prune" ] || [ -s "$list" ]; then
+        { "$PY" "$KB/bin/extract" --into "$DOCS_STAGE/$name" --root "$docs" $prune --from0 <"$list" 2>&1 || true; } \
+          | sed 's/^/    /'
+      fi
+      rm -f "$list"
+    else
+      "$PY" "$KB/bin/extract" --into "$DOCS_STAGE/$name" --root "$docs" --prune </dev/null 2>&1 | sed 's/^/    /'
     fi
     echo "  [$name] staged $(find "$DOCS_STAGE/$name" -name '*.md' | wc -l) docs"
     staged=1
@@ -430,6 +626,10 @@ addon() {
   local action="$1" name="$2" sb="$KB_DATA/sandbox" gpy gver
   gpy="$(head -1 "$(readlink -f "$(command -v graphify 2>/dev/null || echo /nonexistent)")" 2>/dev/null | sed 's/^#!//')"
   gver="$(graphify --version 2>/dev/null | awk '{print $2}')"
+  if [ "$name" = admin ] && { [ "$action" = install ] || [ "$action" = remove ]; }; then
+    echo "admin: the admin pages are part of the core now (always on; the shared server needs KB_ADMINS, admins.txt or an access plugin with roles). Nothing to $action."
+    return 0
+  fi
   case "$action" in
     list) "$PY" "$KB/bin/addons.py" list ;;
     install)
@@ -454,23 +654,27 @@ addon() {
             uv tool install "graphifyy==$gver" --with rustworkx --reinstall
           elif command -v pipx >/dev/null; then pipx inject graphifyy rustworkx
           else echo "install rustworkx into graphify's environment: $gpy -m pip install rustworkx" >&2; exit 1; fi ;;
-        tool-multicall|metrics|admin|audit|questions|datadict) : ;;   # nothing to fetch
+        tool-multicall|metrics|audit|questions|datadict) : ;;   # nothing to fetch
         scip)   # the indexer is the user's to install (docs/tools.md, "SCIP"); say when none is found
           if [ -z "${KB_SCIP_PHP:-}" ] && ! command -v scip-php >/dev/null; then
             echo "  no scip-php on the PATH and no KB_SCIP_PHP: only ready index.scip files will be read"
           fi ;;
         *) echo "kb addon install <name>: $(sed -n 's/^    "\([a-z-]*\)": .*/\1/p' "$KB/bin/addons.py" | tr '\n' ' ')" >&2; exit 1 ;;
       esac
-      "$PY" "$KB/bin/addons.py" on "$name" && echo "$name: on (restart the KB server to load it)"
-      if [ "$name" = admin ] && [ -z "${KB_ADMINS:-}" ] && [ ! -f "$KB_DATA/admins.txt" ]; then
-        echo "  the shared server also needs the admin names: KB_ADMINS=<names> or admins.txt (local kb-api needs none)"
-      fi ;;
+      "$PY" "$KB/bin/addons.py" on "$name" && echo "$name: on (restart the KB server to load it)" ;;
     remove)
       "$PY" "$KB/bin/addons.py" off "$name" && echo "$name: off"
       if [ -L "$KB_DATA/plugins/$name" ]; then rm -f "$KB_DATA/plugins/$name" && echo "  plugin link removed"; fi
       if [ "$name" = code-mode ]; then rm -rf "$sb/node_modules" && echo "  sandbox packages removed from $sb"; fi ;;
     *) echo "kb addon {list|install <name>|remove <name>}" >&2; exit 1 ;;
   esac
+}
+
+# The end of a build: exit non-zero when a project kept its previous graph (BUILD_ERRORS).
+fail_loud() {
+  [ -z "$BUILD_ERRORS" ] && return 0
+  echo "error: these projects kept their previous graph:$BUILD_ERRORS (see the errors above)" >&2
+  exit 1
 }
 
 case "${1:-build}" in
@@ -480,16 +684,18 @@ case "${1:-build}" in
           echo "  qmd:      $(qmd --version 2>/dev/null || echo 'not found')"
           "$PY" "$KB/bin/paths.py" | sed 's/^/  /'
           ;;
-  build)  BUILD_START=$(date +%s); BUILD_KIND=build; build_graph; build_kb; "$PY" "$KB/bin/plugins.py" build ;;
-  graph)  BUILD_START=$(date +%s); BUILD_KIND=graph; build_graph ;;
+  build)  BUILD_START=$(date +%s); BUILD_KIND=build; build_graph; build_kb; "$PY" "$KB/bin/plugins.py" build; fail_loud ;;
+  graph)  BUILD_START=$(date +%s); BUILD_KIND=graph; build_graph; fail_loud ;;
   kb)     build_kb ;;
-  update) BUILD_START=$(date +%s); BUILD_KIND=update; build_graph; build_kb >/dev/null; "$PY" "$KB/bin/plugins.py" build; echo "refreshed" ;;
+  update) BUILD_START=$(date +%s); BUILD_KIND=update; build_graph; build_kb >/dev/null; "$PY" "$KB/bin/plugins.py" build
+          fail_loud; echo "refreshed" ;;
   qmd-backend) rm -f "$LOCAL_CFG"; unset QMD_BACKEND; echo "qmd backend set to: $(resolve_qmd_backend)" ;;
   label)  "$PY" "$KB/bin/label_namespaces.py" "$OUT/graph.json" "$OUT/.graphify_labels.json"
           graphify cluster-only "$KB_DATA" --no-label >/dev/null; echo "relabeled + report regenerated" ;;
   vendor) "$PY" -c "import sys; sys.path.insert(0,'$KB/bin'); import paths; print(paths.stage_web())" >/dev/null
           W="$KB_WEB"; mkdir -p "$W/vendor"
-          curl -fsSL https://unpkg.com/vis-network/standalone/umd/vis-network.min.js \
+          # Pinned to the version that web/ is tested with; an unpinned URL changes under us.
+          curl -fsSL https://unpkg.com/vis-network@10.1.0/standalone/umd/vis-network.min.js \
             -o "$W/vendor/vis-network.min.js" &&
             echo "vendored $W/vendor/vis-network.min.js — the dashboard now works offline" ;;
   open)   W="$KB_WEB"; [ -f "$W/index.html" ] || "$PY" -c "import sys;sys.path.insert(0,'$KB/bin');import paths;paths.stage_web()"

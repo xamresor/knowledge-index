@@ -173,21 +173,25 @@ def read(path: str) -> str | None:
         return None
 
 
-def declared_tables(repos_dir: str) -> dict[str, str]:
-    """class name → table, scanned from staged model files (`protected $table = '…'`)."""
-    tables: dict[str, str] = {}
+def declared_tables(repos_dir: str) -> dict[tuple[str, str], str]:
+    """(repo, class name) -> table, scanned from staged model files (`protected $table = '…'`).
+    `repos_dir/<repo>/...` is the staged code of one project: two projects with a `User` model
+    keep their own tables."""
+    tables: dict[tuple[str, str], str] = {}
     for dirpath, _, files in os.walk(repos_dir):
         if not is_model_dir(dirpath):
             continue
         for filename in files:
             if not filename.endswith(EXTENSIONS):
                 continue
-            text = read(os.path.join(dirpath, filename))
+            path = os.path.join(dirpath, filename)
+            text = read(path)
             if text is None:
                 continue
             table, cls = TABLE_PROP.search(text), CLASS_ANYWHERE.search(text)
             if table and cls:
-                tables[cls.group(1)] = table.group(1)
+                repo = os.path.relpath(path, repos_dir).replace(os.sep, "/").split("/", 1)[0]
+                tables[(repo, cls.group(1))] = table.group(1)
     return tables
 
 

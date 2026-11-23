@@ -119,14 +119,26 @@ def frontmatter(text: str) -> dict[str, str]:
     return out
 
 
+def _inside(path: str, root: str) -> bool:
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
 def _contract_files(root: str):
-    """(file name, path) of every contract doc candidate under <root>/contracts/."""
+    """(file name, path) of every contract doc candidate under <root>/contracts/.
+
+    A file (or the contracts folder) that is a symlink out of the project's docs root is skipped:
+    `contracts/copied.md -> <other project>/docs/contracts/private.md` would show another project's
+    contract as this project's own, also under `contracts: own`. The path returned is the resolved
+    one, so the file read is the file checked."""
+    real_root = os.path.realpath(root)
     cdir = os.path.join(root, CONTRACT_DOCS_DIR)
-    if not os.path.isdir(cdir):
+    if not os.path.isdir(cdir) or not _inside(os.path.realpath(cdir), real_root):
         return
     for fn in sorted(os.listdir(cdir)):
         if fn.endswith(".md") and fn.lower() != "readme.md":
-            yield fn, os.path.join(cdir, fn)
+            real = os.path.realpath(os.path.join(cdir, fn))
+            if _inside(real, real_root) and os.path.isfile(real):
+                yield fn, real
 
 
 _JSON_CACHE: dict[str, tuple[float, list[dict]]] = {}
@@ -217,41 +229,64 @@ def declared_callers(c: dict, conn: list[dict]) -> list[str]:
 
 
 def contracts_search(q: str, path: str | None = None, limit: int = CONTRACTS_RESULTS,
-                     conn_path: str | None = None) -> str:
-    """Routes whose method, URI, name, action or middleware hold every word of `q`."""
+                     conn_path: str | None = None, visible: set[str] | None = None) -> str:
+    """Routes whose method, URI, name, action or middleware hold every word of `q`.
+
+    `visible`: the projects whose contracts the caller may see (the setting `contracts: own`), None =
+    every contract. With it, a route of a visible project shows in full with the call sites of visible
+    projects only. A route of a hidden project shows only when a visible project calls it, and then as
+    the bare endpoint (method and URI): no name, action, middleware, file or project. Its words match
+    only that endpoint, so a search by a hidden controller name finds nothing."""
     words = [w.lower() for w in q.split()]
     if not words:
         raise ValueError("'query' must not be empty")
+    try:
+        conn = load_index(conn_path or CONNECTIONS)
+    except NotBuilt:
+        conn = []  # the service map is optional here
+    if visible is not None:
+        conn = [r for r in conn if r.get("owner") in visible]   # declared callers: readable docs only
     hits = []
     for c in load_index(path or CONTRACTS):
+        if visible is not None:
+            callers = [x for x in c["callers"] if x["repo"] in visible]
+            if c["project"] not in visible:
+                declared = declared_callers(c, conn)
+                if not callers and not declared:
+                    continue
+                c = {"project": "", "method": c["method"], "uri": c["uri"], "name": "", "action": "",
+                     "middleware": [], "defined": "", "callers": callers, "bare": declared}
+            else:
+                c = {**c, "callers": callers}
         hay = " ".join([c["method"], c["uri"], norm_uri(c["uri"]), c["name"], c["action"],
                         *c["middleware"]]).lower()
         if all(w.strip("/") in hay for w in words):
             hits.append(c)
     if not hits:
         return "(no contracts match)"
-    try:
-        conn = load_index(conn_path or CONNECTIONS)
-    except NotBuilt:
-        conn = []  # the service map is optional here
     hits.sort(key=lambda c: (-len(c["callers"]), c["uri"], c["method"]))
     parts = []
     for c in hits[:limit]:
-        lines = [f"{c['method']} /{c['uri']}" + (f"  [{c['name']}]" if c["name"] else "")
-                 + f"  ({c['project']})",
-                 f"  action: {c['action']}" + (f"  @ {c['defined']}" if c["defined"] else "")]
-        if c["middleware"]:
-            # `Vendor\Middleware\Authorize:x` -> `Authorize:x`; the search matches the full name.
-            short = [m.split(":", 1)[0].rsplit("\\", 1)[-1] + (":" + m.split(":", 1)[1] if ":" in m else "")
-                     for m in c["middleware"]]
-            lines.append(f"  middleware: {', '.join(short)}")
-        declared = declared_callers(c, conn)
+        if "bare" in c:
+            lines = [f"{c['method']} /{c['uri']}  (a project you cannot see: the endpoint only)"]
+            declared = c["bare"]
+        else:
+            lines = [f"{c['method']} /{c['uri']}" + (f"  [{c['name']}]" if c["name"] else "")
+                     + f"  ({c['project']})",
+                     f"  action: {c['action']}" + (f"  @ {c['defined']}" if c["defined"] else "")]
+            if c["middleware"]:
+                # `Vendor\Middleware\Authorize:x` -> `Authorize:x`; the search matches the full name.
+                short = [m.split(":", 1)[0].rsplit("\\", 1)[-1] + (":" + m.split(":", 1)[1] if ":" in m else "")
+                         for m in c["middleware"]]
+                lines.append(f"  middleware: {', '.join(short)}")
+            declared = declared_callers(c, conn)
         if c["callers"]:
             lines.append("  callers: " + "; ".join(f"{x['repo']} {x['at']}" for x in c["callers"]))
         if declared:
             lines.append("  callers (contracts): " + "; ".join(declared))
         if not c["callers"] and not declared:
-            lines.append("  callers: none found (no frontend call site, no contract doc)")
+            lines.append("  callers: none found (no frontend call site, no contract doc)"
+                         + (" in your projects" if visible is not None else ""))
         parts.append("\n".join(lines))
     more = f"\n\n(+{len(hits) - limit} more — add words to narrow)" if len(hits) > limit else ""
     return "\n\n".join(parts)[:MAX_OUT] + more
@@ -290,14 +325,45 @@ def build_connections(docs: dict[str, str], contract_rows: list[dict]) -> list[d
     return out
 
 
-def connections(service: str, path: str | None = None) -> str:
+HIDDEN = "(hidden)"   # an end of a connection that the caller may not see (`contracts: own`)
+
+
+def visible_connections(rows: list[dict], visible: set[str]) -> list[dict]:
+    """The connection rows a caller limited to `visible` may see (the setting `contracts: own`).
+
+    A row whose contract doc belongs to a visible project stays as it is: the caller can read that doc.
+    Any other row stays only when one of its ends is a visible project; its other end becomes
+    "(hidden)", and a contract doc of a hidden project loses its summary and its doc path."""
+    out, seen = [], set()
+    for r in rows:
+        if r.get("doc") and r.get("owner") in visible:
+            row = r
+        elif r["from"] in visible or r["to"] in visible:
+            row = {**r,
+                   "from": r["from"] if r["from"] in visible else HIDDEN,
+                   "to": r["to"] if r["to"] in visible else HIDDEN,
+                   "summary": r["summary"] if not r.get("doc") else "(summary in a contract doc you cannot see)",
+                   "doc": ""}
+        else:
+            continue
+        key = (row["from"], row["to"], row["protocol"], row["summary"], row["doc"])
+        if key not in seen:
+            seen.add(key)
+            out.append(row)
+    return out
+
+
+def connections(service: str, path: str | None = None, visible: set[str] | None = None) -> str:
+    """`visible`: see visible_connections (None = every connection)."""
     rows = all_rows = load_index(path or CONNECTIONS)
+    if visible is not None:
+        rows = all_rows = visible_connections(all_rows, visible)
     s = service.strip().lower()
     if s:
-        rows = [r for r in rows if s in (r["from"], r["to"])]
+        rows = [r for r in rows if s in (str(r["from"]).lower(), str(r["to"]).lower())]
         if not rows:
-            known = sorted({r["from"] for r in all_rows} | {r["to"] for r in all_rows})
-            return f"(no connections of '{service}'; services: {', '.join(known)})"
+            known = sorted(({r["from"] for r in all_rows} | {r["to"] for r in all_rows}) - {HIDDEN})
+            return f"(no connections of '{service}'; services: {', '.join(known) or 'none you can see'})"
     if not rows:
         return "(no connections: no contract docs and no frontend calls found)"
     rows = sorted(rows, key=lambda r: (r["from"], r["to"], r["protocol"]))
@@ -402,9 +468,9 @@ def problems(project: str, allowed: set[str] | None, path: str | None = None,
     p = project.strip().lower()
     if "/" in p:      # "api/missing-contract", the form the summary line prints
         proj, _, kind = p.partition("/")
-        rows = [r for r in rows if r["project"] == proj and r["kind"] == kind]
+        rows = [r for r in rows if str(r["project"]).lower() == proj and str(r["kind"]).lower() == kind]
     elif p:
-        rows = [r for r in rows if r["project"] == p or r["kind"] == p]
+        rows = [r for r in rows if str(r["project"]).lower() == p or str(r["kind"]).lower() == p]
     if not rows:
         return "(no problems" + (" in your projects)" if allowed is not None else ")")
     rows = sorted(rows, key=lambda r: (r["project"], r["kind"], r["where"]))

@@ -82,8 +82,9 @@ def link(g: dict, repos_dir: str) -> int:
     existing = {(e.get("source"), e.get("target")) for e in links} | {(e.get("target"), e.get("source")) for e in links}
 
     def target(type_name: str, repo: str, method: str) -> str | None:
-        homes = classes.get(type_name, [])
-        homes = [h for h in homes if h[0] == repo] or homes      # the same project first
+        # The same project only: two projects are separate services, and a class of the same name in
+        # another project is not the one this code calls.
+        homes = [h for h in classes.get(type_name, []) if h[0] == repo]
         for r, f in homes:
             hit = methods.get((r, f, method.lower()))
             if hit:

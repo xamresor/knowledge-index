@@ -103,8 +103,10 @@ volume.
 `KB_ADDONS` switches add-ons on, comma-separated. It overrides `addons.json`:
 
 ```yaml
-KB_ADDONS: tool-multicall,fast-routes,metrics,admin
+KB_ADDONS: tool-multicall,fast-routes,metrics
 ```
+
+The admin pages need no add-on: they are part of the core.
 
 - `fast-routes` works at once: rustworkx is in the image.
 - `code-mode` needs the sandbox container (below).

@@ -103,14 +103,17 @@ def _view_of(data: dict) -> dict:
     routes = bool(_view.get("routes"))
     if allowed is None and not routes:
         return data
-    key = (id(data), tuple(sorted(allowed)) if allowed is not None else None, routes)
+    # The contract view (bin/settings.py `contracts`, KB_CONTRACT_EDGES) is part of the key: a change of
+    # the setting cuts a new view instead of serving the old one.
+    keep = access.KEEP_CONTRACTS and access.contracts_open() if allowed is not None else None
+    key = (id(data), tuple(sorted(allowed)) if allowed is not None else None, routes, keep)
     hit = _views.get(key)
     if hit and hit[0] is data:
         _views.move_to_end(key)
         return hit[1]
     view = data
     if allowed is not None:
-        view = access.filter_graph(view, set(allowed))
+        view = access.filter_graph(view, set(allowed), keep)
     if routes:
         view = access.strip_domains(view)
     while len(_views) >= MAX_VIEWS:
@@ -195,7 +198,9 @@ def handle(argv: list[str], view: dict | None = None) -> dict:
                 args = _loads(argv[1])
                 graph = argv[argv.index("--graph") + 1]
                 data = json.loads(Path(graph).read_text(encoding="utf-8"))
-                if args.get("unused"):
+                if args.get("unused") and args.get("raw"):   # the candidates; the caller scans the files
+                    buf.write(json.dumps(repomap.unused_candidates(data, args.get("projects"))))
+                elif args.get("unused"):
                     buf.write(repomap.unused(data, args.get("projects"), roots=args.get("roots")))
                 else:
                     buf.write(repomap.build(data, args.get("routes") or [], args.get("projects"),

@@ -52,7 +52,11 @@ A person who first has to set up an authenticator should do it in your own app: 
 ## 2. Permission webhook — `KB_PERMISSION_URL`
 
 Asked for every request with an unknown token, then cached for `KB_AUTH_CACHE_SECONDS` (60) per
-SHA-256 of the token. The token itself is never logged.
+SHA-256 of the token; a refusal is cached too. The token itself is never logged. A token that cannot be a
+token (over 4096 characters, a space, a character that is no printable ASCII) gets `401` without a call.
+At most `KB_AUTH_MAX_CHECKS` (16) calls run at once; one more waits `KB_AUTH_CHECK_WAIT` (2) seconds,
+then gets `503`. An access token of the browser sign-in (`kbo_…`) is never sent: the KB sends the token of
+the login webhook that stands behind it.
 
 ```http
 POST {KB_PERMISSION_URL}
@@ -67,8 +71,8 @@ Content-Type: application/json
 | `200 {"user": {"name": "ann", …}, "projects": ["api", "web"]}` | these projects; names not in the question are ignored |
 | `200 {"user": {…}, "projects": "*"}` | every project of the question |
 | `401` | the token is unknown or expired: the client signs in again |
-| `403`, or `200` with an empty list | the person may not use the KB |
-| unreachable, a `5xx` answer, or a body of another shape | `503`, not cached |
+| `403`, another `4xx`, or `200` with an empty list | the person may not use the KB (`403`) |
+| unreachable, a `5xx` answer, or a body of another shape | an outage: `503`, not cached. The admin pages show "not available", and a refresh of the browser sign-in keeps its refresh token for the next try |
 
 `user` may hold any fields; the KB shows the first of `name`, `uname`, `username`, `id`, `uid` in its
 logs and admin pages, and matches `KB_ADMINS` against them.
@@ -124,4 +128,6 @@ KB_SERVER=on KB_LOGIN_URL=http://127.0.0.1:8791/login \
 | `KB_LOGIN_URL` | the login webhook (browser sign-in, admin pages, `kb-login`); without it only ready tokens work |
 | `KB_HOOK_HEADERS` | extra headers for both webhooks, a JSON object |
 | `KB_AUTH_CACHE_SECONDS` | how long an answer of the permission webhook is kept (60) |
-| `KB_AUTH_TIMEOUT` | the timeout of a webhook call in seconds (10) |
+| `KB_AUTH_TIMEOUT` | the timeout of a permission webhook call in seconds (10) |
+| `KB_AUTH_MAX_CHECKS` / `KB_AUTH_CHECK_WAIT` | permission webhook calls at once (16), and the seconds one more waits for a slot (2) |
+| `KB_LOGIN_TIMEOUT` | the timeout of a login webhook call in seconds (30): a person waits for it, and the second factor can be slow |

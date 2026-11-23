@@ -89,6 +89,8 @@ def build(query: str, want_vector: bool = True) -> str:
     """
     if is_structured(query):
         return query
+    # One line per sub-query: a newline inside the question would start a line qmd cannot parse.
+    query = " ".join(query.split())
     words = terms(query)
     if not words:
         return query

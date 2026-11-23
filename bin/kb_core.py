@@ -24,6 +24,7 @@ every tool (see bin/access.py). `allowed=None` means everything: the local stdio
 """
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import json
 import os
@@ -31,7 +32,9 @@ import re
 import secrets
 import shutil
 import sys
+import tempfile
 import time
+import tomllib
 from collections import OrderedDict
 import subprocess
 import threading
@@ -89,39 +92,37 @@ ALIASES = load_aliases()
 
 
 # --- projects (one qmd collection per project: <COLLECTION>-<name>) ------------------------------
-def load_projects(cfg=None) -> dict[str, list[str]]:
-    """name -> every path the project lists (code, docs, routes, calls), from kb.projects.toml.
-
-    Same tiny reader as bin/kb (no TOML package): only `key = "str"` and `key = ["a", "b"]` lines."""
+def _project_blocks(cfg=None) -> list[dict]:
+    """The `[[project]]` tables of kb.projects.toml; [] when the file is missing or broken."""
     cfg = cfg or paths.config_file("kb.projects.toml")
     try:
-        txt = open(cfg, encoding="utf-8").read()
-    except OSError:
-        return {}
+        with open(cfg, "rb") as f:
+            data = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return []
+    blocks = data.get("project")
+    return [b for b in blocks if isinstance(b, dict)] if isinstance(blocks, list) else []
+
+
+def load_projects(cfg=None) -> dict[str, list[str]]:
+    """name -> every path the project lists (code, docs, routes, calls), from kb.projects.toml."""
     out: dict[str, list[str]] = {}
-    for block in re.split(r"(?m)^\[\[project\]\]\s*$", txt)[1:]:
-        name = re.search(r'(?m)^\s*name\s*=\s*"([^"]+)"', block)
-        if not name:
+    for block in _project_blocks(cfg):
+        name = block.get("name")
+        if not isinstance(name, str) or not name:
             continue
         roots = []
         for key in ("code", "docs", "routes", "calls"):
-            m = re.search(rf"(?m)^\s*{key}\s*=\s*(.+)$", block)
-            if m:
-                roots += re.findall(r'"([^"]+)"', m.group(1).split("#", 1)[0])
-        out[name.group(1)] = [os.path.normpath(r) for r in roots]
+            value = block.get(key)
+            for r in ([value] if isinstance(value, str) else value if isinstance(value, list) else []):
+                if isinstance(r, str) and r:
+                    roots.append(os.path.normpath(r))
+        out[name] = roots
     return out
 
 
 def _has_docs(name: str, cfg=None) -> bool:
-    cfg = cfg or paths.config_file("kb.projects.toml")
-    try:
-        txt = open(cfg, encoding="utf-8").read()
-    except OSError:
-        return False
-    for block in re.split(r"(?m)^\[\[project\]\]\s*$", txt)[1:]:
-        if re.search(rf'(?m)^\s*name\s*=\s*"{re.escape(name)}"', block):
-            return bool(re.search(r"(?m)^\s*docs\s*=", block))
-    return False
+    return any(b.get("name") == name and "docs" in b for b in _project_blocks(cfg))
 
 
 def projects_for_dir(cwd: str, projects: dict[str, list[str]]) -> list[str]:
@@ -146,6 +147,11 @@ HOME_PROJECTS = projects_for_dir(os.environ.get("KB_SESSION_DIR") or os.getcwd()
 
 def resolve_collections(args: dict) -> tuple[list[str], str]:
     """-> (qmd collections, scope label). Empty list = every collection in the index."""
+    if "_collections" in args:   # set by the core for a limited caller: never empty
+        names = list(args["_collections"])
+        if not names:
+            raise ToolError("no collections to search")
+        return names, ", ".join(names)
     if args.get("scope"):
         return [args["scope"]], args["scope"]
     want = (args.get("project") or "").strip()
@@ -186,7 +192,7 @@ def scope_projects(args: dict, allowed: set[str] | None) -> tuple[set[str] | Non
             return home, ", ".join(sorted(home)) + " (auto)", True
     if allowed is None:
         return None, "all", False
-    return set(allowed), ", ".join(sorted(allowed)), False
+    return _same_grant(allowed), ", ".join(sorted(allowed)), False
 
 
 def _no_match(out: str) -> bool:
@@ -220,17 +226,19 @@ def graph_call(cmd: list[str], args: dict, allowed: set[str] | None, *terms: str
         except access.Denied as e:
             raise ToolError(str(e)) from None
 
-    extra = ["--budget", str(_budget(args))] if cmd[1] == "query" else []
+    extra = ["--budget", str(args.get("_wide") or _budget(args))] if cmd[1] == "query" else []
     if cmd[1] == "affected":
         extra = [x for r in AFFECTED_RELATIONS for x in ("--relation", r)]
+
+    warm_ok = [True]   # the worker failed once in this call: the rest of the call runs processes
 
     def ask(projects: set[str] | None, c: list[str] | None = None) -> tuple[str, dict]:
         """-> (output, how to suggest labels). The warm worker cuts the caller's view of the main
         graph in memory; without it, a filtered file per project set is written and read."""
         c = c or cmd
-        worker = warm.graph()
+        worker = warm.graph() if warm_ok[0] else None
         if worker is not None and os.path.exists(GRAPH):
-            full = projects is None or set(PROJECTS) <= set(projects)
+            full = _full(projects)
             view = {"allowed": None if full else sorted(projects),
                     "routes": c[1] in ("path", "affected", "query")}
             out = worker.run([*c[1:], "--graph", GRAPH, *extra], view)  # c[0] is "graphify"
@@ -239,14 +247,18 @@ def graph_call(cmd: list[str], args: dict, allowed: set[str] | None, *terms: str
                 return (out[:MAX_OUT] or "(no results)"), {
                     "graph": GRAPH, "repos": None if full else set(projects),
                     "no_domain": view["routes"]}
+            warm_ok[0] = False
         graph = graph_of(projects)
-        return run([*c, "--graph", graph, *extra]), {"graph": graph}
+        return run([*c, "--graph", graph, *extra], warm_ok=False), {"graph": graph}
 
     projects, label, auto = scope_projects(args, allowed)
     if cmd[1] in ("explain", "affected") and terms:
-        picked = _pick_classes(terms[0], projects if projects is not None else allowed)
+        scope = projects if projects is not None else allowed
+        picked = (_pick_member(terms[0], scope) or _pick_classes(terms[0], scope)
+                  or _pick_same_name(terms[0], scope))
         if picked:
             classes, others = picked
+            kind = "classes" if all(r[1] in CLASS_TYPES for r in classes) else "symbols"
             parts = []
             for lab, typ, repo, file, nid in classes[:AMBIGUOUS_MAX]:
                 if cmd[1] == "explain":   # graphify's explain finds nodes by label only, never by ID
@@ -255,9 +267,9 @@ def graph_call(cmd: list[str], args: dict, allowed: set[str] | None, *terms: str
                     sub, _ = ask(projects, [cmd[0], cmd[1], nid])
                 parts.append(sub if len(classes) == 1 else f"### {lab}  ({typ}, {repo} {file})\n{sub}")
             out = parts[0] if len(classes) == 1 else (
-                f"'{terms[0]}' names {len(classes)} classes; the answer for each:\n\n" + "\n\n".join(parts))
+                f"'{terms[0]}' names {len(classes)} {kind}; the answer for each:\n\n" + "\n\n".join(parts))
             if len(classes) > AMBIGUOUS_MAX:
-                out += f"\n\n(+{len(classes) - AMBIGUOUS_MAX} more classes with this name: pin one as repo:Name)"
+                out += f"\n\n(+{len(classes) - AMBIGUOUS_MAX} more {kind} with this name: pin one as repo:Name)"
             if others:
                 shown = "; ".join(f"{r[0]} ({r[1]}, {r[2]} {r[3]})" for r in others[:5])
                 more = f" and {len(others) - 5} more" if len(others) > 5 else ""
@@ -282,7 +294,10 @@ def graph_call(cmd: list[str], args: dict, allowed: set[str] | None, *terms: str
                  and (projects is None or r[2] in projects)]
         parts = []
         for lab, typ, repo, file, nid in exact[:AMBIGUOUS_MAX]:
-            sub, _ = ask(projects, [cmd[0], cmd[1], nid])
+            if cmd[1] == "explain":   # graphify's explain finds nodes by label only, never by ID
+                sub = _explain_node((lab, typ, repo, file, nid), projects)
+            else:
+                sub, _ = ask(projects, [cmd[0], cmd[1], nid])
             parts.append(f"### {lab}  ({typ}, {repo} {file})\n{sub}")
         if parts:
             more = f"\n\n(+{len(exact) - AMBIGUOUS_MAX} more matches: name one exactly)" if len(exact) > AMBIGUOUS_MAX else ""
@@ -315,16 +330,59 @@ def _pick_classes(term: str, projects: set[str] | None):
     return classes, others
 
 
+# `Class::method`, `Class.method` or `Class.method()`; a namespace before the class is allowed.
+_MEMBER = re.compile(r"^([A-Za-z_\\][\w\\]*)(?:::|\.)([A-Za-z_$][\w$]*)(?:\(\))?$")
+_FILE_EXT = {"php", "vue", "ts", "tsx", "js", "jsx", "mjs", "md", "json", "blade"}
+
+
+def _pick_member(term: str, projects: set[str] | None):
+    """`OrderService::create` / `OrderService.create`: the methods named `create` of the classes named
+    `OrderService`, found through the class's `method`/`contains` edges. -> (rows, []) or None (not
+    that shape, a node already carries the whole name, or no such member: graphify answers)."""
+    m = _MEMBER.match(term.strip())
+    if not m or m.group(2).lower() in _FILE_EXT:
+        return None
+    cls, member = m.group(1).rsplit("\\", 1)[-1], m.group(2)
+    index = _graph_index(GRAPH)
+    rows = [r for r in index["rows"] if r[1] != "domain" and r[4] and (projects is None or r[2] in projects)]
+    whole = term.strip().removesuffix("()")
+    if any(r[0].strip().removesuffix("()") == whole for r in rows):
+        return None
+
+    def bare(label: str) -> str:
+        return label.strip().lstrip(".").removesuffix("()")
+    by_id = {r[4]: r for r in rows}
+    found = []
+    for r in rows:
+        if r[1] in CLASS_TYPES and r[0].strip() == cls:
+            kids = [by_id[k] for k in index["members"].get(r[4], []) if k in by_id]
+            same = [k for k in kids if bare(k[0]) == member] or [k for k in kids if bare(k[0]).lower() == member.lower()]
+            found += [k for k in same if k not in found]
+    return (found, []) if found else None
+
+
+def _pick_same_name(term: str, projects: set[str] | None):
+    """A name that several nodes carry exactly as typed (two `.create()` methods, a function and a
+    template), of any type. -> (rows, []) to answer each by its node ID, or None (one or no match:
+    graphify's own matching answers)."""
+    name = term.strip().strip(".").removesuffix("()")
+    if not name or ":" in name or "(" in name:
+        return None
+    rows = [r for r in labels(GRAPH) if r[1] != "domain" and r[4]
+            and (projects is None or r[2] in projects) and r[0].strip().strip(".").removesuffix("()") == name]
+    return (rows, []) if len(rows) >= 2 else None
+
+
 def _explain_node(row: tuple, projects: set[str] | None) -> str:
     """graph_explain for one node picked by ID: its header and every connection (bin/routes.py)."""
     lab, typ, repo, file, nid = row
-    full = projects is None or set(PROJECTS) <= set(projects)
+    full = _full(projects)
     view = {"allowed": None if full else sorted(projects), "routes": False}
     argv = ["neighbors", nid, "--graph", GRAPH]
     worker = warm.graph()
     lst = worker.run(argv, view) if worker is not None else None
     if lst is None:
-        lst = warm.graph_once(argv, view)
+        lst = _graph_once(argv, view)
     lst = (lst or "").strip() or "All connections (0):"
     return f"Node: {lab}\n  ID:        {nid}\n  Source:    {file}\n  Type:      {typ}\n  Project:   {repo}\n\n{lst}"
 
@@ -335,13 +393,13 @@ def _full_connections(out: str, projects: set[str] | None) -> str:
     m = re.search(r"(?m)^  ID:\s+(\S+)", out)
     if not m or not re.search(r"(?m)^\s+\.\.\. and \d+ more$", out):
         return out
-    full = projects is None or set(PROJECTS) <= set(projects)
+    full = _full(projects)
     view = {"allowed": None if full else sorted(projects), "routes": False}
     argv = ["neighbors", m.group(1), "--graph", GRAPH]
     worker = warm.graph()
     lst = worker.run(argv, view) if worker is not None else None
     if lst is None:
-        lst = warm.graph_once(argv, view)
+        lst = _graph_once(argv, view)
     if not lst:
         return out
     head = re.split(r"(?m)^Connections \(\d+\):$", out)[0].rstrip()
@@ -357,14 +415,14 @@ def graph_routes(args: dict, allowed: set[str] | None) -> str:
             raise ToolError(f"unknown or not allowed project: {m.group(1)}")
     scoped = {**args, "project": args.get("project") or "all"}
     projects, label, _ = scope_projects(scoped, allowed)
-    full = projects is None or set(PROJECTS) <= set(projects)
+    full = _full(projects)
     view = {"allowed": None if full else sorted(projects), "routes": True}
     payload = json.dumps({"from": args["from"], "to": args["to"], "k": args.get("k") or 3})
     argv = ["routes", payload, "--graph", GRAPH]
     worker = warm.graph()
     out = worker.run(argv, view) if worker is not None else None
     if out is None:
-        out = warm.graph_once(argv, view)
+        out = _graph_once(argv, view)
     if out is None:
         raise ToolError("graph_routes needs graphify's Python environment (networkx); it was not found")
     return f"[projects: {label}]\n\n{out.strip()}"
@@ -385,50 +443,89 @@ def code_grep(args: dict, allowed: set[str] | None) -> str:
     roots = [(n, os.path.join(KB, "repos", n)) for n in names if os.path.isdir(os.path.join(KB, "repos", n))]
     if not roots:
         return f"[projects: {label}]\n\n(no indexed code for these projects)"
-    limit = min(int(args.get("limit") or 50), GREP_MAX)
+    limit = max(1, min(int(args.get("limit") or 50), GREP_MAX))
     glob = str(args.get("glob") or "")
     rg = shutil.which("rg")
     if rg:
-        cmd = [rg, "--no-config", "-n", "-H", "--no-heading", "--max-columns", "300", "--max-count", "20",
-               "-g", "!graphify-out/**", "-e", pattern]
+        # --sort path: the same lines in the same order on every call, so `page` is stable
+        cmd = [rg, "--no-config", "--sort", "path", "-n", "-H", "--no-heading", "--max-columns", "300", "--max-count", "20",
+               "-g", "!graphify-out/**", "-g", "!.env*", "-e", pattern]
         if glob:
             cmd += ["-g", glob]
         if args.get("ignore_case"):
             cmd.append("-i")
         cmd += ["-g", "!bootstrap/cache/**"]          # Laravel's generated route/config caches
     else:
-        cmd = ["grep", "-rEnHI", "--exclude-dir=graphify-out", "-m", "20", "-e", pattern]
+        # grep reads hidden files (ripgrep does not): keep secrets and VCS data out
+        cmd = ["grep", "-rEnHI", "--exclude-dir=graphify-out", "--exclude-dir=.git", "-m", "20", "-e", pattern]
         if glob and "/" not in glob:  # grep's --include sees the file name only; a path glob is matched below
             cmd.append(f"--include={glob}")
+        # after --include: with GNU grep the first of them decides what a file matching neither gets
+        cmd.append("--exclude=.env*")
         if args.get("ignore_case"):
             cmd.append("-i")
     path_glob = glob if glob and "/" in glob and not rg else ""
     lines: list[str] = []
     for name, root in roots:
-        try:
-            p = subprocess.run([*cmd, "--", "."], cwd=root, capture_output=True, text=True,
-                               timeout=GREP_TIMEOUT, errors="replace")
-        except subprocess.TimeoutExpired:
+        timed_out = _grep_root([*cmd, "--", "."], root, name, path_glob, lines, limit)
+        if timed_out:
             lines.append(f"{name}: (search timed out: narrow the pattern or add 'glob')")
-            continue
-        if p.returncode not in (0, 1):
-            raise ToolError(f"code_grep: bad pattern: {p.stderr.strip()[:200]}")
-        for ln in p.stdout.splitlines():
-            path, _, rest = ln.partition(":")
-            path = path.removeprefix("./")
-            if path.startswith("bootstrap/cache/"):
-                continue
-            if path_glob and not fnmatch.fnmatch(path, path_glob.removeprefix("./")):
-                continue
-            lines.append(f"{name}:{path}:{rest[:300]}")
-            if len(lines) >= limit:
-                break
         if len(lines) >= limit:
             break
     if not lines:
         return f"[projects: {label}]\n\n(no matches)"
     more = f"\n\n(stopped at {limit} lines: raise 'limit' or narrow the pattern)" if len(lines) >= limit else ""
     return f"[projects: {label}]\n\n" + "\n".join(lines) + more
+
+
+def _grep_hidden(path: str) -> bool:
+    """Files code_grep never shows, whichever tool searched: Laravel's generated caches
+    (bootstrap/cache, at any depth) and .env files (secrets)."""
+    return ("/" + path).find("/bootstrap/cache/") >= 0 or os.path.basename(path).startswith(".env")
+
+
+def _grep_root(cmd: list[str], root: str, name: str, path_glob: str, lines: list[str], limit: int) -> bool:
+    """Add the matches under `root` to `lines` until `limit`; reading stops there and the process is
+    stopped. -> True when the search timed out. A bad pattern is a ToolError."""
+    stopped = threading.Event()
+    with _Job(GRAPH_JOBS, "graph"), tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as err:
+        proc = subprocess.Popen(cmd, cwd=root, stdout=subprocess.PIPE, stderr=err, text=True,
+                                errors="replace")
+
+        def stop() -> None:
+            stopped.set()
+            proc.kill()
+        timer = threading.Timer(GREP_TIMEOUT, stop)
+        timer.start()
+        full = False
+        try:
+            assert proc.stdout
+            for ln in proc.stdout:
+                path, _, rest = ln.rstrip("\n").partition(":")
+                path = path.removeprefix("./")
+                if _grep_hidden(path):
+                    continue
+                if path_glob and not fnmatch.fnmatch(path, path_glob.removeprefix("./")):
+                    continue
+                lines.append(f"{name}:{path}:{rest[:300]}")
+                if len(lines) >= limit:
+                    full = True
+                    break
+        finally:
+            timer.cancel()
+            if proc.poll() is None:
+                proc.kill()
+            if proc.stdout:
+                proc.stdout.close()
+            code = proc.wait()
+        if full:
+            return False
+        if stopped.is_set():
+            return True
+        if code not in (0, 1):
+            err.seek(0)
+            raise ToolError(f"code_grep: bad pattern: {err.read(1000).strip()[:200]}")
+    return False
 
 
 def _visible_routes(allowed: set[str] | None) -> list[dict]:
@@ -446,24 +543,72 @@ def _worker(argv: list[str], view: dict, what: str) -> str:
     worker = warm.graph()
     out = worker.run(argv, view) if worker is not None else None
     if out is None:
-        out = warm.graph_once(argv, view)
+        out = _graph_once(argv, view)
     if out is None:
         raise ToolError(f"{what} needs graphify's Python environment; it was not found")
     return out.strip()
 
 
 def repo_map(args: dict, allowed: set[str] | None) -> str:
-    """The most depended-on parts of a project within a token budget (bin/repomap.py)."""
+    """The most depended-on parts of a project within a token budget (bin/repomap.py).
+
+    `unused`: the candidates come from the mapped projects, but what depends on them is looked up in
+    every project the caller may see (a class used only by another project is not unused). The worker
+    finds the candidates; the file scan for their names runs here, so it does not hold the worker."""
+    import repomap
     projects, label, _ = scope_projects(args, allowed)
     names = sorted(PROJECTS) if projects is None else sorted(projects)
     budget = max(300, min(int(args.get("budget") or 1500), 8000))
+    if args.get("unused"):
+        visible = sorted(PROJECTS) if allowed is None else sorted(allowed)
+        view = {"allowed": None if _full(allowed) else visible, "routes": True}
+        payload = json.dumps({"projects": names, "unused": True, "raw": True})
+        raw = _worker(["map", payload, "--graph", GRAPH], view, "repo_map")
+        try:
+            found = {str(k): [str(x) for x in v] for k, v in json.loads(raw).items()}
+        except (ValueError, AttributeError):
+            return f"[projects: {label}]\n\n{raw}"
+        roots = {n: os.path.join(KB, "repos", n) for n in visible if os.path.isdir(os.path.join(KB, "repos", n))}
+        note = ""
+        if roots:
+            found, complete = _unused_scan(found, roots)
+            if not complete:
+                note = (f"\n\n(the file scan stopped after {UNUSED_SCAN_SECONDS} s: some of these may be "
+                        "named in files it did not read)")
+        return f"[projects: {label}]\n\n" + repomap.format_unused(found, scanned=bool(roots)) + note
     full = allowed is None and projects is None
     view = {"allowed": None if full else names, "routes": True}
-    payload = json.dumps({"routes": _visible_routes(allowed), "projects": names, "budget": budget,
-                          "unused": bool(args.get("unused")),
-                          "roots": {n: os.path.join(KB, "repos", n) for n in names
-                                    if os.path.isdir(os.path.join(KB, "repos", n))}})
+    payload = json.dumps({"routes": _visible_routes(allowed), "projects": names, "budget": budget})
     return f"[projects: {label}]\n\n" + _worker(["map", payload, "--graph", GRAPH], view, "repo_map")
+
+
+UNUSED_SCAN_SECONDS = int(os.environ.get("KB_UNUSED_SCAN_SECONDS", "20"))
+_UNUSED_CACHE: "OrderedDict[str, tuple]" = OrderedDict()
+_UNUSED_LOCK = threading.Lock()
+
+
+def _unused_scan(found: dict[str, list[str]], roots: dict[str, str]) -> tuple[dict[str, list[str]], bool]:
+    """repomap.scan_names in a graph job slot, within UNUSED_SCAN_SECONDS. A complete scan is kept
+    per graph build (the staged code changes with it), candidates and roots."""
+    import repomap
+    try:
+        mtime = os.path.getmtime(GRAPH)
+    except OSError:
+        mtime = 0.0
+    key = json.dumps([mtime, sorted(found.items()), sorted(roots.items())])
+    with _UNUSED_LOCK:
+        hit = _UNUSED_CACHE.get(key)
+        if hit is not None:
+            _UNUSED_CACHE.move_to_end(key)
+            return hit
+    with _Job(GRAPH_JOBS, "graph"):
+        out = repomap.scan_names(found, roots, time.monotonic() + UNUSED_SCAN_SECONDS)
+    if out[1]:
+        with _UNUSED_LOCK:
+            _UNUSED_CACHE[key] = out
+            while len(_UNUSED_CACHE) > 16:
+                _UNUSED_CACHE.popitem(last=False)
+    return out
 
 
 def review_context(args: dict, allowed: set[str] | None) -> str:
@@ -485,8 +630,7 @@ def review_context(args: dict, allowed: set[str] | None) -> str:
     if project and (project not in PROJECTS or (allowed is not None and project not in allowed)):
         raise ToolError(f"unknown or not allowed project: {project}")
     visible = set(PROJECTS) if allowed is None else set(allowed)
-    full = allowed is None or set(PROJECTS) <= visible
-    view = {"allowed": None if full else sorted(visible), "routes": True}
+    view = {"allowed": None if _full(allowed) else sorted(visible), "routes": True}
     payload = json.dumps({"changes": {p: sorted(v) for p, v in changes.items()},
                           "routes": _visible_routes(allowed), "project": project})
     return _worker(["review", payload, "--graph", GRAPH], view, "review_context")
@@ -506,8 +650,14 @@ def _budget(args: dict) -> int:
 
 
 def _mcp_hint(out: str) -> str:
-    return _CLI_HINT.sub(f"Next nodes: page: 2. Or raise `budget` (max {CODE_BUDGET_MAX}), narrow "
-                         "`project`, or ask graph_explain about one symbol", out)
+    return _CLI_HINT.sub(f"Raise `budget` (max {CODE_BUDGET_MAX}), narrow `project`, or ask graph_explain "
+                         "about one symbol", out)
+
+
+def _widened(args: dict) -> int:
+    """The budget every page of a code search runs with: CURSOR_WIDEN times the caller's budget, so a
+    longer answer is kept behind the cursor. It goes to graphify as `_wide`, past _budget()'s cap."""
+    return _budget(args) * CURSOR_WIDEN
 
 
 def instructions(projects: list[str] | None = None) -> str:
@@ -544,7 +694,12 @@ SANDBOX = _SANDBOX_DATA if os.path.isdir(os.path.join(_SANDBOX_DATA, "node_modul
 # Set: run_code connects to a sandbox service on this Unix socket (sandbox/socket-server.mjs, e.g. a
 # second container without network, docs/docker.md) instead of starting Node here. Same protocol.
 SANDBOX_SOCKET = os.environ.get("KB_SANDBOX_SOCKET", "")
+# What one program may give back: its printed output and its return value each up to this many
+# characters (the runner cuts them too), and one protocol line from the sandbox up to RUN_MAX_LINE.
+RUN_MAX_VALUE = int(os.environ.get("KB_RUN_MAX_OUTPUT", "60000"))
+RUN_MAX_LINE = 4 * RUN_MAX_VALUE + 1_000_000
 NOT_IN_BATCH = {"batch", "run_code"}
+RUN_JOBS = threading.BoundedSemaphore(int(os.environ.get("KB_MAX_RUN_JOBS", "2")))
 
 # One list, published by both adapters.
 TOOLS = [
@@ -565,7 +720,7 @@ TOOLS = [
          "scope": {"type": "string", "description": "raw qmd collection to search instead (overrides project)"},
          "mode": {"type": "string", "enum": ["auto", "lex", "vec", "hybrid"],
                   "description": "docs retrieval mode; auto = hybrid with a keyword fallback"},
-         "limit": {"type": "integer", "description": "max results (docs)"},
+         "limit": {"type": "integer", "description": "max results (docs), 1-50; more documents: raise it"},
          "min_score": {"type": "number", "description": "drop docs results below this score"},
          "expand_aliases": {"type": "boolean", "description": "apply the alias table (default true)"},
          "explain": {"type": "boolean", "description": "include retrieval score traces"},
@@ -580,7 +735,7 @@ TOOLS = [
      "description": "The one best path between two symbols/files in the code graph: calls and HTTP "
                     "requests (frontend -> controller) are cheap, busy hub classes dear, so it reads "
                     "like a real chain. For several alternatives use graph_routes.",
-     "inputSchema": {"type": "object", "properties": {"from": {"type": "string"}, "project": {"type": "string", "description": "limit to these project(s): a name, several comma-separated, or 'all'. Default: the session's project(s), widening to all when nothing is found"},
+     "inputSchema": {"type": "object", "properties": {"from": {"type": "string"}, "project": {"type": "string", "description": "limit to these project(s): a name, several comma-separated, or 'all'. Default: all the caller may see"},
                                                      "to": {"type": "string"}},
                      "required": ["from", "to"]}},
     {"name": "graph_routes",
@@ -623,9 +778,11 @@ TOOLS = [
                     "routes, which docs describe them and which NOTE/WHY comments sit next to them. "
                     "Use it before reviewing or merging a pull request.",
      "inputSchema": {"type": "object", "properties": {
-         "diff": {"type": "string", "description": "unified diff text, up to 2 MB"},
+         "diff": {"type": "string", "description": "unified diff text, up to 1 MB (the shared server "
+                                                        "takes request bodies up to 1 MB in all)"},
          "files": {"type": "array", "items": {"type": "string"},
-                   "description": "instead of a diff: paths, optionally with lines, e.g. 'app/X.php:10-20,31'"},
+                   "description": "instead of a diff: paths, optionally with lines, e.g. 'app/X.php:10-20,31'; "
+                                  "at most 1000 items and 200000 lines in all"},
          "project": {"type": "string", "description": "the project the paths belong to, when a path could "
                                                      "match several"}}}},
     {"name": "batch",
@@ -677,7 +834,9 @@ TOOLS = [
                     "controller action and middleware, plus the frontend call sites of each route "
                     "and the contract docs that name it. Every word must match the method, URI, "
                     "route name, action or middleware, e.g. 'POST v2/users', 'UserController'. "
-                    "Covers every project, whatever the caller's project access.",
+                    "Covers every project under the default setting `contracts: all`; with "
+                    "`contracts: own` a caller limited to some projects sees only the routes that "
+                    "touch them.",
      "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}},
                      "required": ["query"]}},
     {"name": "connections",
@@ -696,9 +855,9 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {}}},
 ]
 
-# Every tool that can answer at length takes `page`. Lists (contracts, connections, problems, impact,
-# paths, documents) are cut into pages of PAGE_CHARS at blank lines or line ends; `search` pages by
-# hits (docs) and by graph nodes (code). Each page says how to get the next one. Nothing is dropped.
+# Every tool that can answer at length takes `page`. Answers are cut into pages of PAGE_CHARS at blank
+# lines or line ends; `search` cuts one text too (its docs hits and its widened code answer), so a page
+# is the same with or without the cursor. Each page says how to get the next one. Nothing is dropped.
 PAGE_CHARS = int(os.environ.get("KB_PAGE_CHARS", "6000"))
 PAGE_MIN, PAGE_MAX = 1000, 50_000
 UNPAGED = {"version"}
@@ -725,14 +884,15 @@ for _t in TOOLS:
                                              "`page` to jump. Other arguments are not needed again"}
         _t["inputSchema"]["properties"]["page_length"] = {
             "type": "integer", "description": f"characters per page (default {PAGE_CHARS}, "
-                                              f"{PAGE_MIN}-{PAGE_MAX}); for search: the size of the code "
-                                              "half's page (docs pages by `limit` hits)"}
+                                              f"{PAGE_MIN}-{PAGE_MAX}); for search it also sets the code "
+                                              "budget when `budget` is not given"}
 # The values a missing optional argument takes, written into the schemas so a client shows and
 # pre-fills them. `project` has none to write: without it the session's projects are used.
 DEFAULTS = {
     "search": {"domain": "both", "mode": "auto", "limit": 5, "expand_aliases": True, "explain": False,
                "refuse": True, "budget": CODE_BUDGET},
     "graph_routes": {"k": 3, "project": "all"},
+    "graph_path": {"project": "all"},
 }
 for _t in TOOLS:
     _props = _t["inputSchema"].get("properties", {})
@@ -786,24 +946,66 @@ def validate(name: str, args: dict, require: bool = True) -> None:
 # --- process plumbing ---------------------------------------------------------------------------
 GRAPH_VERBS = {"query", "path", "explain", "affected"}
 
+# Job slots: how many graphify and qmd processes may run at once (qmd loads a model each time). They
+# are taken where a process starts, not around a tool call, so a nested call (batch, run_code, the
+# two halves of `search`) cannot start more. A call that waits longer than JOB_WAIT seconds for a
+# slot is refused as busy. The warm workers (bin/warm.py) start no process per call and take none.
+GRAPH_JOBS = threading.BoundedSemaphore(int(os.environ.get("KB_MAX_GRAPH_JOBS", "3")))
+DOCS_JOBS = threading.BoundedSemaphore(int(os.environ.get("KB_MAX_DOCS_JOBS", "1")))
+JOB_WAIT = float(os.environ.get("KB_JOB_WAIT", "120"))
+
+
+class _Job:
+    """`with _Job(DOCS_JOBS, "docs"):` one process in a slot, or ToolError "busy"."""
+
+    def __init__(self, slots: threading.BoundedSemaphore, kind: str):
+        self.slots, self.kind = slots, kind
+
+    def __enter__(self):
+        if not self.slots.acquire(timeout=JOB_WAIT):
+            raise ToolError(f"busy: every {self.kind} job slot is taken; try again in a minute")
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.slots.release()
+
+
+def _slots(cmd: list[str]) -> _Job | None:
+    if cmd[:1] == ["qmd"]:
+        return _Job(DOCS_JOBS, "docs")
+    if cmd[:1] == ["graphify"]:
+        return _Job(GRAPH_JOBS, "graph")
+    return None
+
 
 def run(cmd: list[str], cwd: str | None = None, timeout: int = TIMEOUT_GRAPH,
-        limit: int | None = MAX_OUT) -> str:
-    if cmd[:1] == ["graphify"] and cmd[1:2] and cmd[1] in GRAPH_VERBS:
+        limit: int | None = MAX_OUT, warm_ok: bool = True) -> str:
+    """Run a qmd or graphify command. A graph lookup goes to the warm worker first, unless the caller
+    already saw the worker fail (`warm_ok=False`)."""
+    if warm_ok and cmd[:1] == ["graphify"] and cmd[1:2] and cmd[1] in GRAPH_VERBS:
         worker = warm.graph()
         out = worker.run(cmd[1:]) if worker else None
         if out is not None:  # None: no worker or it failed — fall through to a plain process
             out = out.strip()
             return (out[:limit] if limit else out) or "(no results)"
     try:
-        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        with _slots(cmd) or contextlib.nullcontext():
+            p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
         out = (p.stdout or "") + (("\n[stderr] " + p.stderr) if p.returncode and p.stderr else "")
         out = out.strip()
         return (out[:limit] if limit else out) or "(no results)"
     except subprocess.TimeoutExpired:
         return "(timed out)"
+    except ToolError:
+        raise
     except Exception as e:  # noqa: BLE001
         return f"(error: {e})"
+
+
+def _graph_once(argv: list[str], view: dict | None) -> str | None:
+    """warm.graph_once (one graph worker process for one request) inside a graph job slot."""
+    with _Job(GRAPH_JOBS, "graph"):
+        return warm.graph_once(argv, view)
 
 
 def warm_qmd() -> None:
@@ -836,29 +1038,74 @@ def warm_qmd() -> None:
         pass  # best-effort; a cold first query still works, just slower
 
 
-_LABELS: dict[str, tuple[float, list[tuple[str, str, str, str]]]] = {}
+_LABELS: dict[str, tuple[float, dict]] = {}
+_LABELS_LOCK = threading.Lock()   # one parse per graph file and mtime, whatever the threads
+
+
+def _graph_index(graph: str | None = None) -> dict:
+    """What the core reads from one graph file without graphify, cached by mtime: `rows` (label,
+    type, repo, source_file, id) of the labelled nodes, `repos` (every project that has a node) and
+    `members` (class node id -> the ids of its methods, from `method`/`contains` edges)."""
+    graph = graph or GRAPH
+    try:
+        mtime = os.path.getmtime(graph)
+    except OSError:
+        return {"rows": [], "repos": set(), "members": {}}
+    hit = _LABELS.get(graph)
+    if hit and hit[0] == mtime:
+        return hit[1]
+    with _LABELS_LOCK:
+        hit = _LABELS.get(graph)          # another thread may have parsed it while this one waited
+        if hit and hit[0] == mtime:
+            return hit[1]
+        try:
+            with open(graph, encoding="utf-8") as f:
+                data = json.load(f)
+            nodes = data.get("nodes", [])
+            rows = [(n.get("label", ""), n.get("type", ""), n.get("repo", ""),
+                     n.get("source_file", ""), n.get("id", "")) for n in nodes if n.get("label")]
+            repos = {n.get("repo") for n in nodes if n.get("repo")} - access.PSEUDO_REPOS
+            kind = {n.get("id"): n.get("type", "") for n in nodes}
+            members: dict[str, list[str]] = {}
+            for e in data.get("links", data.get("edges", [])):
+                if e.get("relation") not in ("method", "contains"):
+                    continue
+                a, b = e.get("source"), e.get("target")
+                if kind.get(b) in CLASS_TYPES and kind.get(a) not in CLASS_TYPES:
+                    a, b = b, a        # the class is the container, whatever the edge's direction
+                if kind.get(a) in CLASS_TYPES and kind.get(b) not in CLASS_TYPES and b in kind:
+                    members.setdefault(a, []).append(b)
+            index = {"rows": rows, "repos": repos, "members": members}
+        except Exception:  # noqa: BLE001
+            index = {"rows": [], "repos": set(), "members": {}}
+        _LABELS[graph] = (mtime, index)
+        return index
 
 
 def labels(graph: str | None = None) -> list[tuple[str, str, str, str, str]]:
     """Node labels (label, type, repo, source_file, id) of one graph file, cached by mtime, so an
     ambiguous graphify match can suggest exact labels. A filtered graph has its own cache entry."""
-    graph = graph or GRAPH
-    try:
-        mtime = os.path.getmtime(graph)
-    except OSError:
-        return []
-    hit = _LABELS.get(graph)
-    if hit and hit[0] == mtime:
-        return hit[1]
-    try:
-        with open(graph, encoding="utf-8") as f:
-            nodes = json.load(f).get("nodes", [])
-        rows = [(n.get("label", ""), n.get("type", ""), n.get("repo", ""),
-                 n.get("source_file", ""), n.get("id", "")) for n in nodes if n.get("label")]
-    except Exception:  # noqa: BLE001
-        rows = []
-    _LABELS[graph] = (mtime, rows)
-    return rows
+    return _graph_index(graph)["rows"]
+
+
+class AllProjects(set):
+    """A grant of every project ("*" from the permission webhook), not a list of names. Only this grant
+    and a local caller (None) may use the unfiltered main graph: a list of names, even one that holds
+    every project now, gets that list as its view, since the worker can load a newer graph.json with a
+    new project between the check and the answer."""
+
+
+def _same_grant(allowed: set[str]) -> set[str]:
+    """A copy of a caller's project set that keeps an all-projects grant one."""
+    return AllProjects(allowed) if isinstance(allowed, AllProjects) else set(allowed)
+
+
+def _full(projects) -> bool:
+    """May this project set use the unfiltered main graph? Only a local caller (None) and a grant of
+    every project (AllProjects). A limited caller always sends its explicit list: checking that the
+    list holds every repo of graph.json and then sending "no filter" raced with a rebuild that adds a
+    project."""
+    return projects is None or isinstance(projects, AllProjects)
 
 
 def suggest(term: str, limit: int = 20, graph: str | None = None, repos: set[str] | None = None,
@@ -930,7 +1177,7 @@ def _qmd_cmd(args: dict, query: str) -> list[str]:
         # Not `qmd vsearch`: it always expands the query with the 1.7B generation model (a 1.3 GB
         # download and minutes on a CPU). A `vec:` query document embeds the text as it is, as the
         # warm worker does (_searches).
-        query = f"vec: {query}"
+        query = "vec: " + " ".join(query.split())   # one line: a newline would start a bad one
     elif verb == "query":
         query = query_build.build(query, want_vector=not args.get("_lex_only"))
     cmd = [verb, query]
@@ -950,9 +1197,9 @@ def _qmd_cmd(args: dict, query: str) -> list[str]:
 def search_docs(args: dict, allowed: set[str] | None = None) -> str:
     """Docs half of `search`. Alias expansion happens on the raw query, before qmd stems it.
 
-    With `allowed`, the search runs over every collection (contract docs of any project are open
-    to all) and drops each hit whose resolved path is outside the allowed projects. More hits are
-    asked for than are shown, so the filter still leaves enough."""
+    With `allowed`, the caller's own collections are searched by name (`-c`), and (with the setting
+    `contracts: all`) the collections of the other projects for their contract docs. Every hit is
+    checked by the path qmd itself reports, before any text is made of it (see _docs_allowed)."""
     q = args["q"]
     note = ""
     if args.get("expand_aliases", True):
@@ -962,24 +1209,38 @@ def search_docs(args: dict, allowed: set[str] | None = None) -> str:
             q = expanded
     head, out = _docs_scoped(args, q, allowed)
     if args.get("refuse", True):
-        out = _judge(args, q, out, lambda extra: _docs_scoped({**args, **extra}, q, allowed)[1])
+        out = _judge(args, q, out, lambda extra: _docs_scoped({**args, **extra}, q, allowed)[1], allowed)
     return note + head + out
+
+
+def _doc_collections(names) -> list[str]:
+    """The qmd collections of these projects (code-only projects have none)."""
+    return [f"{COLLECTION}-{n}" for n in sorted(names) if n in DOC_PROJECTS]
 
 
 def _docs_scoped(args: dict, q: str, allowed: set[str] | None) -> tuple[str, str]:
     """(the `[projects: ...]` header, the hits) of one docs search inside the caller's projects."""
     if allowed is not None:
         want = int(args.get("limit") or 5)
-        projects, label, _ = scope_projects(args, allowed)
-        narrow = sorted(n for n in (projects or ()) if n in DOC_PROJECTS)
+        projects, label, auto = scope_projects(args, allowed)
         scoped = {k: v for k, v in args.items() if k not in ("project", "scope")}
-        if narrow and set(narrow) != allowed:   # the caller narrowed: only those collections
-            out = _filter_hits(_docs_once({**scoped, "project": ",".join(narrow), "limit": want * 5}, q),
-                               set(narrow), want)
-            return f"[projects: {label}]\n\n", out
-        out = _filter_hits(_docs_once({**scoped, "project": "all", "limit": want * 5}, q),
-                           allowed, want)
-        return f"[projects: {', '.join(sorted(allowed))} + contract docs]\n\n", out
+        narrow = _doc_collections(projects or ())
+        if projects is not None and projects != allowed:      # narrowed: only those collections
+            if narrow:
+                return f"[projects: {label}]\n\n", _docs_allowed(scoped, q, allowed, [(narrow, want)], want)
+            if not auto:
+                raise ToolError(f"no docs indexed for: {label} "
+                                f"(projects with docs: {', '.join(sorted(DOC_PROJECTS & allowed))})")
+        groups = []
+        own = _doc_collections(allowed)
+        if own:
+            groups.append((own, want))
+        shared = access.contracts_open()
+        hidden = _doc_collections(set(DOC_PROJECTS) - allowed) if shared else []
+        if hidden:   # only their contract docs pass the check; ask for more, few of them are contracts
+            groups.append((hidden, want * 5))
+        return (f"[projects: {', '.join(sorted(allowed))}{' + contract docs' if shared else ''}]\n\n",
+                _docs_allowed(scoped, q, allowed, groups, want))
     out = _docs_once(args, q)
     label = resolve_collections(args)[1]
     if _empty(out) and label.endswith("(auto)"):
@@ -992,7 +1253,7 @@ def _docs_scoped(args: dict, q: str, allowed: set[str] | None) -> tuple[str, str
 WEAK_SHOWN = 3   # hits kept under a refusal, marked weak (see _judge)
 
 
-def _judge(args: dict, q: str, out: str, rerun) -> str:
+def _judge(args: dict, q: str, out: str, rerun, allowed: set[str] | None = None) -> str:
     """The "is this enough?" check (bin/docs_grade.py) on a docs answer.
 
     A good first hit: the answer is returned unchanged. A weak one: in auto/hybrid mode, one
@@ -1000,10 +1261,15 @@ def _judge(args: dict, q: str, out: str, rerun) -> str:
     first hit is graded again; if that one is good, it is returned under a note. Otherwise the
     answer is "not found". The nearest hits stay below the refusal, at most WEAK_SHOWN, marked as
     weak: the grade is a heuristic and turns away some answerable questions (docs/design.md, "Docs search: an honest not found"),
-    so the caller can still open them, but it cannot mistake them for a confident answer."""
+    so the caller can still open them, but it cannot mistake them for a confident answer.
+
+    For a limited caller the word counts come from its own collections and (under `contracts: all`)
+    the contract docs only, so the grade (and its "in no document" list) says nothing about the docs of hidden projects."""
     if docs_grade.first_hit(out) is None:
         return out
-    index = docs_grade.open_index(KB)
+    index = (docs_grade.open_index(KB) if allowed is None
+             else docs_grade.open_index(KB, _doc_collections(allowed),
+                                        f"{COLLECTION}-" if access.contracts_open() else None))
     try:
         grade = docs_grade.grade(q, out, index)
         if not grade.weak:
@@ -1025,14 +1291,30 @@ def _judge(args: dict, q: str, out: str, rerun) -> str:
             f"pass refuse: false for the plain nearest hits.\n\n{head}{weak}")
 
 
-def _filter_hits(out: str, allowed: set[str], keep: int) -> str:
-    """Keep the qmd text hits (each starts with a `qmd://` line) that the caller may see."""
-    blocks = re.split(r"(?m)^(?=qmd://)", out)
-    head, hits = blocks[0], [b for b in blocks[1:] if access.doc_allowed(b.split("\n", 1)[0], allowed)]
-    if not hits:
+def _docs_allowed(args: dict, q: str, allowed: set[str], groups: list[tuple[list[str], int]],
+                  keep: int) -> str:
+    """The hits of one docs search per group of collections that the caller may see, best first.
+
+    Each hit is checked by the path in qmd's own result (JSON or the worker's structured hits),
+    before it is formatted. Never by splitting text: a snippet can hold a line that looks like the
+    start of another hit."""
+    found: list[dict] = []
+    notes: list[str] = []
+    failed = ""
+    for collections, limit in groups:
+        hits, note, raw = _docs_hits({**args, "_collections": collections, "limit": limit}, q)
+        if hits is None:
+            failed = failed or raw
+            continue
+        notes.append(note)
+        found += [h for h in hits if access.doc_allowed(warm.hit_path(h), allowed)]
+    if not found:
+        if failed and not notes:
+            return failed if failed.startswith("(") else "(docs search failed: qmd gave no readable answer)"
         return "(no results in your projects)"
-    head = head if head.startswith("[") else ""  # keep our own notes, drop qmd's progress lines
-    return (head + "".join(hits[:keep])).strip()[:MAX_OUT]
+    found.sort(key=lambda h: -warm._num(h.get("score")))   # stable: the own collections first on a tie
+    note = next((n for n in notes if n), "")
+    return (note + warm.format_hits(found[:keep]))[:MAX_OUT]
 
 
 def _empty(out: str) -> bool:
@@ -1059,30 +1341,59 @@ def _searches(args: dict, q: str) -> tuple[list[dict], str | None]:
     return searches or [{"type": "lex", "query": q}, {"type": "vec", "query": q}], intent
 
 
-def _docs_warm(args: dict, q: str) -> str | None:
-    """The docs search through the long-lived qmd (model already loaded); None = use the CLI."""
+def _docs_warm(args: dict, q: str) -> list[dict] | None:
+    """qmd's hits through the long-lived qmd (model already loaded); None = use the CLI."""
     if args.get("explain"):
         return None  # score traces exist only in the CLI
     worker = warm.qmd(KB)
     if worker is None:
         return None
     searches, _intent = _searches(args, q)
-    hits = worker.query(searches, resolve_collections(args)[0], args.get("limit") or 5,  # CLI default
+    return worker.query(searches, resolve_collections(args)[0], args.get("limit") or 5,  # CLI default
                         args.get("min_score"), rerank=DOCS_MODE == "full")
-    return None if hits is None else warm.format_hits(hits)[:MAX_OUT]
+
+
+def _json_hits(raw: str) -> list[dict] | None:
+    """The hits of `qmd ... --format json`; None when the text is not that (an error, a timeout)."""
+    for m in re.finditer(r"(?m)^\[", raw):
+        try:
+            data, _ = json.JSONDecoder().raw_decode(raw[m.start():])
+        except ValueError:
+            continue
+        if isinstance(data, list):
+            return [h for h in data if isinstance(h, dict)]
+    return None
+
+
+def _docs_cli(args: dict, q: str, timeout: int) -> str:
+    cmd = _qmd_cmd(args, q)
+    if "-n" not in cmd[3:]:
+        cmd += ["-n", "5"]   # the CLI's own default; --format json would give 20
+    return run([*cmd, "--format", "json"], cwd=KB, timeout=timeout, limit=None)
+
+
+def _docs_hits(args: dict, q: str) -> tuple[list[dict] | None, str, str]:
+    """One docs search -> (qmd's hits or None, a note for the answer, qmd's raw text when no hits)."""
+    hits = _docs_warm(args, q)
+    if hits is not None:
+        return hits, "", ""
+    raw = _docs_cli(args, q, TIMEOUT_DOCS)
+    hits = _json_hits(raw)
+    if hits is None and raw == "(timed out)" and args.get("mode", "auto") == "auto":
+        # cold start exceeded the budget — fall back to instant BM25 rather than returning nothing
+        raw = _docs_cli({**args, "mode": "lex"}, q, TIMEOUT_GRAPH)
+        hits = _json_hits(raw)
+        if raw != "(timed out)" and not _empty(raw) and hits != []:
+            return hits, "[semantic search timed out — keyword (BM25) results below]\n\n", raw
+    return hits, "", raw
 
 
 def _docs_once(args: dict, q: str) -> str:
-    out = _docs_warm(args, q)
-    if out is not None:
-        return out
-    out = run(_qmd_cmd(args, q), cwd=KB, timeout=TIMEOUT_DOCS)
-    if out == "(timed out)" and args.get("mode", "auto") == "auto":
-        # cold start exceeded the budget — fall back to instant BM25 rather than returning nothing
-        out = run(_qmd_cmd({**args, "mode": "lex"}, q), cwd=KB, timeout=TIMEOUT_GRAPH)
-        if out != "(timed out)" and not _empty(out):
-            out = "[semantic search timed out — keyword (BM25) results below]\n\n" + out
-    return out
+    """The text of one docs search for a caller who may see everything."""
+    hits, note, raw = _docs_hits(args, q)
+    if hits is None:
+        return note + raw
+    return (note + warm.format_hits(hits))[:MAX_OUT]
 
 
 def search_code(args: dict, allowed: set[str] | None = None) -> str:
@@ -1113,7 +1424,8 @@ def _explain(args: dict, allowed: set[str] | None) -> str:
     book = datadict.entries(_dict_scope(args, allowed))
     note = ""
     low = symbol.strip().lower()
-    if book and not any(r[0].lower() == low for r in labels(GRAPH)):
+    # Only the nodes the caller may see decide: a node of a hidden project must not change the answer.
+    if book and not any(r[0].lower() == low and (allowed is None or r[2] in allowed) for r in labels(GRAPH)):
         tables = datadict.term_tables(symbol, book)
         if len(tables) == 1:
             note = f"[data dictionary: {symbol!r} is the table {tables[0]}]\n\n"
@@ -1124,62 +1436,37 @@ def _explain(args: dict, allowed: set[str] | None) -> str:
     return note + datadict.with_explain(out, book)
 
 
-def _page_hits(out: str, page: int, want: int) -> str:
-    """Hits `want*(page-1)` … `want*page` of a docs answer that holds the first `want*page` hits."""
-    blocks = re.split(r"(?m)^(?=qmd://)", out)
-    head = blocks[0] if blocks[0].startswith("[") else ""
-    hits = blocks[1:]
-    if not hits:
-        return out
-    chosen = hits[want * (page - 1): want * page]
-    if not chosen:
-        return head + "(no more documents)"
-    more = (f"\n\n[page {page} — call again with page: {page + 1} for more documents]"
-            if len(hits) >= want * page else "")
-    return (head + "".join(chosen)).rstrip() + more
+def _docs_skipped(args: dict, allowed: set[str] | None) -> str | None:
+    """A note when every project named in `project` is code-only: `both` then searches the code only.
+    None when there are docs to search, or when the name is unknown (the code half refuses it)."""
+    want = (args.get("project") or "").strip()
+    if args.get("scope") or not want or want.lower() == "all":
+        return None
+    names = [n.strip() for n in want.split(",") if n.strip()]
+    if any(n not in PROJECTS or (allowed is not None and n not in allowed) for n in names):
+        return None
+    if any(n in DOC_PROJECTS for n in names):
+        return None
+    return f"(no docs indexed for: {', '.join(names)}; only the code was searched)"
 
 
-def _code_page(args: dict, allowed: set[str] | None, page: int) -> str:
-    """Page `page` of a code search: the nodes a budget of `budget*page` adds to `budget*(page-1)`."""
-    if page == 1:
-        return search_code(args, allowed)
-    b = _budget(args)
-    now = search_code({**args, "budget": min(b * page, CODE_BUDGET_MAX * 4)}, allowed)
-    before = set(search_code({**args, "budget": min(b * (page - 1), CODE_BUDGET_MAX * 4)}, allowed)
-                 .splitlines())
-    lines = now.splitlines()
-    head = [ln for ln in lines[:3] if ln.startswith(("[projects:", "Traversal:")) or not ln]
-    new = [ln for ln in lines if ln.startswith(("NODE ", "EDGE ")) and ln not in before]
-    if not new:
-        return "\n".join(head) + "\n(no more nodes)"
-    more = "truncated" in now.lower() or "TRUNCATED" in now
-    tail = f"\n\n[page {page} — call again with page: {page + 1} for more nodes]" if more else ""
-    return "\n".join(head + new) + tail
+SEARCH_LIMIT_MAX = 50
+SEARCH_PAGE_MAX = 500   # the longest search answer (two halves of MAX_OUT) in pages of PAGE_MIN
 
 
 def search(args: dict, allowed: set[str] | None = None) -> str:
-    """The one search entry point. `domain` decides which halves run; `both` labels each section."""
-    page = args.pop("_page", 1)
-    if page > 1:
-        want = int(args.get("limit") or 5)
-
-        def docs_page():   # the check judged page 1; later pages are the plain nearest hits
-            return _page_hits(search_docs({**args, "limit": want * page, "refuse": False}, allowed),
-                              page, want)
-
-        def code_page():
-            return _code_page(args, allowed, page)
-        domain = args.get("domain", "both")
-        if domain == "docs":
-            return docs_page()
-        if domain == "code":
-            return code_page()
-        return f"=== docs ===\n{docs_page()}\n\n=== code ===\n{code_page()}"
+    """The one search entry point. `domain` decides which halves run; `both` labels each section.
+    `limit` (docs hits) is held to 1..SEARCH_LIMIT_MAX: it sizes the qmd query."""
+    if args.get("limit") is not None:
+        args = {**args, "limit": max(1, min(int(args["limit"]), SEARCH_LIMIT_MAX))}
     domain = args.get("domain", "both")
+    skipped = _docs_skipped(args, allowed) if domain == "both" else None
     if domain == "docs":
         return search_docs(args, allowed)
     if domain == "code":
         return search_code(args, allowed)
+    if skipped:
+        return f"=== docs ===\n{skipped}\n\n=== code ===\n{search_code(args, allowed)}"
     # The halves are independent subprocesses (qmd, graphify): run them side by side, not in turn.
     with ThreadPoolExecutor(max_workers=2) as pool:
         docs = pool.submit(search_docs, args, allowed)
@@ -1189,10 +1476,11 @@ def search(args: dict, allowed: set[str] | None = None) -> str:
 
 def graph_for(allowed: set[str] | None) -> str:
     """The graph file this caller may query (bin/access.py builds and caches filtered copies)."""
-    if allowed is None:
+    if _full(allowed):
         return GRAPH
     try:
-        return access.graph_for(allowed, list(PROJECTS))
+        # No `known` projects: a limited caller gets a filtered copy even when it lists every project.
+        return access.graph_for(set(allowed), ())
     except access.Denied as e:
         raise ToolError(str(e)) from None
 
@@ -1219,6 +1507,14 @@ def _no_options(name: str, args: dict) -> None:
             raise ToolError(f"{name}: '{key}' must not start with '-'")
 
 
+def _contract_view(allowed: set[str] | None) -> set[str] | None:
+    """The projects whose contracts this caller sees: None = every contract (a local session, or the
+    setting `contracts: all`), else the caller's own projects (`contracts: own`, bin/settings.py)."""
+    if allowed is None or access.contracts_open():
+        return None
+    return set(allowed)
+
+
 def _index(fn, *a):
     """Run a contracts.py query; a missing index is the caller-visible 'not built yet'."""
     try:
@@ -1233,20 +1529,23 @@ def _index(fn, *a):
 LOCAL_USAGE = None
 
 
-def call_tool(name: str, args: dict, allowed: set[str] | None = None, caller: str | None = None) -> str:
-    """Count the call when this process is a local server, then run it (see _call_tool)."""
+def call_tool(name: str, args: dict, allowed: set[str] | None = None, caller: str | None = None,
+              nested: bool = False) -> str:
+    """Count the call when this process is a local server, then run it (see _call_tool).
+    `nested`: a call from inside run_code or batch."""
     if LOCAL_USAGE is None or caller is not None:
-        return _call_tool(name, args, allowed, caller)
+        return _call_tool(name, args, allowed, caller, nested)
     start, ok = time.monotonic(), False
     try:
-        out = _call_tool(name, args, allowed, caller)
+        out = _call_tool(name, args, allowed, caller, nested)
         ok = True
         return out
     finally:
         LOCAL_USAGE.record(name, "local", dict(args or {}), ok, time.monotonic() - start)
 
 
-def _call_tool(name: str, args: dict, allowed: set[str] | None = None, caller: str | None = None) -> str:
+def _call_tool(name: str, args: dict, allowed: set[str] | None = None, caller: str | None = None,
+               nested: bool = False) -> str:
     """Dispatch a validated tool call. Every adapter goes through here — that is the whole point.
 
     `allowed` = the projects the caller may see; None = everything (local use). `caller` names who
@@ -1258,7 +1557,7 @@ def _call_tool(name: str, args: dict, allowed: set[str] | None = None, caller: s
     validate(name, args, require=not args.get("cursor"))  # a cursor stands for the original arguments
     _no_options(name, args)
     if allowed is not None:
-        allowed = set(allowed)
+        allowed = _same_grant(allowed)
     page = args.pop("page", None)
     page_given = page is not None
     page = 1 if page is None else page
@@ -1279,21 +1578,24 @@ def _call_tool(name: str, args: dict, allowed: set[str] | None = None, caller: s
     if name in UNPAGED:
         return _dispatch(name, args, allowed)
     owner = (caller, frozenset(allowed) if allowed is not None else None)
-    if cursor:
-        text, state = CURSORS.get(cursor, name, owner)
-        if not page_given:          # a cursor alone: the page after the last one served
-            page = state["page"] + 1
-        state["page"] = page
-        return paginate(text, page, state["size"], cursor)  # the size the answer was cut with
+    if cursor:   # a cursor alone: the page after the last one served; the size it was cut with
+        if nested:   # read a page, never move the caller's own cursor
+            text, state = CURSORS.get(cursor, name, owner)
+            return paginate(text, page if page_given else state["page"] + 1, state["size"])
+        text, size, page = CURSORS.advance(cursor, name, owner, page if page_given else None)
+        return paginate(text, page, size, cursor)
     if name in SELF_PAGED:
+        if page > SEARCH_PAGE_MAX:
+            raise ToolError(f"{name}: 'page' must be 1-{SEARCH_PAGE_MAX}")
         if length and "budget" not in args:  # ~4 characters per token
             args["budget"] = max(300, min(length // 4, CODE_BUDGET_MAX))
-        if page > 1:  # without a cursor: page by hits and nodes, run again
-            return _dispatch(name, {**args, "_page": page}, allowed)
-        # page 1 keeps a longer code answer (4x the budget) behind a cursor. The docs half keeps
-        # `limit`: a caller who asks for 2 documents gets 2; `page: 2` gives the next ones.
-        args = {**args, "budget": min(_budget(args) * CURSOR_WIDEN, CODE_BUDGET_MAX * CURSOR_WIDEN)}
+        # Every page, with or without a cursor, is cut from the same text: the code half runs with
+        # 4x the budget, the docs half with `limit` hits (a caller who asks for 2 documents gets 2).
+        # So `page: 2` without the cursor is the cursor's page 2, as page 1's footer promises.
+        args = {**args, "_wide": _widened(args)}
     text = _dispatch(name, args, allowed)
+    if nested:   # a call from run_code or batch: the whole answer, no cursor of its own
+        return _whole(text, page if page_given else None, length)
     first = paginate(text, page, length)
     if "[page " not in first:
         return first
@@ -1301,47 +1603,87 @@ def _call_tool(name: str, args: dict, allowed: set[str] | None = None, caller: s
     return paginate(text, page, length, token)
 
 
-class Cursors:
-    """Answers kept for their next pages: a random token -> (text, tool, owner, expiry). In memory, per
-    process; at most CURSOR_MAX of them and CURSOR_TTL seconds each. A token works only for the tool,
-    the caller and the projects that made it: another caller gets "expired", not someone's answer."""
+def _whole(text: str, page: int | None, length: int | None) -> str:
+    """The answer of a nested call: all of it up to MAX_OUT, or the page asked for without a cursor
+    (a program's calls must not push its caller's own cursors out)."""
+    if page is not None:
+        return paginate(text, page, length)
+    if len(text) <= MAX_OUT:
+        return text
+    return text[:MAX_OUT] + f"\n… (cut at {MAX_OUT} characters: narrow the call)"
 
-    def __init__(self, ttl: float, cap: int):
-        self.ttl, self.cap = ttl, cap
-        self.items: "OrderedDict[str, tuple[str, str, tuple, float]]" = OrderedDict()
+
+class Cursors:
+    """Answers kept for their next pages: a random token -> (text, tool, owner, expiry, state, bytes).
+    In memory, per process, bounded three ways: at most `cap` answers, `max_bytes` of text in all and
+    `per_owner` answers per caller (one caller cannot push the others' answers out); each lives `ttl`
+    seconds. A token works only for the tool, the caller and the projects that made it: another
+    caller gets "expired", not someone's answer."""
+
+    def __init__(self, ttl: float, cap: int, max_bytes: int = 64_000_000, per_owner: int = 50):
+        self.ttl, self.cap, self.max_bytes, self.per_owner = ttl, cap, max_bytes, per_owner
+        self.items: "OrderedDict[str, tuple]" = OrderedDict()
+        self.bytes = 0
         self.lock = threading.Lock()
 
-    def put(self, text: str, tool: str, owner: tuple, size: int | None = None, page: int = 1) -> str:
+    def put(self, text: str, tool: str, owner: tuple, size: int | None = None, page: int = 1) -> str | None:
+        """-> the token; None when the answer alone is larger than the whole budget (not kept)."""
+        nbytes = len(text.encode("utf-8", "replace"))
+        if nbytes > self.max_bytes:
+            return None
         token = "c_" + secrets.token_urlsafe(12)
         with self.lock:
             self._expire()
-            while len(self.items) >= self.cap:
-                self.items.popitem(last=False)
+            mine = [k for k, v in self.items.items() if v[2] == owner]
+            while len(mine) >= self.per_owner:
+                self._drop(mine.pop(0))
+            while self.items and (len(self.items) >= self.cap or self.bytes + nbytes > self.max_bytes):
+                self._drop(next(iter(self.items)))
             self.items[token] = (text, tool, owner, time.monotonic() + self.ttl,
-                                 {"size": size, "page": page})
+                                 {"size": size, "page": page}, nbytes)
+            self.bytes += nbytes
         return token
 
     def get(self, token: str, tool: str, owner: tuple) -> tuple[str, dict]:
-        """-> (text, state); state holds the page size the answer was cut with and the last page served,
-        so a cursor alone gives the next page and the page count never changes under it."""
+        """-> (text, a copy of the state: the page size the answer was cut with, the last page served)."""
         with self.lock:
-            self._expire()
-            hit = self.items.get(token)
+            hit = self._hit(token, tool, owner)
+            return hit[0], dict(hit[4])
+
+    def advance(self, token: str, tool: str, owner: tuple, page: int | None) -> tuple[str, int | None, int]:
+        """-> (text, page size, the page to serve). `page` None = the page after the last one served.
+        The page moves under the lock, so two calls with one cursor never serve the same page twice."""
+        with self.lock:
+            hit = self._hit(token, tool, owner)
+            state = hit[4]
+            state["page"] = state["page"] + 1 if page is None else page
+            return hit[0], state["size"], state["page"]
+
+    def _hit(self, token: str, tool: str, owner: tuple) -> tuple:
+        self._expire()
+        hit = self.items.get(token)
         if not hit or hit[1] != tool or hit[2] != owner:
             raise ToolError("cursor expired or unknown: run the query again (cursors live "
                             f"{int(self.ttl // 60)} minutes)")
-        return hit[0], hit[4]
+        return hit
+
+    def _drop(self, token: str) -> None:
+        hit = self.items.pop(token, None)
+        if hit:
+            self.bytes -= hit[5]
 
     def _expire(self) -> None:
         now = time.monotonic()
         for k in [k for k, v in self.items.items() if v[3] < now]:
-            del self.items[k]
+            self._drop(k)
 
 
 CURSOR_TTL = float(os.environ.get("KB_CURSOR_TTL", "600"))
 CURSOR_MAX = int(os.environ.get("KB_CURSOR_MAX", "500"))
+CURSOR_BYTES = int(os.environ.get("KB_CURSOR_BYTES", str(64_000_000)))
+CURSOR_PER_OWNER = int(os.environ.get("KB_CURSOR_PER_OWNER", "50"))
 CURSOR_WIDEN = 4
-CURSORS = Cursors(CURSOR_TTL, CURSOR_MAX)
+CURSORS = Cursors(CURSOR_TTL, CURSOR_MAX, CURSOR_BYTES, CURSOR_PER_OWNER)
 
 
 def paginate(text: str, page: int, size: int | None = None, cursor: str | None = None) -> str:
@@ -1383,12 +1725,36 @@ def run_code(code: str, allowed: set[str] | None, caller: str | None) -> str:
     """An agent's program in the sandbox (sandbox/runner.mjs): QuickJS in WebAssembly, inside a Node
     process with the permission model on (read access to the sandbox folder only: no network, no
     child processes, no workers, no writes). Each kb() call comes back here and runs through
-    call_tool with the caller's own rights; run_code and batch cannot be called from inside."""
+    call_tool with the caller's own rights; run_code and batch cannot be called from inside.
+    At most RUN_JOBS programs run at once; each one's output and value are cut at RUN_MAX_VALUE."""
+    if len(code) > 20_000:
+        raise ToolError("run_code: the program is longer than 20000 characters")
+    with _Job(RUN_JOBS, "run_code"):
+        msg = _run_sandbox(code, allowed, caller)
+    parts = []
+    if msg.get("output"):
+        parts.append(_cut(str(msg["output"]).rstrip(), "output"))
+    if msg.get("error"):
+        parts.append(f"(error: {str(msg['error'])[:2000]})")
+    value = msg.get("value")
+    if value is not None:
+        parts.append(_cut(value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2),
+                          "returned value"))
+    parts.append(f"[run_code: {msg.get('calls', 0)} kb() call(s)]")
+    return "\n\n".join(parts)
+
+
+def _cut(text: str, what: str) -> str:
+    if len(text) <= RUN_MAX_VALUE:
+        return text
+    return text[:RUN_MAX_VALUE] + f"\n… (the {what} is cut at {RUN_MAX_VALUE} characters: return less)"
+
+
+def _run_sandbox(code: str, allowed: set[str] | None, caller: str | None) -> dict:
+    """Run the program; -> the runner's last message ({done, output, value, error, calls})."""
     import resource
     import select
 
-    if len(code) > 20_000:
-        raise ToolError("run_code: the program is longer than 20000 characters")
     proc = sock = None
     if SANDBOX_SOCKET:  # the sandbox service (sandbox/socket-server.mjs) starts the runner and limits it
         import socket
@@ -1416,14 +1782,17 @@ def run_code(code: str, allowed: set[str] | None, caller: str | None) -> str:
     deadline = time.monotonic() + RUN_SECONDS + 15  # the script's own deadline + tool time
     try:
         assert rd and wr
-        wr.write(json.dumps({"code": code, "deadline_ms": RUN_SECONDS * 1000,
+        wr.write(json.dumps({"code": code, "deadline_ms": RUN_SECONDS * 1000, "max_output": RUN_MAX_VALUE,
                              "max_calls": RUN_CALLS, "memory_mb": 64}) + "\n")
         wr.flush()
         while True:
             left = deadline - time.monotonic()
             if left <= 0 or not select.select([rd], [], [], left)[0]:
                 raise ToolError(f"run_code: stopped after {RUN_SECONDS + 15} s")
-            line = rd.readline()
+            line = rd.readline(RUN_MAX_LINE)
+            if line and not line.endswith("\n"):
+                raise ToolError("run_code: the sandbox sent a message longer than "
+                                f"{RUN_MAX_LINE} characters")
             if not line:
                 err = ((proc.stderr.read() if proc and proc.stderr else "") or "")[-400:]
                 raise ToolError(f"run_code: the sandbox stopped ({err.strip() or 'no message'})")
@@ -1435,7 +1804,7 @@ def run_code(code: str, allowed: set[str] | None, caller: str | None) -> str:
                 reply = {"error": f"'{tool}' cannot be called from run_code"}
             else:
                 try:
-                    reply = {"result": call_tool(tool, dict(args), allowed, caller)}
+                    reply = {"result": call_tool(tool, dict(args), allowed, caller, nested=True)}
                 except ToolError as e:
                     reply = {"error": str(e)}
             wr.write(json.dumps(reply) + "\n")
@@ -1453,16 +1822,7 @@ def run_code(code: str, allowed: set[str] | None, caller: str | None) -> str:
                     pass
         if sock is not None:
             sock.close()
-    parts = []
-    if msg.get("output"):
-        parts.append(msg["output"].rstrip())
-    if msg.get("error"):
-        parts.append(f"(error: {msg['error']})")
-    value = msg.get("value")
-    if value is not None:
-        parts.append(value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2))
-    parts.append(f"[run_code: {msg.get('calls', 0)} kb() call(s)]")
-    return "\n\n".join(parts)
+    return msg
 
 
 def batch(calls: list, allowed: set[str] | None, caller: str | None) -> str:
@@ -1480,7 +1840,7 @@ def batch(calls: list, allowed: set[str] | None, caller: str | None) -> str:
 
     def one(c: dict) -> str:
         try:
-            return call_tool(c["tool"], dict(c.get("args") or {}), allowed, caller)
+            return call_tool(c["tool"], dict(c.get("args") or {}), allowed, caller, nested=True)
         except ToolError as e:
             return f"(error: {e})"
     with ThreadPoolExecutor(max_workers=min(4, len(calls))) as pool:
@@ -1501,8 +1861,8 @@ def _dispatch(name: str, args: dict, allowed: set[str] | None) -> str:
         except ToolError as e:
             if "networkx" not in str(e):
                 raise
-        return graph_call(["graphify", "path", args["from"], args["to"]], args, allowed,
-                          args["from"], args["to"])
+        return graph_call(["graphify", "path", args["from"], args["to"]],
+                          {**args, "project": args.get("project") or "all"}, allowed, args["from"], args["to"])
     if name == "graph_routes":
         return graph_routes(args, allowed)
     if name == "review_context":
@@ -1518,9 +1878,9 @@ def _dispatch(name: str, args: dict, allowed: set[str] | None) -> str:
     if name == "docs_get":
         return docs_get(args["path"], allowed)
     if name == "contracts_search":
-        return _index(contracts.contracts_search, args["query"], None, 100_000)
+        return _index(contracts.contracts_search, args["query"], None, 100_000, None, _contract_view(allowed))
     if name == "connections":
-        return _index(contracts.connections, args.get("service", ""))
+        return _index(contracts.connections, args.get("service", ""), None, _contract_view(allowed))
     if name == "problems":
         extra = (datadict.problems(GRAPH, allowed, set(PROJECTS)) if addons.on("datadict") else None)
         return _index(contracts.problems, args.get("project", ""), allowed, None, extra)

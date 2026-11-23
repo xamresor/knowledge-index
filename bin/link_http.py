@@ -5,11 +5,15 @@ Links frontend `api.<verb>('<path>')` call sites to the Laravel controller node
 that serves the matching route (from `php artisan route:list --json`).
 
 Usage:
-  link_http.py <graph.json> <routes.json> <target_repo> <fe_root> [<fe_root> ...]
+  link_http.py [--from <caller_repo>] <graph.json> <routes.json> <target_repo> <fe_root> [<fe_root> ...]
 
 `target_repo` is the graphify repo tag whose controllers serve these routes
 (e.g. "api" for a webclient->api link, or an admin app's tag for its own frontend).
 Run once per (route table, frontend) pair; edges accumulate in the graph.
+
+`--from` is the repo tag of the calling project. A call site is resolved to a node of that repo only,
+so two frontends with the same relative path (`src/stores/cart.js`) do not swap their calls. Without
+`--from`, a root folder named like a repo decides; else a path found in two repos gives no edge.
 """
 from __future__ import annotations
 
@@ -45,14 +49,57 @@ def norm_path(p: str) -> str:
 
 def action_parts(action: str) -> tuple[str, str | None] | None:
     """`App\\Http\\Controllers\\V1\\UserController@users`
-       -> ("Http/Controllers/V1/UserController.php", "users")
-    Drops the leading namespace segment so the suffix matches app/, src/ or packages/ roots."""
+       -> ("App/Http/Controllers/V1/UserController.php", "users")
+    The whole namespace path is kept: `controller_file()` matches it against real files segment by
+    segment, so a namespace root that differs from its folder (`SmartMonitor\\Sw` in
+    `packages/sw/src`) still matches."""
     cls, _, method = action.partition("@")
     if "Controller" not in cls:
         return None
-    parts = cls.split("\\")
-    suf = "/".join(parts[1:]) + ".php" if len(parts) > 1 else parts[0] + ".php"
-    return suf, (method or None)
+    return "/".join(cls.split("\\")) + ".php", (method or None)
+
+
+def min_segments(ns_path: str) -> int:
+    """How many trailing segments must match: from `Http/` on when the namespace has it, else
+    the folder and the file. A bare file-name match is too weak (`app/Legacy/X.php`)."""
+    parts = ns_path.split("/")
+    if "Http" in parts:
+        return len(parts) - parts.index("Http")
+    return min(2, len(parts))
+
+
+def common_tail(a: list[str], b: list[str]) -> int:
+    """Number of equal trailing path segments (case-insensitive: `App` is the folder `app`)."""
+    n = 0
+    while n < len(a) and n < len(b) and a[-1 - n].lower() == b[-1 - n].lower():
+        n += 1
+    return n
+
+
+def controller_file(ns_path: str, files: list[str]) -> str | None:
+    """The file among `files` (same base name) whose path shares the longest tail with the
+    namespace path. Two files with the same best tail are ambiguous: no match."""
+    want = ns_path.split("/")
+    need = min_segments(ns_path)
+    scored = [(common_tail(want, f.split("/")), f) for f in files]
+    scored = [(s, f) for s, f in scored if s >= need]
+    if not scored:
+        return None
+    best = max(s for s, _ in scored)
+    top = [f for s, f in scored if s == best]
+    return top[0] if len(top) == 1 else None
+
+
+def tail_match(rel: str, sf: str) -> int:
+    """Overlap of a call-site path and a node path when one ends with the other at a segment
+    boundary (a `calls` root can sit above or below the staged code root); 0 when they differ."""
+    if rel == sf:
+        return len(rel)
+    if rel.endswith("/" + sf):
+        return len(sf)
+    if sf.endswith("/" + rel):
+        return len(rel)
+    return 0
 
 
 def load_routes(path: str) -> dict[tuple[str, str], tuple[str, str | None]]:
@@ -90,92 +137,118 @@ def match_route(routes, verb: str, path: str):
     return targets.pop() if len(targets) == 1 else None
 
 
+def parse_args(argv: list[str]) -> tuple[str | None, list[str]]:
+    """Split off `--from <repo>`; the rest are the positional arguments."""
+    args = list(argv)
+    caller = None
+    if "--from" in args:
+        i = args.index("--from")
+        caller = args[i + 1] if i + 1 < len(args) else None
+        del args[i:i + 2]
+    return caller, args
+
+
 def main() -> int:
-    graph_path, routes_path, target_repo = sys.argv[1], sys.argv[2], sys.argv[3]
-    fe_roots = sys.argv[4:]
+    caller_repo, args = parse_args(sys.argv[1:])
+    graph_path, routes_path, target_repo = args[0], args[1], args[2]
+    fe_roots = args[3:]
     g = graph.load(graph_path)
     routes = load_routes(routes_path)
 
-    # class nodes in the target repo, keyed for suffix match; frontend file nodes by suffix
-    api_nodes = [n for n in graph.nodes(g)
-                 if n.get("repo") == target_repo and "." not in n["label"] and n.get("source_file")]
-    fe_nodes = [n for n in graph.nodes(g)
-                if n.get("repo") != target_repo and n["label"].endswith(lang.FRONTEND)
-                and n.get("source_file")]
-
-    # method nodes (label like ".toggleMic()") in the target repo, by source_file
-    method_nodes = [n for n in graph.nodes(g)
-                    if n.get("repo") == target_repo and n.get("source_file")
-                    and n["label"].startswith(".") and n["label"].endswith("()")]
-
-    def api_node_for(suf: str, method: str | None):
-        cls_file = None
-        for n in api_nodes:
-            if n["source_file"].lstrip("/").endswith(suf):
-                cls_file = n["source_file"].lstrip("/")
-                cls_id = n["id"]
-                break
-        else:
-            return None
-        if method:  # prefer the controller METHOD node so usage chain continues
-            want = method.lower()
-            for m in method_nodes:
-                if m["source_file"].lstrip("/") == cls_file and m["label"].strip(".()").lower() == want:
-                    return m["id"]
-        return cls_id  # fallback: the controller class node
-
-    # PHP backends calling another service: the call's source is its enclosing method (the method
-    # node with the latest start line not after the call), else the class/file node of that file.
-    php_methods: dict[str, list[tuple[int, str]]] = {}
-    php_files: dict[str, str] = {}
+    # Target side: controller class nodes by file (and file base name), method nodes by (file, name).
+    api_class: dict[str, str] = {}
+    api_by_base: dict[str, list[str]] = {}
+    api_method: dict[tuple[str, str], str] = {}
+    # Caller side, keyed by (repo, source_file): a call site is looked up in its own repo only.
+    fe_funcs: dict[tuple[str, str], list[tuple[int, str]]] = {}
+    fe_files: dict[tuple[str, str], str] = {}
+    php_methods: dict[tuple[str, str], list[tuple[int, str]]] = {}
+    php_files: dict[tuple[str, str], str] = {}
+    by_base: dict[str, set[tuple[str, str]]] = {}
     for n in graph.nodes(g):
         sf = (n.get("source_file") or "").lstrip("/")
-        if n.get("repo") == target_repo or not sf.endswith(".php"):
+        if not sf:
             continue
+        repo, label = n.get("repo"), str(n.get("label", ""))
         loc = str(n.get("source_location") or "")
-        if n["label"].startswith(".") and n["label"].endswith("()") and loc.startswith("L"):
-            php_methods.setdefault(sf, []).append((int(loc[1:] or 0), n["id"]))
-        elif n["label"] == os.path.basename(sf):
-            php_files[sf] = n["id"]
+        line = int(loc[1:]) if loc.startswith("L") and loc[1:].isdigit() else None
+        is_method = label.startswith(".") and label.endswith("()")
+        if repo == target_repo:
+            if is_method:
+                api_method.setdefault((sf, label.strip(".()").lower()), n["id"])
+            elif "." not in label and sf not in api_class:
+                api_class[sf] = n["id"]
+                api_by_base.setdefault(os.path.basename(sf), []).append(sf)
+            # A project whose own frontend calls its own routes (serves = itself): its nodes are
+            # call sites too, so they also go into the caller maps below.
+            if repo != caller_repo:
+                continue
+        key = (repo, sf)
+        if sf.endswith(lang.FRONTEND):
+            if label.endswith(lang.FRONTEND):
+                fe_files.setdefault(key, n["id"])
+            if line is not None and label.endswith("()"):
+                fe_funcs.setdefault(key, []).append((line, n["id"]))
+        elif sf.endswith(".php"):
+            if is_method and line is not None:
+                php_methods.setdefault(key, []).append((line, n["id"]))
+            elif label == os.path.basename(sf):
+                php_files.setdefault(key, n["id"])
+        else:
+            continue
+        by_base.setdefault(os.path.basename(sf), set()).add(key)
 
-    def php_node_for(rel: str, line: int):
-        for sf, methods in php_methods.items():
-            if sf.endswith(rel) or rel.endswith(sf):
-                before = [m for m in methods if m[0] <= line]
-                if before:
-                    return max(before)[1]
-        for sf, nid in php_files.items():
-            if sf.endswith(rel) or rel.endswith(sf):
-                return nid
-        return None
+    def api_node_for(ns_path: str, method: str | None):
+        cls_file = controller_file(ns_path, api_by_base.get(os.path.basename(ns_path), []))
+        if not cls_file:
+            return None
+        if method:  # prefer the controller METHOD node so usage chain continues
+            mid = api_method.get((cls_file, method.lower()))
+            if mid:
+                return mid
+        return api_class[cls_file]  # fallback: the controller class node
+
+    def caller_key(rel: str, hints: set[str]) -> tuple[str, str] | None:
+        """The (repo, source_file) of a call site. `--from` names the repo; without it, a root
+        folder named like a repo decides, else the path must be unique across the repos."""
+        cands = [(tail_match(rel, sf), (repo, sf))
+                 for repo, sf in by_base.get(os.path.basename(rel), ())]
+        cands = [c for c in cands if c[0]]
+        if caller_repo:
+            cands = [c for c in cands if c[1][0] == caller_repo]
+        else:
+            repos = {k[0] for _, k in cands}
+            if len(repos) > 1:
+                cands = [c for c in cands if c[1][0] in hints]
+        if not cands:
+            return None
+        best = max(score for score, _ in cands)
+        top = {k for score, k in cands if score == best}
+        return top.pop() if len(top) == 1 else None
+
+    def enclosing(funcs: list[tuple[int, str]], line: int) -> str | None:
+        before = [f for f in funcs if f[0] <= line]
+        return max(before)[1] if before else None
+
+    # PHP backends calling another service: the call's source is its enclosing method (the method
+    # node with the latest start line not after the call), else the file node of that file.
+    def php_node_for(key: tuple[str, str] | None, line: int):
+        if not key:
+            return None
+        return enclosing(php_methods.get(key, []), line) or php_files.get(key)
 
     # A frontend call's source is its enclosing function (the function node with the latest start line
     # not after the call), else the file. Linking the file made every function of an API module share
     # all of its routes, so a path from one function could leave through another function's route.
-    fe_funcs: dict[str, list[tuple[int, str]]] = {}
-    for n in graph.nodes(g):
-        sf = (n.get("source_file") or "").lstrip("/")
-        loc = str(n.get("source_location") or "")
-        if (n.get("repo") != target_repo and sf.endswith(lang.FRONTEND) and loc.startswith("L")
-                and str(n.get("label", "")).endswith("()") and loc[1:].isdigit()):
-            fe_funcs.setdefault(sf, []).append((int(loc[1:]), n["id"]))
-
-    def fe_node_for(rel: str, line: int = 0):
-        if line:
-            for sf, funcs in fe_funcs.items():
-                if sf.endswith(rel) or rel.endswith(sf):
-                    before = [f for f in funcs if f[0] <= line]
-                    if before:
-                        return max(before)[1]
-        for n in fe_nodes:
-            sf = n["source_file"].lstrip("/")
-            if sf.endswith(rel) or rel.endswith(sf):
-                return n["id"]
-        return None
+    def fe_node_for(key: tuple[str, str] | None, line: int = 0):
+        if not key:
+            return None
+        return (enclosing(fe_funcs.get(key, []), line) if line else None) or fe_files.get(key)
 
     edges, matched, unmatched, seen = [], 0, 0, set()
     for root in fe_roots:
         repo_root = os.path.dirname(root.rstrip("/"))
+        hints = {os.path.basename(repo_root), os.path.basename(root.rstrip("/"))}
         for dp, dirs, files in os.walk(root):
             # don't scan dependency / build output — not our source, and slow
             dirs[:] = js_ts.prune(dirs)
@@ -195,8 +268,9 @@ def main() -> int:
                     calls = list(php_laravel.iter_backend_calls(text))
                 else:
                     calls = list(iter_calls(text.splitlines()))
+                key = caller_key(rel, hints) if calls else None
                 for i, verb, raw in calls:
-                    src_node = php_node_for(rel, i) if backend else fe_node_for(rel, i)
+                    src_node = php_node_for(key, i) if backend else fe_node_for(key, i)
                     ap = match_route(routes, verb, norm_path(raw))
                     if not ap:
                         unmatched += 1

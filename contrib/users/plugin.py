@@ -7,8 +7,12 @@ For a team that wants no second system behind the two webhooks of the access pro
   may search (`*` for all) and the admin right, and gives the person a first key.
 - **The password comes from the person.** A user name is an e-mail address. A new person gets a mail
   with a link and chooses a password; "Forgot the password?" on the sign-in page and "Reset password" of
-  an admin send the same mail. The link works once and for a short time. The store keeps a password as
-  scrypt with its own salt. Five wrong passwords lock the sign-in of that name for 15 minutes.
+  an admin send the same mail. The link works once and for a short time; a "forgot" link does not end a
+  pending invite, both work until one is used. The store keeps a password as scrypt with its own salt. Five
+  wrong passwords from one address lock the sign-in of that name from that address for 15 minutes: a
+  stranger cannot lock the owner out, who signs in from another address.
+- **An admin keeps a project.** An admin cannot save the own row without a project: the permission webhook
+  would refuse every token of that admin, and the admin could not sign in to undo it.
 - **Tokens come from the person.** Signed in, the person opens "My tokens": the own
   tokens, one per computer or agent. A token has the rights of its owner and none of its own. A person who
   is no admin reaches only that page and the how-to.
@@ -31,11 +35,14 @@ Install: `kb addon install contrib/users`. The first admin, on the server:
   python3 contrib/users/plugin.py revoke bob             end every key of the user
   python3 contrib/users/plugin.py list
 
-Store: `<data>/users.json`, readable by the owner only. Standard library only.
+Store: `<data>/users.json`, readable by the owner only. Every change reads, changes and saves the file under
+a flock on `<data>/users.json.lock`, so the command line and a running server never lose each other's
+changes. Standard library only.
 """
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import hashlib
 import hmac
 import json
@@ -52,6 +59,7 @@ from email.message import EmailMessage
 
 NAME = "users"
 DESCRIPTION = "the KB's own users, rights and tokens, with the Users and My tokens pages"
+ACCESS = True   # answers the access webhooks (bin/plugins.py is_access reads this line)
 TOOLS: list = []
 TOKENS = True  # people hold tokens made here: the how-to page explains the header and "My tokens"
 TABS = [("Users", "/users", "admin"), ("My tokens", "/me", "member")]  # label, path under /admin, who may open
@@ -59,7 +67,7 @@ PUBLIC = ["/forgot", "/reset"]  # pages under /admin without a session
 SIGN_IN_HINT = "your password, or a token of yours in the password field"
 
 KEY_PREFIX = "kbk_"
-NAME = re.compile(r"^[A-Za-z0-9._@+-]{1,80}$")
+NAME_RE = re.compile(r"^[A-Za-z0-9._@+-]{1,80}$")
 LABEL = re.compile(r"^[A-Za-z0-9 ._@+-]{1,60}$")
 TOUCH_SECONDS = 300  # write "last used" at most this often per token
 ONLINE_SECONDS = 900  # a user with a request in this time is "online"
@@ -72,7 +80,7 @@ PW_MIN, PW_MAX = 12, 200
 RESET_TTL = 3600  # "forgot the password": the link works this long
 INVITE_TTL = 3 * 86400  # the first mail to a new person
 RESET_EVERY = 300  # one mail per user in this time
-LOCK_AFTER, LOCK_SECONDS = 5, 900  # wrong passwords, then the sign-in of that name is shut this long
+LOCK_AFTER, LOCK_SECONDS = 5, 900  # wrong passwords from one address, then that name is shut there this long
 
 
 class UserError(Exception):
@@ -117,18 +125,21 @@ class Store:
         self.path = path
         self.now = now
         self._lock = threading.RLock()
-        self._mtime: float | None = None
+        self._stamp: tuple | None = None  # (inode, mtime in ns, size) of the file as last read
         self._users: dict[str, dict] = {}
-        self._fails: dict[str, list[float]] = {}  # wrong passwords per name, in this process
+        self._fails: dict[tuple[str, str], list[float]] = {}  # wrong passwords per (name, address), this process
+        self._flock_fd: int | None = None
+        self._flock_depth = 0
 
     # ------------------------------------------------------------------ file
     def _load(self) -> dict[str, dict]:
         try:
-            mtime = os.stat(self.path).st_mtime
+            st = os.stat(self.path)
         except OSError:
-            self._users, self._mtime = {}, None
+            self._users, self._stamp = {}, None
             return self._users
-        if mtime != self._mtime:
+        stamp = (st.st_ino, st.st_mtime_ns, st.st_size)  # a save makes a new file: a new inode
+        if stamp != self._stamp:
             try:
                 with open(self.path, encoding="utf-8") as f:
                     data = json.load(f)
@@ -144,8 +155,35 @@ class Store:
                                                "last_used": rec.get("last_used")}
                     for field in ("key_hash", "key_start", "key_issued"):
                         rec.pop(field, None)
-            self._mtime = mtime
+            self._stamp = stamp
         return self._users
+
+    @contextlib.contextmanager
+    def _changing(self):
+        """Read, change and save the file as one step, also against another process (the command line, a
+        second server): the thread lock of this store, then a flock on `<file>.lock`, then a fresh read.
+        Nested use takes the flock once."""
+        with self._lock:
+            if self._flock_depth == 0:
+                os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+                fd = os.open(f"{self.path}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                except BaseException:
+                    os.close(fd)
+                    raise
+                self._flock_fd = fd
+            self._flock_depth += 1
+            try:
+                self._load()
+                yield
+            finally:
+                self._flock_depth -= 1
+                if self._flock_depth == 0 and self._flock_fd is not None:
+                    fd, self._flock_fd = self._flock_fd, None
+                    with contextlib.suppress(OSError):
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    os.close(fd)
 
     def _save(self) -> None:
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
@@ -162,16 +200,18 @@ class Store:
             with contextlib.suppress(OSError):
                 os.unlink(tmp)
             raise
-        self._mtime = os.stat(self.path).st_mtime
+        st = os.stat(self.path)
+        self._stamp = (st.st_ino, st.st_mtime_ns, st.st_size)
 
     # ------------------------------------------------------------------ admin side
     def all(self) -> dict[str, dict]:
         """Every user, for the pages: no hash of a token, of the password or of a reset link."""
         with self._lock:
             now = self.now()
-            return {name: {**{k: v for k, v in rec.items() if k not in ("pw", "reset")},
+            return {name: {**{k: v for k, v in rec.items() if k not in ("pw", "reset", "invite")},
                            "has_password": bool(rec.get("pw")),
-                           "reset_pending": bool(rec.get("reset") and rec["reset"].get("expires", 0) > now),
+                           "reset_pending": any((rec.get(slot) or {}).get("expires", 0) > now
+                                                for slot in ("reset", "invite")),
                            "tokens": {tid: {k: v for k, v in t.items() if k != "hash"}
                                       for tid, t in rec["tokens"].items()}}
                     for name, rec in self._load().items()}
@@ -180,7 +220,7 @@ class Store:
     def _projects(projects) -> list[str] | str:
         if projects == "*":
             return "*"
-        if not isinstance(projects, (list, tuple, set)) or not all(isinstance(p, str) and NAME.match(p) for p in projects):
+        if not isinstance(projects, (list, tuple, set)) or not all(isinstance(p, str) and NAME_RE.match(p) for p in projects):
             raise UserError("a project name has letters, digits and . _ @ + - only")
         return sorted(set(projects))
 
@@ -205,9 +245,9 @@ class Store:
         """A new user. With `key` the user gets a first token, and the key comes back: the only time it
         exists in clear text. Without it the user has nothing yet: a mail with a link comes next."""
         name = (name or "").strip()
-        if not NAME.match(name):
+        if not NAME_RE.match(name):
             raise UserError("a user name has 1 to 80 letters, digits and . _ @ + - only")
-        with self._lock:
+        with self._changing():
             users = self._load()
             if name.lower() in users:
                 raise UserError("this user exists already")
@@ -220,21 +260,21 @@ class Store:
 
     def issue(self, name: str, label: str = "") -> str:
         """One more token for a user. The other tokens of the user stay."""
-        with self._lock:
+        with self._changing():
             key = self._new_token(self._user(name), label)
             self._save()
             return key
 
     def revoke(self, name: str) -> None:
         """End every token of a user."""
-        with self._lock:
+        with self._changing():
             self._user(name)["tokens"] = {}
             self._save()
 
     def remove_token(self, name: str, token_id: str, keep_one: bool = False) -> None:
         """End one token. `keep_one`: refuse the last token, for a person who removes the own tokens
         and would then have no way back in."""
-        with self._lock:
+        with self._changing():
             tokens = self._user(name)["tokens"]
             if token_id not in tokens:
                 raise UserError("no such token")
@@ -244,7 +284,7 @@ class Store:
             self._save()
 
     def update(self, name: str, projects=None, admin: bool | None = None, disabled: bool | None = None) -> None:
-        with self._lock:
+        with self._changing():
             rec = self._user(name)
             if projects is not None:
                 rec["projects"] = self._projects(projects)
@@ -255,66 +295,83 @@ class Store:
             self._save()
 
     def remove(self, name: str) -> None:
-        with self._lock:
+        with self._changing():
             self._user(name)
             del self._users[name.strip().lower()]
             self._save()
 
     # ------------------------------------------------------------------ password and reset link
-    def set_password(self, name: str, password: str) -> None:
-        """A new password. It ends every sign-in token of the user and any reset link."""
+    def set_password(self, name: str, password: str, reset_value: str | None = None) -> None:
+        """A new password. It ends every sign-in token of the user and any reset link. The hash takes
+        about 30 ms: it is made before the lock, so token checks do not wait for it. With `reset_value`,
+        the reset link is checked again under the lock: two uses of one link cannot both succeed."""
         password = password or ""
-        with self._lock:
+        if not PW_MIN <= len(password) <= PW_MAX:
+            raise UserError(f"A password has {PW_MIN} characters or more.")
+        if password.strip().lower() == (name or "").strip().lower():
+            raise UserError("The password must not be the user name.")
+        salt = secrets.token_bytes(16)
+        hashed = _scrypt(password, salt)
+        with self._changing():
             rec = self._user(name)
-            if not PW_MIN <= len(password) <= PW_MAX:
-                raise UserError(f"A password has {PW_MIN} characters or more.")
-            if password.strip().lower() == name.strip().lower():
-                raise UserError("The password must not be the user name.")
-            salt = secrets.token_bytes(16)
-            rec["pw"] = {"salt": salt.hex(), "hash": _scrypt(password, salt), "set": self.now()}
+            if reset_value is not None and not self._reset_ok(rec, reset_value):
+                raise UserError("This link does not work any more. Ask for a new mail.")
+            rec["pw"] = {"salt": salt.hex(), "hash": hashed, "set": self.now()}
             rec.pop("reset", None)
+            rec.pop("invite", None)
             rec["tokens"] = {tid: t for tid, t in rec["tokens"].items() if t.get("kind") != "signin"}
-            self._fails.pop(name.strip().lower(), None)
+            lower = name.strip().lower()
+            for key in [k for k in self._fails if k[0] == lower]:
+                del self._fails[key]
             self._save()
 
-    def _password_ok(self, rec: dict | None, password: str) -> bool:
-        """The same work for a user without a password and for no user at all: the time tells nothing."""
-        pw = (rec or {}).get("pw") or {"salt": "00" * 16, "hash": ""}
-        return hmac.compare_digest(_scrypt(password or "", bytes.fromhex(pw["salt"])), pw["hash"] or "-") \
-            and bool(rec) and not rec.get("disabled")
+    @staticmethod
+    def _password_ok(pw: dict | None, usable: bool, password: str) -> bool:
+        """The same work for a user without a password and for no user at all: the time tells nothing.
+        `pw` is the stored password record; `usable` says that the user exists and is not disabled."""
+        pw = pw or {"salt": "00" * 16, "hash": ""}
+        return hmac.compare_digest(_scrypt(password or "", bytes.fromhex(pw["salt"])), pw["hash"] or "-") and usable
 
-    def start_reset(self, name: str, ttl: float = RESET_TTL) -> str:
-        """A one-time value for a "choose a password" link. Returns it: the store keeps its SHA-256."""
-        with self._lock:
+    def start_reset(self, name: str, ttl: float = RESET_TTL, invite: bool = False) -> str:
+        """A one-time value for a "choose a password" link. Returns it: the store keeps its SHA-256.
+        An invite and a "forgot" link have a slot each: a "forgot" mail does not end a pending invite of
+        three days, and both work until one of them sets the password."""
+        with self._changing():
             rec = self._user(name)
             if rec.get("disabled"):
                 raise UserError("This user is disabled.")
-            last = (rec.get("reset") or {}).get("sent", 0)
+            last = max((rec.get(slot) or {}).get("sent", 0) for slot in ("reset", "invite"))
             if self.now() - last < RESET_EVERY:
                 raise UserError("A mail went out a moment ago. Wait a few minutes.")
             value = secrets.token_urlsafe(32)
-            rec["reset"] = {"hash": _hash(value), "expires": self.now() + ttl, "sent": self.now()}
+            rec["invite" if invite else "reset"] = {"hash": _hash(value), "expires": self.now() + ttl,
+                                                    "sent": self.now()}
             self._save()
             return value
 
+    def _reset_ok(self, rec: dict, value: str) -> bool:
+        ok = False
+        for slot in ("reset", "invite"):   # both compared: the time does not tell which one matched
+            link = rec.get(slot) or {}
+            ok |= hmac.compare_digest(str(link.get("hash", "")), _hash(value or "")) \
+                and link.get("expires", 0) > self.now()
+        return ok and not rec.get("disabled")
+
     def reset_user(self, value: str) -> str | None:
         """The user of a reset value that still works, or None."""
-        want, found = _hash(value or ""), None
+        found = None
         with self._lock:
             for name, rec in self._load().items():
-                reset = rec.get("reset") or {}
-                if hmac.compare_digest(str(reset.get("hash", "")), want) and reset.get("expires", 0) > self.now() \
-                        and not rec.get("disabled"):
+                if self._reset_ok(rec, value):
                     found = name
         return found
 
     def finish_reset(self, value: str, password: str) -> str:
-        with self._lock:
-            name = self.reset_user(value)
-            if name is None:
-                raise UserError("This link does not work any more. Ask for a new mail.")
-            self.set_password(name, password)
-            return name
+        name = self.reset_user(value)
+        if name is None:
+            raise UserError("This link does not work any more. Ask for a new mail.")
+        self.set_password(name, password, reset_value=value)  # checks and ends the link in one step
+        return name
 
     def seen(self) -> list[tuple[str, float]]:
         """The active users with the time of their last request, newest first: "who is online"."""
@@ -346,37 +403,54 @@ class Store:
             hit = self._by_key(key)
             return hit[0] if hit else None
 
-    def login(self, username: str, password: str) -> str:
+    def login(self, username: str, password: str, ip: str = "") -> str:
         """The login webhook. The password field holds the password of the user, or a token of the user.
-        -> the bearer token: a new sign-in token after a password, the token itself after a token."""
+        -> the bearer token: a new sign-in token after a password, the token itself after a token.
+
+        The password hash (scrypt, about 30 ms) runs outside the lock: a flood of wrong passwords must not
+        make every token check wait. The record is copied under the lock, hashed without it, and the lock
+        is taken again to save; a password changed in between counts as a wrong password.
+
+        Wrong passwords count per name and client address (`ip`): five from one address shut that name for
+        that address only. A stranger who knows a name cannot keep its owner out."""
         name = (username or "").strip().lower()
+        who = (name, str(ip or ""))
         with self._lock:
             now = self.now()
             hit = self._by_key(password)
             if hit is not None and hit[0] == name:  # a token is 256 random bits: the lock is not for it
                 return password
-            fails = [t for t in self._fails.get(name, []) if now - t < LOCK_SECONDS]
+            fails = [t for t in self._fails.get(who, []) if now - t < LOCK_SECONDS]
             if len(fails) >= LOCK_AFTER:
                 raise Locked(int(LOCK_SECONDS - (now - fails[0])) + 1)
             rec = self._load().get(name)
-            if self._password_ok(rec, password):
-                self._fails.pop(name, None)
-                key = SIGNIN_PREFIX + secrets.token_urlsafe(32)
-                tokens = rec["tokens"]
-                tokens[secrets.token_hex(4)] = {"hash": _hash(key), "start": key[:8], "label": "sign-in",
-                                               "kind": "signin", "created": now, "last_used": now}
-                signins = sorted((tid for tid, t in tokens.items() if t.get("kind") == "signin"),
-                                 key=lambda tid: tokens[tid].get("last_used") or tokens[tid].get("created") or 0)
-                for tid in signins:
-                    stale = now - (tokens[tid].get("last_used") or tokens[tid].get("created") or 0) > SIGNIN_IDLE
-                    if stale or len([1 for t in tokens.values() if t.get("kind") == "signin"]) > SIGNIN_KEEP:
-                        del tokens[tid]
-                self._save()
-                return key
-            self._fails[name] = fails + [now]
+            pw = dict(rec["pw"]) if rec and rec.get("pw") else None
+            usable = bool(rec) and not rec.get("disabled")
+        ok = self._password_ok(pw, usable, password)
+        if ok:
+            with self._changing():
+                rec = self._users.get(name)
+                if rec is not None and not rec.get("disabled") and (rec.get("pw") or {}).get("hash") == pw["hash"]:
+                    now = self.now()
+                    self._fails.pop(who, None)
+                    key = SIGNIN_PREFIX + secrets.token_urlsafe(32)
+                    tokens = rec["tokens"]
+                    tokens[secrets.token_hex(4)] = {"hash": _hash(key), "start": key[:8], "label": "sign-in",
+                                                   "kind": "signin", "created": now, "last_used": now}
+                    signins = sorted((tid for tid, t in tokens.items() if t.get("kind") == "signin"),
+                                     key=lambda tid: tokens[tid].get("last_used") or tokens[tid].get("created") or 0)
+                    for tid in signins:
+                        stale = now - (tokens[tid].get("last_used") or tokens[tid].get("created") or 0) > SIGNIN_IDLE
+                        if stale or len([1 for t in tokens.values() if t.get("kind") == "signin"]) > SIGNIN_KEEP:
+                            del tokens[tid]
+                    self._save()
+                    return key
+        with self._lock:
+            now = self.now()
+            self._fails[who] = [t for t in self._fails.get(who, []) if now - t < LOCK_SECONDS] + [now]
             if len(self._fails) > 5000:  # a flood of names: keep the map small
                 self._fails = {k: v for k, v in self._fails.items() if v and now - v[-1] < LOCK_SECONDS}
-            raise UserError("Wrong user name or password.")
+        raise UserError("Wrong user name or password.")
 
     def permissions(self, token: str, asked: list[str]) -> tuple[int, dict]:
         """The permission webhook: the HTTP status and the body."""
@@ -387,8 +461,13 @@ class Store:
             name, rec, tid = hit
             now = self.now()
             if now - (rec["tokens"][tid].get("last_used") or 0) >= TOUCH_SECONDS:
-                rec["tokens"][tid]["last_used"] = rec["last_used"] = now
-                self._save()
+                with self._changing():  # a fresh read under the file lock, then the "last used" time
+                    hit = self._by_key(token)
+                    if hit is None:
+                        return 401, {"message": "unknown key"}
+                    name, rec, tid = hit
+                    rec["tokens"][tid]["last_used"] = rec["last_used"] = now
+                    self._save()
             if rec.get("projects") == "*":
                 return 200, {"user": {"name": name}, "projects": "*"}
             allowed = [p for p in rec.get("projects") or [] if p in set(asked or [])]
@@ -665,7 +744,7 @@ def send_link(s: Store, name: str, base: str, cfg: dict, invite: bool = False) -
     if not can_mail(cfg):
         raise UserError("Mail is not set up on this server.")
     ttl = INVITE_TTL if invite else RESET_TTL
-    value = s.start_reset(name, ttl)
+    value = s.start_reset(name, ttl, invite=invite)
     link = f"{base.rstrip('/')}/admin/reset?t={value}"
     hours = int(ttl // 3600)
     lead = ("You have an account on the knowledge base." if invite
@@ -676,8 +755,8 @@ def send_link(s: Store, name: str, base: str, cfg: dict, invite: bool = False) -
     try:
         send_mail(name, "Knowledge base: choose your password", text, cfg)
     except MailError as e:
-        with s._lock:  # the mail did not leave: the link must not stay open, and a retry must not wait
-            s._user(name).pop("reset", None)
+        with s._changing():  # the mail did not leave: the link must not stay open, and a retry must not wait
+            s._user(name).pop("invite" if invite else "reset", None)
             s._save()
         raise UserError(f"The mail did not go out: {e}.") from None
 
@@ -685,7 +764,8 @@ def send_link(s: Store, name: str, base: str, cfg: dict, invite: bool = False) -
 def login(body: dict, core) -> tuple:
     """The login webhook: the password of the user, or a token of the user in the password field."""
     try:
-        return 200, {"token": store(core).login(str(body.get("username", "")), str(body.get("password", "")))}
+        return 200, {"token": store(core).login(str(body.get("username", "")), str(body.get("password", "")),
+                                                str(body.get("ip", "")))}
     except Locked as e:
         return 429, {"message": str(e)}, {"Retry-After": str(e.retry)}
     except UserError as e:
@@ -748,6 +828,12 @@ def public_page(req: dict, core) -> tuple[int, str, str]:
                 raise UserError("The two passwords are not the same.")
             s.finish_reset(value, first)
             req["audit"]("password set", name)
+            # The sign-in tokens of the old password are gone: the cached verdicts and the open
+            # admin sessions that stand on them go too.
+            if callable(req.get("forget")):
+                req["forget"]()
+            if callable(req.get("drop_sessions")):
+                req["drop_sessions"](name)
             return box("Choose a password", f'<p>The password is set. Sign in with <b>{esc(name)}</b>.</p>'
                                             f'<p><a href="{base}/admin/login">Sign in</a></p>')
         except UserError as e:
@@ -806,7 +892,13 @@ def page(req: dict, core) -> tuple:
                     s.remove(name)
                     note = "Removed."
                 else:
-                    s.update(name, projects_from_form(form, sorted(core.PROJECTS)), is_admin, disabled)
+                    projects = projects_from_form(form, sorted(core.PROJECTS))
+                    if name.lower() == me and not projects:
+                        # No project: the permission webhook refuses every token of this admin, and the
+                        # admin can no longer sign in to undo it.
+                        raise UserError("Keep at least one project on your own account: without one you "
+                                        "could not sign in any more.")
+                    s.update(name, projects, is_admin, disabled)
                     note = "Saved."
             elif action:
                 return 404, "KB admin", "<main><section>Not found.</section></main>"

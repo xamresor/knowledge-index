@@ -16,7 +16,7 @@ services:
       KB_PERMISSION_URL: https://api.example.com/kb/permissions
       KB_LOGIN_URL: https://api.example.com/kb/login
       # KB_HOOK_HEADERS: '{"X-Kb-Key": "..."}'
-      KB_ADDONS: tool-multicall,fast-routes,metrics,admin
+      KB_ADDONS: tool-multicall,fast-routes,metrics
       # With the sandbox below: add code-mode to KB_ADDONS. run_code then talks to that container.
       KB_SANDBOX_SOCKET: /run/kb-sandbox/sandbox.sock
       KB_ROUTES_DIR: /routes       # <project>.json per Laravel app, written by the app's container

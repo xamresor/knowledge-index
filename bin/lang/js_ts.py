@@ -20,7 +20,8 @@ EXTENSIONS = FRONTEND
 COMMENT_PREFIXES = ("//", "/*", "*")
 CONTRIBUTES = {
     "relations": ["http_request"],
-    "patterns": ["api.<verb>() clients", "fetch/ofetch wrappers", "method: in an options object"],
+    "patterns": ["api.<verb>() clients", "axios/$http/http.<verb>() with a path",
+                 "fetch/ofetch wrappers", "method: in an options object"],
 }
 
 #: Single-file components are templates, not classes — a distinct node type in the graph.
@@ -33,6 +34,13 @@ SKIP_DIRS = frozenset({"node_modules", ".next", ".nuxt", "dist", "build", "vendo
 VERBS = ("get", "post", "put", "patch", "delete")
 #: Dotted client: `api.post('/v1/x')` — the verb is the method name.
 CALL_RE = re.compile(r"\bapi\.(" + "|".join(VERBS) + r")\(\s*[`'\"]([^`'\"]+)", re.IGNORECASE)
+#: A common HTTP client object: `axios.get('/x')`, `this.$http.post(`/x/${id}`)`, `http.get('x/y')`,
+#: `this.$axios.$get('/x')`. These names also carry calls that are not to our API, so the first
+#: argument must look like a path: it has a `/` after any leading `${base}`, and no scheme.
+CLIENTS = ("axios", "$axios", "http", "$http", "httpClient", "apiClient")
+_CLIENT = r"(?<![\w$])(?:" + "|".join(re.escape(c) for c in CLIENTS) + r")\.\$?(" + "|".join(VERBS) + r")"
+CLIENT_RE = re.compile(_CLIENT + r"(?:<.*?>)?\(\s*[`'\"]([^`'\"]+)")
+CLIENT_OPEN_RE = re.compile(_CLIENT + r"(?:<.*?>)?\(\s*$")
 #: Options-object style, where the verb lives in an options object (GET when absent). Covers the
 #: ofetch/fetch wrappers in use across frameworks:
 #:   $api('v2/objects', {method:'POST'})        (Nuxt/ofetch)
@@ -63,11 +71,21 @@ NOT_A_CLIENT = frozenset({"api", "apiFetch", "apiUpload", "apiDownload", "fetch"
 METHOD_WINDOW = 3          # lines after the call to look for `method:`
 
 
+def _looks_like_path(raw: str) -> bool:
+    """A client argument that names an API path, not a key or an outside URL."""
+    if "://" in raw or any(c.isspace() for c in raw):
+        return False
+    return "/" in re.sub(r"^\$\{[^}]*\}", "", raw)    # `${API}/x` and `x/y` yes; `${url}`, `key` no
+
+
 def iter_calls(lines: list[str]):
     """Yield (line number, verb, raw path) for every recognised API call site."""
     for i, line in enumerate(lines, 1):
         for verb, raw in CALL_RE.findall(line):
             yield i, verb.lower(), raw
+        for verb, raw in CLIENT_RE.findall(line):
+            if _looks_like_path(raw):
+                yield i, verb.lower(), raw
         for match in WRAPPER_RE.finditer(line):
             name, raw = match.group(1), match.group(2)
             # A bare `fetch()` counts only when the URL is a base-URL template (`${…}/…`);
@@ -78,8 +96,8 @@ def iter_calls(lines: list[str]):
         if i < len(lines):
             nxt = URL_ARG_RE.match(lines[i])
             opened = WRAPPER_OPEN_RE.search(line) if nxt else None
-            dotted = CALL_OPEN_RE.search(line) if nxt else None
-            if dotted:
+            dotted = (CALL_OPEN_RE.search(line) or CLIENT_OPEN_RE.search(line)) if nxt else None
+            if dotted and (dotted.re is CALL_OPEN_RE or _looks_like_path(nxt.group(1))):
                 yield i, dotted.group(1).lower(), nxt.group(1)
             elif opened and not (opened.group(1) == "fetch" and not nxt.group(1).startswith("${")):
                 yield i, _verb(lines[i][nxt.end():], lines, i + 1), nxt.group(1)
@@ -93,7 +111,7 @@ def _verb(rest: str, lines: list[str], i: int) -> str:
     start of the next call (a `method: 'POST'` two lines down may belong to it)."""
     window = [rest]
     for nxt in lines[i:i + METHOD_WINDOW]:
-        if CALL_RE.search(nxt) or WRAPPER_RE.search(nxt) or VERSIONED_RE.search(nxt):
+        if CALL_RE.search(nxt) or CLIENT_RE.search(nxt) or WRAPPER_RE.search(nxt) or VERSIONED_RE.search(nxt):
             break
         window.append(nxt)
     m = METHOD_RE.search("\n".join(window))

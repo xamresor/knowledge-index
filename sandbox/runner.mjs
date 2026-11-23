@@ -8,6 +8,7 @@
 //
 // Protocol over stdio, one JSON object per line:
 //   in   {"code": "...", "deadline_ms": 20000, "memory_mb": 64, "max_calls": 30, "max_output": 60000}
+//        (max_output caps the printed output and, separately, the returned value)
 //   out  {"call": "<tool>", "args": {...}}      ->  in  {"result": "<text>"} | {"error": "<text>"}
 //   out  {"done": true, "output": "...", "value": <json>|null, "error": "<text>"|null, "calls": n}
 import { readSync, writeSync } from "node:fs";
@@ -98,6 +99,18 @@ if (result.error) {
 } else {
   value = vm.dump(result.value);
   result.value.dispose();
+  // The value is capped like the output: the host reads it whole and may keep it behind a cursor.
+  if (value !== undefined && value !== null) {
+    let text;
+    try {
+      text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+    } catch (e) {
+      text = String(value);
+    }
+    if (text !== undefined && text.length > maxOutput) {
+      value = `${text.slice(0, maxOutput)}\n… (the returned value is cut at ${maxOutput} characters: return less)`;
+    }
+  }
 }
 vm.dispose();
 runtime.dispose();

@@ -4,10 +4,11 @@ Why the KB is built the way it is, what it is not, and how it compares.
 
 ## Where this sits (and where it does not)
 
-**This is a small local tool, not an enterprise search product.** It indexes a handful of related
-repositories you own, on one machine, for one owner, and exposes them to agents, scripts and a browser
-tab. It has no connectors, no multi-user permissions, no UI for administering anything, and no
-support. If you need those, the table below points at what to use instead.
+**This is a small tool, not an enterprise search product.** It indexes a handful of related
+repositories you own and exposes them to agents, scripts and a browser tab. Locally it serves one owner.
+As a shared server (`kb-http`) it serves a small team: per-project access through a permission webhook
+or the bundled users plugin, and a few admin pages (users, usage, status, settings). It has no connectors, no
+permission mirroring from other systems, and no support. If you need those, the table below points at what to use instead.
 
 Facts below were checked in **July 2026**; licences and pricing move, so verify before deciding.
 
@@ -26,7 +27,7 @@ Facts below were checked in **July 2026**; licences and pricing move, so verify 
 
 | | Indexes | Local / on-device | Daemon needed | Permissions | Licence & cost |
 |---|---|---|---|---|---|
-| **knowledge-index** | markdown docs + the code graph | ✅ embeddings on device | no | **none — one owner by design** | AGPL-3.0, free |
+| **knowledge-index** | markdown docs + the code graph | ✅ embeddings on device | no | per project (webhook or users plugin), no ACL mirroring | AGPL-3.0, free |
 | [Onyx](https://onyx.app) (ex-Danswer) | 45+ connectors | ◐ can self-host, LLM optional | yes (Docker stack) | ✅ mirrors source ACLs | MIT, free |
 | [R2R](https://github.com/SciPhi-AI/R2R) | ingested documents | ◐ | yes | users/auth built in | Apache-2.0, free |
 | [RAGFlow](https://github.com/infiniflow/ragflow) | **deep** PDF/scan parsing | ◐ | yes (Elasticsearch) | multi-tenant | Apache-2.0, free |
@@ -41,7 +42,7 @@ Facts below were checked in **July 2026**; licences and pricing move, so verify 
   and says so on every edge via `confidence` (`EXTRACTED | INFERRED | AMBIGUOUS | DERIVED`) — honest,
   but weaker than a real indexer.
 - **Connectors and permission mirroring.** Onyx and Glean read Slack, Drive, Confluence, Jira and
-  reflect their ACLs. This project reads local files and has no permission model at all.
+  reflect their ACLs. This project reads local files; its permissions are per project, set by you, not mirrored.
 - **Document understanding.** RAGFlow parses scanned PDFs and tables properly; here a document is
   markdown, and anything else is out of scope.
 - **Scale, operations, support.** A managed service is the right answer for a company; this is one
@@ -190,7 +191,7 @@ Four rules the registry enforces:
   surface refuses to bind off loopback without a token.
 - The index is **disposable**: delete `graphify-out/` and rebuild. No migration, no lock-in — the
   corpus is your files.
-- Small enough to read: ~4k lines including the dashboard and the tests.
+- Small enough to read: about 13k lines of code and 8k lines of tests, without dependencies.
 
 ## Three surfaces, three consumers
 
@@ -254,7 +255,7 @@ Not aspirations — these are the properties the code already has, kept explicit
   graph.
 - **Uncertainty is data, not a vibe.** Every edge carries `confidence`
   (`EXTRACTED | INFERRED | AMBIGUOUS | DERIVED`): AST facts and regex guesses are visibly different,
-  and the visualisation draws inferred edges dotted. A heuristic may be wrong; it may not *pretend*.
+  and the visualisation draws ambiguous edges dashed. A heuristic may be wrong; it may not *pretend*.
 - **Restraint over cleverness in destructive steps.** `dedupe.py` refuses to merge when a label has
   two real definitions (merging would invent a fact); `declutter.py` prunes only the curated hubs in
   `kb.hubs.txt`, with no degree-based auto-detection, because a high-degree definition-less node is
@@ -355,6 +356,14 @@ Not aspirations — these are the properties the code already has, kept explicit
   tables 0.125 off, 0.95 on (a model name counted as its table). The same person wrote the questions
   and the dictionary, and about half of the synonyms repeat words of the questions: an upper bound.
   Recheck with a dictionary and questions from different people.
+- [x] **Admin pages in the core, a Settings page, and a setting for contract visibility.** Done 2026-11-23.
+  The admin pages are no add-on any more: a shared server shows them when it has admins. The add-ons
+  are `code-mode`, `tool-multicall`, `fast-routes`, `metrics`, `audit`, `questions`, `scip`, `datadict`
+  and the installed plugins. `/admin/settings` switches them and edits the settings of `bin/settings.py`
+  (`<config>/settings.json`, an env variable wins). The first setting is `contracts`: `all` (contracts
+  open to every user, as before) or `own` (only the contracts that touch an allowed project, the other
+  side cut to the bare endpoint). Decision: `all` stays the default, because the contracts are the
+  interfaces a team shares; a server whose projects belong to different teams switches to `own`.
 - [ ] **Golden-set questions from the team's real use.** The current set was written by the author.
   Ten or so questions that developers really asked, each with the expected answer, show where the KB
   misses in daily work. The collection is in place: the Questions page (add-on `questions`) lists the asked

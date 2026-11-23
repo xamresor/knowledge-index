@@ -190,10 +190,10 @@ class RefusalTest(IndexCase):
         out, calls = self.search({"q": self.WEAK_Q}, {"hybrid": "No results found."})
         self.assertNotIn(docs_grade.REFUSED_MARK, out)
 
-    def test_later_pages_are_not_judged(self):
+    def test_later_pages_are_cut_from_the_judged_answer(self):
         with mock.patch.object(kb_core, "search_docs", return_value=hits("kb-a/x.md")) as sd:
-            kb_core.search({"q": "x", "domain": "docs", "_page": 2})
-        self.assertIs(sd.call_args[0][0]["refuse"], False)
+            kb_core.call_tool("search", {"q": "x", "domain": "docs", "page": 2})
+        self.assertNotIn("refuse", sd.call_args[0][0])   # the same call as page 1: graded as usual
 
 
 class LexOnlyTest(unittest.TestCase):

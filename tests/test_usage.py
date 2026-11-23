@@ -29,7 +29,7 @@ class Counters(unittest.TestCase):
         d = Usage(self.path).snapshot()
         self.assertEqual(d["tools"]["search"], {"calls": 5, "errors": 2, "seconds": 3.5})
         self.assertEqual(d["tools"]["graph_explain"]["calls"], 1)
-        self.assertEqual(d["args"]["search"], {"x": 3, "api,web | y": 2})
+        self.assertEqual(d["args"]["search"], {"x": 3, "y": 2})  # the project has its own column
         self.assertEqual(d["projects"]["api"]["search"], 2)
         self.assertEqual(d["projects"]["all"]["search"], 3)
         self.assertEqual(sorted(d["recent"]["search"]), [0.5, 0.5, 0.5, 1.0, 1.0])
@@ -57,7 +57,7 @@ class Counters(unittest.TestCase):
         u.record("review_context", "ann", {"diff": "x" * 5000, "project": "api"}, True, 4.0)
         slow = u.slow(limit=1)
         self.assertEqual(slow[0][1:5], ("review_context", "ann", "api", 4.0))
-        self.assertEqual(slow[0][5], "api")             # the diff text is not kept as an argument
+        self.assertEqual(slow[0][5], "")                # the diff text is not kept as an argument
 
     def test_report_has_p95(self):
         u = Usage(self.path)

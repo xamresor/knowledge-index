@@ -15,6 +15,45 @@
 
 Long answers come in pages with a cursor; `connections` and `problems` show the service map and its gaps.
 
+A few rules that hold for every tool:
+
+- **Pages.** A long answer ends with a `cursor`; the cursor alone gives the next page. `page: 2`
+  without the cursor gives the same page: `search` runs again with the same arguments (the same
+  `limit`, the code half with the same widened budget, 4x `budget`) and its text is cut the same
+  way. For more documents, raise `limit` (1 to 50). `search` takes `page` 1 to 500.
+- **Calls inside `run_code` and `batch`** get the whole answer (up to 200000 characters), not page 1,
+  and keep no cursor: a program never pushes its caller's own cursors out.
+- **`Class::method`** (or `Class.method`, `Class.method()`) names the method of that class:
+  `graph_explain`, `graph_affected`, `graph_path` and `graph_routes` find it through the class's
+  `method`/`contains` edge.
+- **Projects.** `graph_path`, `graph_routes` and `code_grep` look at every project the caller may
+  see unless `project` narrows them. `api:Customer` pins a project only when `api` is a project
+  and one `:` follows it; `OrderService::create` is a name.
+- **Names defined twice.** `graph_explain` and `graph_affected` answer each node that carries the
+  name exactly as typed (two `.create()` methods, a function and a template), up to 3.
+- **Docs and access.** A caller limited to some projects searches its own collections by name. With
+  the setting `contracts: all` (the default) it also searches the other collections for their
+  contract docs only; with `contracts: own` it does not ([the shared server](server.md#who-sees-the-contracts)).
+  Each hit is checked by the path in qmd's own result before it becomes text. The grade of a docs
+  answer counts words in the caller's collections and the contract docs it may see.
+- **`search` with `domain: both`** on a project without docs searches the code and says so.
+- **`repo_map` with `unused`** lists candidates of the mapped project, but counts the uses from
+  every project the caller may see. The scan for their names in the files keeps a candidate alive
+  when its name stands in another file of its own project, or of a project that has no candidate of
+  that name. The scan takes a graph job slot and at most `KB_UNUSED_SCAN_SECONDS` (20) seconds; a
+  complete scan is cached per build.
+- **`review_context`** takes a diff up to 1 MB (the shared server refuses larger request bodies) or
+  `files` up to 1000 items and 200000 lines in all; a larger input is refused.
+- **`code_grep`** never shows `.env*` files or `bootstrap/cache/`, with ripgrep or with grep.
+- **Contract docs** are indexed only from inside their project's docs root: a symlink in
+  `contracts/` (or a symlinked `contracts/` folder) that leaves it is skipped.
+- **Limits.** At most `KB_MAX_GRAPH_JOBS` (3) graphify or grep processes and `KB_MAX_DOCS_JOBS` (1)
+  qmd processes run at once, and `KB_MAX_RUN_JOBS` (2) `run_code` programs. A call that waits more
+  than `KB_JOB_WAIT` (120) seconds for a slot gets a "busy" error. The warm workers take no slot.
+  Cursors keep at most `KB_CURSOR_BYTES` (64 MB) of answers and `KB_CURSOR_PER_OWNER` (50) per
+  caller. `run_code` cuts its output and its returned value at `KB_RUN_MAX_OUTPUT` (60000)
+  characters each. `code_grep` stops reading at `limit` lines (1 to 500), sorted by path.
+
 ## When `search` finds nothing that fits
 
 A docs search always has nearest documents, also when none of them answers the question. So the docs
@@ -32,7 +71,7 @@ half of `search` grades its first hit before it answers:
    turns away some answerable questions, and the caller can still open them.
 
 `refuse: false` switches the check off for one call and returns the plain nearest hits. `explain: true`
-also prints the grade of a good answer. Only page 1 is graded; later pages are the plain nearest hits.
+also prints the grade of a good answer. The grade belongs to the whole answer: every page is cut from it.
 The check is about the docs half only; the code half answers as before.
 
 How well this works on one corpus, and what it costs: [design, "Docs search: an honest not found"](design.md#docs-search-an-honest-not-found-measured-2026-11-23).
@@ -47,12 +86,14 @@ Off until you install them; an add-on that is off adds no tool, page or route.
 | `code-mode` | `run_code`: a small program that calls the tools, in a sandbox | Node 22+ |
 | `fast-routes` | `graph_routes` on a Rust core, 2-3x faster | graphify via uv or pipx |
 | `metrics` | `GET /metrics` for Prometheus, Grafana or PMM | — |
-| `admin` | `/admin`: status, charts, usage, sign-in clients | on a shared server: `KB_ADMINS` |
-| `audit` | an Audit tab: sign-ins, admin actions, every tool call with user and argument | `admin` |
+| `audit` | an Audit tab: sign-ins, admin actions, every tool call with user and argument | the admin pages |
+| `questions` | a Questions tab: the asked questions and a label with the right answer for each | the admin pages |
 | `scip` | precise `calls` edges from a SCIP index at each `kb update` | `scip-php` or a ready `index.scip` |
 | `datadict` | the meaning of each table (term, grain, columns to sum) in `search`, `graph_explain` and `problems`: [data dictionary](data-dictionary.md) | a `datadict/<project>.toml` file |
 
-`kb addon list` shows what is on, `kb addon remove <name>` switches one off. An add-on can also live
+`kb addon list` shows what is on, `kb addon remove <name>` switches one off. An admin can also switch
+them on the Settings page of `/admin`. The admin pages themselves are part of the core, not an add-on:
+`kb addon install admin` only says so. An add-on can also live
 outside this repository, under its own licence: `kb addon install <folder with plugin.py>` (see
 `bin/plugins.py` for the four names a plugin defines). A team server with browser
 sign-in and access per project: [the shared server](server.md); it asks your own system who may see

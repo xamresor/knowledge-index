@@ -11,32 +11,24 @@ import os
 import tempfile
 import unittest
 
-import graph  # noqa: F401  (path set up by _kbtest)
 from _kbtest import BIN  # noqa: F401
+import graph  # noqa: E402  (path set up by _kbtest)
 
 
 GRAPH = {"nodes": [{"id": "api::a.php::A", "label": "A"}], "links": []}
 
 
 class NodeIdTest(unittest.TestCase):
-    def test_build_and_parse_round_trip(self):
-        nid = graph.node_id("api", "app/Models/User.php", "User")
-        self.assertEqual(nid, "api::app/Models/User.php::User")
-        self.assertEqual(graph.parse_id(nid), ("api", "app/Models/User.php", "User"))
+    def test_build(self):
+        self.assertEqual(graph.node_id("api", "app/Models/User.php", "User"),
+                         "api::app/Models/User.php::User")
+        self.assertEqual(graph.node_id("api", "docs/a.md"), "api::docs/a.md")
 
-    def test_id_without_a_symbol(self):
-        self.assertEqual(graph.parse_id("api::app/Models/User.php"),
-                         ("api", "app/Models/User.php", None))
-
-    def test_symbol_containing_the_separator_is_kept_whole(self):
-        """A namespaced symbol must not be truncated by a naive split."""
-        self.assertEqual(graph.parse_id("api::f.php::Ns::Cls"), ("api", "f.php", "Ns::Cls"))
+    def test_repo_file_splits_a_staged_path(self):
+        self.assertEqual(graph.repo_file("/kb/repos/web/src/a.js", "/kb/repos"), ("web", "src/a.js"))
 
     def test_repo_of_is_the_cheap_question(self):
         self.assertEqual(graph.repo_of("web::src/api.ts::call()"), "web")
-
-    def test_bare_id(self):
-        self.assertEqual(graph.parse_id("api"), ("api", "", None))
 
 
 class VocabularyTest(unittest.TestCase):
@@ -96,3 +88,14 @@ class IoTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TagRepo(unittest.TestCase):
+    def test_a_one_project_graph_gets_the_merged_shape(self):
+        # the linkers look nodes up by (repo, source_file); a one-project KB had no repo tags
+        g = {"nodes": [{"id": "a_b", "label": "B", "source_file": "a/b.php"}],
+             "links": [{"source": "a_b", "target": "a_b", "relation": "calls"}]}
+        out = graph.tag_repo(g, "shop")
+        self.assertEqual(out["nodes"][0]["id"], "shop::a_b")
+        self.assertEqual(out["nodes"][0]["repo"], "shop")
+        self.assertEqual((out["links"][0]["source"], out["links"][0]["target"]), ("shop::a_b", "shop::a_b"))

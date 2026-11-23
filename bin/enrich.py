@@ -45,7 +45,7 @@ def layer_bucket(sf: str, repo: str) -> str:
         area = p[1] if len(p) > 1 else "app"
         return f"{repo}:{area}"           # webclient:stores, admin:pages, ...
     if p and p[0] == "app" and len(p) > 1:
-        return f"api:{p[1]}"              # api:Services, api:Http, api:Jobs, ...
+        return f"{repo}:{p[1]}"           # api:Services, admin:Http, api:Jobs, ...
     return f"{repo}:core"
 
 
@@ -109,15 +109,15 @@ def main() -> int:
     tables = php_laravel.declared_tables(repos_dir)
     table_nodes, new_links = {}, []
     for n in N:
-        if n["type"] == "model" and n["label"] in tables:
-            t = tables[n["label"]]
+        t = tables.get((n.get("repo", ""), n["label"])) if n["type"] == "model" else None
+        if t:
             tid = f"db::{t}"
             if tid not in table_nodes:
                 table_nodes[tid] = {"id": tid, "label": t, "type": "db_table",
                                     "domain": n["domain"], "repo": "db",
                                     "source_file": "", "community": n.get("community")}
-            # INFERRED: `$table` is parsed exactly, but the model node is matched by bare
-            # class label — collisions across repos would attach the wrong model.
+            # INFERRED: `$table` is parsed exactly, but the model node is matched by its class label
+            # inside its project. Two projects that name one table share its db::<table> node.
             new_links.append({"source": n["id"], "target": tid, "relation": "defines_table",
                               "confidence": "INFERRED", "confidence_score": 0.85, "weight": 1.0})
 

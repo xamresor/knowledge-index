@@ -333,7 +333,7 @@ function wireTabs() {
 /* --- boot -------------------------------------------------------------------------------------- */
 function loadVendorFallback() {
   const s = document.createElement("script");
-  s.src = "https://unpkg.com/vis-network/standalone/umd/vis-network.min.js";
+  s.src = "https://unpkg.com/vis-network@10.1.0/standalone/umd/vis-network.min.js";
   s.onload = () => start();
   s.onerror = () => banner("renderer unavailable: run `make vendor` (needs network once)");
   document.head.appendChild(s);

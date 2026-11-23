@@ -6,52 +6,46 @@ Dispatchable, .log(), ...). Each is referenced by dozens of files, so a force-di
 collapses the whole graph into a central hairball. Stripping these meaningless hubs (and their
 edges) declutters the layout while leaving every domain relationship intact.
 
-Two prune sources:
-  1. curated symbols in kb.hubs.txt
-  2. auto-detected: bare ClassName-style symbol nodes with degree >= --cap (logged for transparency)
+The prune list is curated only: the symbols in kb.hubs.txt. There is no degree-based detection:
+after dedupe, a high-degree node without a definition is usually a real domain service whose
+definition graphify did not capture. A node the project DEFINES itself (it has `contains` or
+`method` edges, a file node contains it, or it has an AST source_file and source_location) is never
+pruned, even when its label is in the list: a project's own `Controller` base class is code, not
+framework noise.
 
-Usage: declutter.py <graph.json> <kb.hubs.txt> [--cap N]
+Usage: declutter.py <graph.json> <kb.hubs.txt>
 """
 from __future__ import annotations
 
-import re
 import sys
 
 import graph
-from collections import Counter
-
+import lang
 
 
 def main() -> int:
     graph_path, hubs_path = sys.argv[1], sys.argv[2]
-    cap = 40
-    if "--cap" in sys.argv:
-        cap = int(sys.argv[sys.argv.index("--cap") + 1])
 
     g = graph.load(graph_path)
     N, L = graph.nodes(g), graph.links(g)
 
     curated = set()
-    for line in open(hubs_path):
-        line = line.split("#", 1)[0].strip()
-        if line:
-            curated.add(line)
+    with open(hubs_path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.split("#", 1)[0].strip()
+            if line:
+                curated.add(line)
 
-    deg = Counter()
-    defined = set()  # nodes DEFINED in our staged code (own members) — never prune these
-    for e in L:
-        deg[e["source"]] += 1
-        deg[e["target"]] += 1
-        if e.get("relation") in ("contains", "method"):
-            defined.add(e["source"])
-
-    # curated-only: prune the vetted framework symbols in kb.hubs.txt and nothing else.
-    # (No degree-based auto-detection — after dedupe, high-degree def-less nodes are usually
-    # real domain services whose definition graphify didn't capture; we must keep those.)
-    prune_ids, auto = set(), []
-    for n in N:
-        if n["label"] in curated:
-            prune_ids.add(n["id"])
+    # Nodes DEFINED in our staged code are never pruned: a node that owns members, a node that a
+    # file node contains, and a node with an AST position (source_file + source_location). An
+    # external base type has none of these; a project's own memberless `abstract class Controller {}`
+    # (the Laravel 11/12 default) has all but the first.
+    defined = {e["source"] for e in L if e.get("relation") in ("contains", "method")}
+    by_id = {n["id"]: n for n in N}
+    defined |= {e["target"] for e in L if e.get("relation") == "contains"
+                and str(by_id.get(e["source"], {}).get("label", "")).endswith(lang.FILE_LABEL_SUFFIXES)}
+    defined |= {n["id"] for n in N if n.get("source_file") and n.get("source_location")}
+    prune_ids = {n["id"] for n in N if n["label"] in curated and n["id"] not in defined}
 
     before_n, before_e = len(N), len(L)
     g["nodes"] = [n for n in N if n["id"] not in prune_ids]
@@ -61,9 +55,6 @@ def main() -> int:
     print(f"decluttered: -{before_n - len(g['nodes'])} nodes "
           f"({len(prune_ids)} hubs), -{before_e - len(g['links'])} edges "
           f"({(before_e - len(g['links'])) / max(before_e, 1) * 100:.0f}%)")
-    if auto:
-        print("  auto-detected hubs (degree>=%d):" % cap,
-              ", ".join(f"{l}({d})" for l, d in sorted(auto, key=lambda x: -x[1])[:15]))
     return 0
 
 

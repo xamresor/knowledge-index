@@ -33,27 +33,30 @@ def main() -> int:
     N, L = g["nodes"], g["links"]
 
     defined = {e["source"] for e in L if e.get("relation") in ("method", "contains")}
-    classnode_by_file: dict[str, str] = {}
-    anyclass_by_file: dict[str, str] = {}
-    filenode_by_file: dict[str, str] = {}
+    # Keyed by (repo, source_file): repos_dir/<repo>/<source_file> is the staged file, so a
+    # lookup is exact and never crosses into another repo with the same relative path.
+    classnode_by_file: dict[tuple[str, str], str] = {}
+    anyclass_by_file: dict[tuple[str, str], str] = {}
+    filenode_by_file: dict[tuple[str, str], str] = {}
     meta: dict[str, dict] = {}
     for n in N:
         sf = (n.get("source_file") or "").lstrip("/")
         if not sf:
             continue
+        key = (n.get("repo", ""), sf)
         if not n["label"].endswith(EXTS + ("()",)):
-            anyclass_by_file.setdefault(sf, n["id"])  # memberless classes still attach
+            anyclass_by_file.setdefault(key, n["id"])  # memberless classes still attach
             if n["id"] in defined:
-                classnode_by_file.setdefault(sf, n["id"])
+                classnode_by_file.setdefault(key, n["id"])
         if n["label"].endswith(EXTS):
-            filenode_by_file.setdefault(sf, n["id"])
+            filenode_by_file.setdefault(key, n["id"])
         meta[n["id"]] = n
 
     def attach_for(fp: str) -> str | None:
+        key = graph.repo_file(fp, repos_dir)
         for table in (classnode_by_file, anyclass_by_file, filenode_by_file):
-            for sf, nid in table.items():
-                if fp.endswith(sf):
-                    return nid
+            if key in table:
+                return table[key]
         return None
 
     nodes, edges, skipped = [], [], 0
@@ -82,6 +85,7 @@ def main() -> int:
                 continue
             host = meta[tgt]
             rel = os.path.relpath(fp, repos_dir)
+            sf = graph.repo_file(fp, repos_dir)[1]   # the path inside the repo, as code nodes have it
             for i, marker, text in hits:
                 label = f"{marker}: {text}"
                 if len(label) > MAX_LABEL:
@@ -90,7 +94,7 @@ def main() -> int:
                 nodes.append({"id": rid, "label": label, "type": "rationale",
                               "marker": marker, "domain": host.get("domain", "misc"),
                               "repo": host.get("repo", "misc"),
-                              "source_file": rel, "source_location": f"L{i}",
+                              "source_file": sf, "source_location": f"L{i}",
                               "community": host.get("community")})
                 # EXTRACTED: the comment text and its file are literal; only the class-vs-file
                 # attach point involves a (same-file) heuristic

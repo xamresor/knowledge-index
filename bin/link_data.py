@@ -10,7 +10,10 @@ graphify's AST misses framework-level relationships. This adds three edge kinds:
 Missing db_table nodes (tables referenced by FK/SQL but with no model) are created on the fly.
 Run AFTER enrich.py (which creates the db_table nodes + assigns domains).
 
-Usage: link_data.py <graph.json> <repos_dir>
+Usage: link_data.py <graph.json> <repos_dir> [--migrations <dir>]...
+
+`--migrations` names a Laravel migrations folder (repeat it per project). Without it, the folders
+come from the `routes` keys of kb.projects.toml next to repos_dir (the old lookup, kept as a fallback).
 """
 from __future__ import annotations
 
@@ -22,37 +25,50 @@ import graph
 import lang
 from lang import php_laravel
 
-KB = None  # set in main
-
 #: Re-exported: the migration-name parser now lives with the rest of the Laravel knowledge.
 table_from_filename = php_laravel.table_from_filename
 
 
-def project_migration_dirs() -> list[str]:
-    """Laravel project roots from kb.projects.toml -> their database/migrations dirs."""
-    cfg = os.path.join(KB, "kb.projects.toml")
+def project_migration_dirs(kb_dir: str) -> list[str]:
+    """Fallback: Laravel project roots from `<kb_dir>/kb.projects.toml` -> their migrations dirs.
+    Only right in a checkout, where the config sits next to repos/; bin/kb passes --migrations."""
+    cfg = os.path.join(kb_dir, "kb.projects.toml")
     dirs = []
     if os.path.exists(cfg):
         with open(cfg, encoding="utf-8") as fh:
             config = fh.read()
-        for m in re.finditer(r'(?m)^\s*routes\s*=\s*"([^"]+)"', config):
-            d = php_laravel.migrations_dir(m.group(1))
+        for m in re.finditer(r"""(?m)^\s*routes\s*=\s*(["'])([^"']+)\1""", config):
+            d = php_laravel.migrations_dir(m.group(2))
             if os.path.isdir(d):
                 dirs.append(d)
     return dirs
 
 
+def parse_args(argv: list[str]) -> tuple[list[str], list[str] | None]:
+    """Positional arguments and the `--migrations` dirs (None when the flag is absent)."""
+    pos: list[str] = []
+    migrations: list[str] | None = None
+    it = iter(argv)
+    for arg in it:
+        if arg == "--migrations":
+            migrations = (migrations or []) + [next(it, "")]
+        else:
+            pos.append(arg)
+    return pos, migrations
+
+
 def main() -> int:
-    global KB
-    graph_path, repos_dir = sys.argv[1], sys.argv[2]
-    KB = os.path.dirname(os.path.abspath(repos_dir))
+    (graph_path, repos_dir, *_), migrations = parse_args(sys.argv[1:])
+    if migrations is None:
+        migrations = project_migration_dirs(os.path.dirname(os.path.abspath(repos_dir)))
     g = graph.load(graph_path)
     N, L = g["nodes"], g["links"]
 
     defined = {e["source"] for e in L if e.get("relation") in ("method", "contains")}
-    # label -> canonical node id (prefer a definition node)
-    label_node: dict[str, str] = {}
-    file_node: dict[str, str] = {}
+    # (repo, label) -> canonical node id (prefer a definition node). Keyed by project: two Laravel
+    # projects with a `User` model each keep their own relations.
+    label_node: dict[tuple[str, str], str] = {}
+    file_node: dict[tuple[str, str], str] = {}
     table_node: dict[str, str] = {}
     table_domain: dict[str, str] = {}
     for n in N:
@@ -61,17 +77,18 @@ def main() -> int:
             table_domain[n["label"]] = n.get("domain", "database")
         lab = n["label"]
         if not lab.endswith(("()",) + lang.FILE_LABEL_SUFFIXES):
-            if lab not in label_node or n["id"] in defined:
-                label_node[lab] = n["id"]
+            key = (n.get("repo", ""), lab)
+            if key not in label_node or n["id"] in defined:
+                label_node[key] = n["id"]
         sf = (n.get("source_file") or "").lstrip("/")
         if sf and (lab.endswith(".php")):
-            file_node[sf] = n["id"]
-    # source_file -> class def node (preferred attach point for SQL)
-    classnode_by_file: dict[str, str] = {}
+            file_node[(n.get("repo", ""), sf)] = n["id"]
+    # (repo, source_file) -> class def node (preferred attach point for SQL)
+    classnode_by_file: dict[tuple[str, str], str] = {}
     for n in N:
         sf = (n.get("source_file") or "").lstrip("/")
         if sf and n["id"] in defined and not n["label"].endswith(lang.PHP + ("()",)):
-            classnode_by_file.setdefault(sf, n["id"])
+            classnode_by_file.setdefault((n.get("repo", ""), sf), n["id"])
 
     def ensure_table(name: str, domain: str = "database") -> str:
         if name not in table_node:
@@ -92,14 +109,15 @@ def main() -> int:
         cls = php_laravel.class_name(txt)
         if not cls:
             continue
-        src = label_node.get(cls)
+        repo = graph.repo_file(fp, repos_dir)[0]
+        src = label_node.get((repo, cls))
         if not src:
             continue
         for rel, target in php_laravel.eloquent_relations(txt):
-            dst = label_node.get(target)
+            dst = label_node.get((repo, target))
             if dst and dst != src:
-                # INFERRED: `X::class` is exact syntax, but the node is resolved by bare class
-                # label — a name collision across repos would pick the wrong definition.
+                # INFERRED: `X::class` is exact syntax, but the node is resolved by class label
+                # inside the same project (no namespace resolution).
                 new.append({"source": src, "target": dst, "relation": "eloquent",
                             "kind": rel, "confidence": "INFERRED", "confidence_score": 0.9,
                             "weight": 1.0})
@@ -122,7 +140,9 @@ def main() -> int:
                         "confidence": conf[0], "confidence_score": conf[1], "weight": 1.0})
             fk += 1
 
-    for mdir in project_migration_dirs():
+    for mdir in migrations:
+        if not os.path.isdir(mdir):
+            continue
         for fp in php_laravel.walk(mdir):
             txt = php_laravel.read(fp) or ""
             declared = php_laravel.schema_tables(txt)
@@ -144,24 +164,15 @@ def main() -> int:
         tbls = php_laravel.table_refs(txt)
         if not tbls:
             continue
-        rel = os.path.relpath(fp, os.path.join(repos_dir, os.path.basename(os.path.dirname(fp))))
-        # resolve the attach node by matching the node source_file suffix
-        attach = None
-        for sf, nid in classnode_by_file.items():
-            if fp.endswith(sf):
-                attach = nid
-                break
-        if not attach:
-            for sf, nid in file_node.items():
-                if fp.endswith(sf):
-                    attach = nid
-                    break
+        # the attach node has the same repo and source_file as the staged file
+        key = graph.repo_file(fp, repos_dir)
+        attach = classnode_by_file.get(key) or file_node.get(key)
         if not attach:
             continue
         for t in tbls:
             tid = ensure_table(t)
-            # INFERRED: the table name is literal, but the attach node comes from a
-            # source_file suffix match (fallback: the file node).
+            # INFERRED: the table name is literal, but the attach point is the first class
+            # defined in the file (fallback: the file node).
             new.append({"source": attach, "target": tid, "relation": "sql",
                         "confidence": "INFERRED", "confidence_score": 0.8, "weight": 1.0})
             sql += 1

@@ -21,10 +21,15 @@ Mapping:
     no / malformed Authorization header  -> 401 + WWW-Authenticate: Bearer
     webhook 200                          -> allowed, projects = answer.projects ("*" = all)
     webhook 401                          -> 401
-    webhook 403/404/other status         -> 403
-    webhook unreachable / bad body       -> 503 (never cached)
+    webhook 403/404/other 4xx            -> 403
+    webhook 5xx / unreachable / bad body -> 503 (never cached)
     empty project list                   -> 403
-The verdict is cached KB_AUTH_CACHE_SECONDS per SHA-256 of the token; the token is never logged.
+    a malformed token (over 4096 characters, a space or a character that is no printable ASCII) -> 401,
+    without a webhook call
+    more than KB_AUTH_MAX_CHECKS (16) webhook checks at once, after KB_AUTH_CHECK_WAIT (2) s -> 503 busy
+The verdict, a refusal too, is cached KB_AUTH_CACHE_SECONDS per SHA-256 of the token; the token is never
+logged. An access token of the browser sign-in (`kbo_…`, bin/oauth.py) is swapped for the token behind it
+first; an ended or unknown one is a 401 without a webhook call.
 Tokens come from the login webhook $KB_LOGIN_URL (browser sign-in, admin pages, kb-login).
 
 Off by default: it refuses to start unless KB_SERVER=on and KB_PERMISSION_URL is set. A local install
@@ -35,10 +40,13 @@ Environment:
   KB_PERMISSION_URL (none)   permission webhook, see above
   KB_LOGIN_URL (none)        login webhook; KB_HOOK_HEADERS (JSON) extra headers for both
   KB_HTTP_HOST (127.0.0.1)   KB_HTTP_PORT (8790)   put a TLS proxy in front for the network
-  KB_AUTH_CACHE_SECONDS (60) KB_AUTH_TIMEOUT (10)
-  KB_MAX_GRAPH_JOBS (3)      KB_MAX_DOCS_JOBS (1)   parallel graphify / qmd processes
-  KB_DOCS_MODE (light|full|bm25), KB_CONTRACT_EDGES (1|0): see kb_core.py / access.py
-  KB_USAGE_FILE (<data>/logs/usage.json)   tool usage counters, saved every 30 s
+  KB_AUTH_CACHE_SECONDS (60) KB_AUTH_TIMEOUT (10)   the permission webhook; the login webhook: KB_LOGIN_TIMEOUT (30)
+  KB_MAX_GRAPH_JOBS (3)      KB_MAX_DOCS_JOBS (1)   parallel graphify / qmd processes (kb_core)
+  KB_HTTP_IDLE_TIMEOUT (60)  a connection that sends nothing for this long closes
+  KB_LOGIN_LIMIT (20) KB_LOGIN_LIMIT_ALL (2000) KB_LOGIN_WINDOW (300)   password attempts (admin.Throttle)
+  KB_AUTH_MAX_CHECKS (16) KB_AUTH_CHECK_WAIT (2)   permission webhook calls at once, and the wait for a slot
+  KB_DOCS_MODE (light|full|bm25), KB_CONTRACT_EDGES (1|0), KB_CONTRACTS (all|own): see kb_core.py / access.py / settings.py
+  KB_USAGE_FILE (<data>/logs/usage.json)   tool usage: SQLite rows in usage.sqlite next to it, written per call
 
 `kb-http usage` prints the usage report with user names; the MCP tool `usage` shows the totals and only
 the caller's own arguments.
@@ -46,8 +54,10 @@ the caller's own arguments.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
+import secrets
 import sys
 import threading
 import time
@@ -59,6 +69,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import admin  # noqa: E402
 import kb_core  # noqa: E402
+import mcp_rpc  # noqa: E402
 from usage import Usage  # noqa: E402,F401  (shared by every server; kb_http.Usage stays importable)
 import oauth  # noqa: E402
 import warm  # noqa: E402
@@ -69,7 +80,52 @@ PERMISSION_URL = os.environ.get("KB_PERMISSION_URL", "")   # access protocol v1,
 CACHE_SECONDS = float(os.environ.get("KB_AUTH_CACHE_SECONDS", "60"))
 AUTH_TIMEOUT = float(os.environ.get("KB_AUTH_TIMEOUT", "10"))
 MAX_BODY = 1024 * 1024
-SUPPORTED_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
+SUPPORTED_PROTOCOLS = mcp_rpc.SUPPORTED_PROTOCOLS
+MAX_CHECKS = int(os.environ.get("KB_AUTH_MAX_CHECKS", "16"))     # permission webhook calls at once
+CHECK_WAIT = float(os.environ.get("KB_AUTH_CHECK_WAIT", "2"))    # seconds a check waits for a free slot
+MAX_TOKEN = 4096
+
+# kb-http calls its own webhooks (/local/login, /local/permissions) when an access plugin answers them.
+# Those calls carry this header with a value only this process knows: the password limit skips them (the
+# outer page counted the attempt already), and they pass the address of the person in X-Forwarded-For.
+# Any other request of this machine counts like a request from outside.
+SELF_HEADER = "X-KB-Self"
+SELF_SECRET = secrets.token_urlsafe(32)
+
+
+# The (host, port) pairs this process listens on: the configured one, and each one make_server bound.
+_LISTENING: set[tuple[str, int]] = {(HOST, PORT)}
+
+
+def _is_me(u: urllib.parse.SplitResult) -> bool:
+    """A loopback URL whose port is one this process listens on, through an address that reaches it
+    from loopback. Another service on another port of this machine is not this server."""
+    if not _trusted_loopback(u.hostname or ""):
+        return False
+    try:
+        port = u.port or (443 if u.scheme == "https" else 80)
+    except ValueError:
+        return False
+    return any(p == port and (h in ("", "0.0.0.0", "::") or _trusted_loopback(h)) for h, p in _LISTENING)
+
+
+def self_headers(url: str) -> dict:
+    """The self-call header for a webhook URL that is this server's own /local/ webhook (loopback, and
+    the port this server listens on), else nothing: the value never goes to another system."""
+    u = urllib.parse.urlsplit(url or "")
+    if u.path in ("/local/login", "/local/permissions") and _is_me(u):
+        return {SELF_HEADER: SELF_SECRET}
+    return {}
+
+
+def _trusted_loopback(host: str) -> bool:
+    import ipaddress
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 # Told to a caller without a valid token: how to get one.
 AUTH_HINT = os.environ.get(
@@ -94,9 +150,7 @@ def login_env(env: dict | None = None) -> dict:
 
 USAGE_FILE = os.environ.get("KB_USAGE_FILE", os.path.join(kb_core.KB, "logs", "usage.json"))
 
-GRAPH_JOBS = threading.BoundedSemaphore(int(os.environ.get("KB_MAX_GRAPH_JOBS", "3")))
-DOCS_JOBS = threading.BoundedSemaphore(int(os.environ.get("KB_MAX_DOCS_JOBS", "1")))
-DOCS_TOOLS = {"search", "docs_get"}  # qmd loads a model: fewer of these at once
+IDLE_TIMEOUT = float(os.environ.get("KB_HTTP_IDLE_TIMEOUT", "60"))  # a silent connection closes after this
 NAME_FIELDS = ("name", "uname", "username", "id", "uid")
 
 
@@ -117,9 +171,10 @@ def log(msg: str) -> None:
 # --------------------------------------------------------------------------- auth
 
 class Identity:
-    def __init__(self, user: dict, projects: list[str]):
+    def __init__(self, user: dict, projects: list[str], every: bool = False):
         self.user = user
-        self.projects = set(projects)
+        # "*" (every project) is a grant of its own: only it may use the unfiltered graph (kb_core._full).
+        self.projects = kb_core.AllProjects(projects) if every else set(projects)
 
     @property
     def name(self) -> str:
@@ -137,12 +192,20 @@ class Authenticator:
     """Checks a bearer token with the permission webhook and caches the verdict per token hash."""
 
     def __init__(self, url: str = "", ttl: float = CACHE_SECONDS,
-                 timeout: float = AUTH_TIMEOUT, max_entries: int = 1000):
+                 timeout: float = AUTH_TIMEOUT, max_entries: int = 1000,
+                 max_checks: int = MAX_CHECKS, check_wait: float = CHECK_WAIT):
         self.url = url or PERMISSION_URL
+        # A flood of random tokens misses the cache every time: each would be a webhook call and a thread
+        # that waits for it. At most `max_checks` calls run at once; one more waits `check_wait`, then 503.
+        self._slots = threading.BoundedSemaphore(max(1, max_checks))
+        self.check_wait = check_wait
+        self.access_tokens = None  # bin/oauth.py: an access token of the browser sign-in -> the token behind it
         self.ttl = ttl
         self.timeout = timeout
         self.max_entries = max_entries
-        self._cache: dict[str, tuple[float, Identity | AuthError]] = {}
+        # A refusal is kept as (status, message), never as the exception: a raised exception collects a
+        # traceback that holds the request handler (its socket and buffers) for as long as the entry lives.
+        self._cache: dict[str, tuple[float, Identity | tuple[int, str]]] = {}
         self._lock = threading.Lock()
         self.upstream_calls = 0  # for tests and logs
 
@@ -158,27 +221,53 @@ class Authenticator:
             raise AuthError(401, "missing bearer token")
         return parts[1].strip()
 
+    @staticmethod
+    def well_formed(token: str) -> bool:
+        """A token that can be sent in a header at all: printable ASCII, no space, at most MAX_TOKEN long."""
+        return 0 < len(token) <= MAX_TOKEN and all(33 <= ord(c) <= 126 for c in token)
+
     def check(self, header: str | None) -> Identity:
+        """An incoming request: an access token of the browser sign-in (`kbo_…`) is swapped for the token
+        behind it, then that token is checked with the permission webhook."""
         token = self.token_from_header(header)
+        if not self.well_formed(token):
+            raise AuthError(401, "invalid or expired token")
+        if token.startswith(oauth.ACCESS_PREFIX) and self.access_tokens is not None:
+            behind = self.access_tokens(token)
+            if behind is None:
+                raise AuthError(401, "invalid or expired token")
+            token = behind
+        return self.check_upstream(token)
+
+    def check_upstream(self, token: str) -> Identity:
+        """A token of the login webhook, checked with the permission webhook as it is. Never swapped: an
+        upstream token may start with `kbo_` too (an OAuth refresh checks the token behind the wrapper)."""
+        if not self.well_formed(token):
+            raise AuthError(401, "invalid or expired token")
         key = hashlib.sha256(token.encode()).hexdigest()
         now = time.monotonic()
         with self._lock:
             hit = self._cache.get(key)
-            if hit and hit[0] > now:
-                verdict = hit[1]
-                if isinstance(verdict, AuthError):
-                    raise verdict
-                return verdict
-        verdict = self._ask(token)
-        if not (isinstance(verdict, AuthError) and verdict.status == 503):  # never cache an outage
-            with self._lock:
-                if len(self._cache) >= self.max_entries:
-                    self._cache = {k: v for k, v in self._cache.items() if v[0] > now}
+        if hit and hit[0] > now:
+            verdict = hit[1]
+        else:
+            if not self._slots.acquire(timeout=self.check_wait):
+                log("auth: too many token checks at once")
+                raise AuthError(503, "the server is busy checking tokens: try again in a moment")
+            try:
+                asked = self._ask(token)
+            finally:
+                self._slots.release()
+            verdict = (asked.status, asked.message) if isinstance(asked, AuthError) else asked
+            if not (isinstance(verdict, tuple) and verdict[0] == 503):  # never cache an outage
+                with self._lock:
                     if len(self._cache) >= self.max_entries:
-                        self._cache.clear()
-                self._cache[key] = (now + self.ttl, verdict)
-        if isinstance(verdict, AuthError):
-            raise verdict
+                        self._cache = {k: v for k, v in self._cache.items() if v[0] > now}
+                        if len(self._cache) >= self.max_entries:
+                            self._cache.clear()
+                    self._cache[key] = (now + self.ttl, verdict)
+        if isinstance(verdict, tuple):
+            raise AuthError(*verdict)
         return verdict
 
     def _ask(self, token: str) -> Identity | AuthError:
@@ -187,9 +276,9 @@ class Authenticator:
         self.upstream_calls += 1
         known = sorted(kb_core.PROJECTS)
         try:
-            extra = oauth.kb_login.hook_headers()
+            extra = {**oauth.kb_login.hook_headers(), **self_headers(self.url)}
         except oauth.kb_login.LoginError:
-            extra = {}
+            extra = self_headers(self.url)
         req = urllib.request.Request(
             self.url, data=json.dumps({"protocol": 1, "projects": known}).encode(), method="POST",
             headers={"Authorization": f"Bearer {token}", "Accept": "application/json",
@@ -213,7 +302,8 @@ class Authenticator:
             data = json.loads(body)
             user = data.get("user") or {}
             projects = data.get("projects")
-            if projects == "*":
+            every = projects == "*"
+            if every:
                 projects = known
             if not isinstance(user, dict) or not isinstance(projects, list) \
                     or not all(isinstance(p, str) for p in projects):
@@ -224,7 +314,7 @@ class Authenticator:
         projects = [p for p in projects if p in known] if known else projects
         if not projects:
             return AuthError(403, "no KB projects for this user")
-        return Identity(user, projects)
+        return Identity(user, projects, every)
 
 
 # --------------------------------------------------------------------------- usage
@@ -254,74 +344,61 @@ def warm_docs(every: float = 600.0) -> None:
     kb_core.warm_qmd()
 
 
-def rpc_result(mid, result: dict) -> dict:
-    return {"jsonrpc": "2.0", "id": mid, "result": result}
+rpc_result = mcp_rpc.rpc_result
+rpc_error = mcp_rpc.rpc_error
 
 
-def rpc_error(mid, code: int, message: str) -> dict:
-    return {"jsonrpc": "2.0", "id": mid, "error": {"code": code, "message": message}}
+def handle_message(msg, ident: Identity) -> dict | None:
+    """One JSON-RPC message -> answer (None for a notification). Never raises: bin/mcp_rpc.py, with the
+    caller's projects, the tool `usage` and the call log of this server."""
+    def call(name: str, args: dict) -> str:
+        return kb_core.call_tool(name, args, ident.projects, ident.name)
 
-
-def handle_message(msg: dict, ident: Identity) -> dict | None:
-    """One JSON-RPC message -> answer (None for a notification)."""
-    if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0":
-        return rpc_error(msg.get("id") if isinstance(msg, dict) else None, -32600,
-                         "invalid request")
-    method, mid = msg.get("method"), msg.get("id")
-    is_notification = "id" not in msg
-    params = msg.get("params") or {}
-    if method == "initialize":
-        asked = params.get("protocolVersion") if isinstance(params, dict) else None
-        proto = asked if asked in SUPPORTED_PROTOCOLS else SUPPORTED_PROTOCOLS[0]
-        warm_docs()
-        return rpc_result(mid, {
-            "protocolVersion": proto,
-            "capabilities": {"tools": {}},
-            "serverInfo": {"name": "kb", "version": kb_core.VERSION,
-                           "apiContract": kb_core.API_CONTRACT},
-            "instructions": kb_core.instructions(sorted(ident.projects))})
-    if method == "ping":
-        return rpc_result(mid, {})
-    if method == "tools/list":
-        return rpc_result(mid, {"tools": [*kb_core.tools(), USAGE_TOOL]})
-    if method == "tools/call":
-        if not isinstance(params, dict):
-            return rpc_error(mid, -32602, "params must be an object")
-        name, args = params.get("name", ""), params.get("arguments") or {}
-        if name == USAGE_TOOL["name"]:
-            text = USAGE.report(with_users=False, only_user=ident.name) if USAGE else "(usage counting is off)"
-            return rpc_result(mid, {"content": [{"type": "text", "text": text}], "isError": False})
-        if name not in kb_core.TOOLS_BY_NAME:
-            return rpc_error(mid, -32602, f"unknown tool: {name}")
-        if not isinstance(args, dict):
-            return rpc_error(mid, -32602, "arguments must be an object")
-        sem = DOCS_JOBS if name in DOCS_TOOLS else GRAPH_JOBS
-        t0 = time.monotonic()
-        try:
-            with sem:
-                text = kb_core.call_tool(name, args, ident.projects, ident.name)
-            err = False
-        except kb_core.ToolError as e:
-            text, err = f"(error: {e})", True
-        took = time.monotonic() - t0
-        log(f"call user={ident.name} tool={name} projects={','.join(sorted(ident.projects))} "
-            f"ok={not err} {took:.1f}s")
+    def on_call(name: str, args: dict, ok: bool, took: float) -> None:
+        log(f"call user={ident.name} tool={name} projects={','.join(sorted(ident.projects))} ok={ok} {took:.1f}s")
         if USAGE:
-            USAGE.record(name, ident.name, args, not err, took)
-        return rpc_result(mid, {"content": [{"type": "text", "text": text}], "isError": err})
-    if is_notification:
-        return None  # notifications/initialized and any other notification
-    return rpc_error(mid, -32601, f"method not found: {method}")
+            USAGE.record(name, ident.name, args, ok, took)
+
+    def usage(_args: dict) -> str:
+        return USAGE.report(with_users=False, only_user=ident.name) if USAGE else "(usage counting is off)"
+
+    return mcp_rpc.handle_message(msg, call=call, instructions=lambda: kb_core.instructions(sorted(ident.projects)),
+                                  extra_tools=(USAGE_TOOL,), extra_calls={USAGE_TOOL["name"]: usage},
+                                  on_call=on_call, on_initialize=warm_docs,
+                                  log=lambda m: log(f"{m} user={ident.name}"))
+
+
+def _trusted_proxy(addr: str) -> bool:
+    """Loopback, or an address in KB_TRUSTED_PROXIES (comma-separated addresses or networks, e.g. the
+    Docker bridge `172.17.0.0/16` when nginx runs outside the container)."""
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(addr.removeprefix("::ffff:"))
+    except ValueError:
+        return False
+    if ip.is_loopback:
+        return True
+    for net in filter(None, (x.strip() for x in os.environ.get("KB_TRUSTED_PROXIES", "").split(","))):
+        try:
+            if ip in ipaddress.ip_network(net, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "kb-http/1.0"
     protocol_version = "HTTP/1.1"
+    timeout = IDLE_TIMEOUT  # an idle kept-alive connection (or a slow sender) does not hold a thread forever
     auth: Authenticator  # set on the subclass by make_server()
     admins: set = set()
     access = None  # an access plugin (bin/plugins.py): it answers the two webhooks, and may bring pages
     sessions = admin.Sessions()
     logins = admin.Logins()
+    login_limit = admin.login_throttle()
+    register_limit = admin.register_throttle()
+    authorize_limit = admin.Throttle(int(os.environ.get("KB_OAUTH_AUTHORIZE_LIMIT", "60")), 0, 300)
     oauth: "oauth.Server | None" = None
 
     def log_message(self, fmt: str, *args) -> None:  # request line only, never headers
@@ -345,9 +422,53 @@ class Handler(BaseHTTPRequestHandler):
             # as the next request on a kept-alive connection.
             self.send_header("Connection", "close")
             self.close_connection = True
+        else:
+            self._close_if_unread()
         self.end_headers()
         if data:
             self.wfile.write(data)
+
+    def _close_if_unread(self) -> None:
+        """An answer to a POST whose body nobody read (a redirect to the sign-in, a refusal) ends the
+        connection: the unread body must not be parsed as the next request."""
+        if self.command == "POST" and not getattr(self, "_body_read", False):
+            self.send_header("Connection", "close")
+            self.close_connection = True
+
+    def _client_ip(self) -> str:
+        """The address of the client. Behind a trusted proxy (this machine, or KB_TRUSTED_PROXIES) it is
+        the last X-Forwarded-For entry: the one the proxy added. The entries before it come from the
+        client and prove nothing."""
+        peer = self.client_address[0]
+        fwd = self.headers.get("X-Forwarded-For")
+        if fwd and _trusted_proxy(peer):
+            return fwd.split(",")[-1].strip() or peer
+        return peer
+
+    def _self_call(self) -> bool:
+        """kb-http asking itself (its own webhooks): loopback and the secret header of this process."""
+        given = self.headers.get(SELF_HEADER) or ""
+        return _trusted_loopback(self.client_address[0].removeprefix("::ffff:")) and \
+            hmac.compare_digest(given.encode(), SELF_SECRET.encode())
+
+    def _limited(self, limit: "admin.Throttle", page: bool) -> bool:
+        """Count one attempt at a password page. True when the limit is reached and the 429 went out.
+        kb-http asking itself is not counted: the outer page has counted the attempt already. Any other
+        request of this machine counts, under its address."""
+        if self._self_call():
+            return False
+        wait = limit.hit(self._client_ip())
+        if wait is None:
+            return False
+        log(f"limit: too many attempts from {self._client_ip()} at {self.path.split('?')[0]}")
+        headers = {"Retry-After": str(wait)}
+        if page:
+            self._send_page(429, admin.page("KB", "<main class=login><section>Too many attempts. Try again in a "
+                                                  "few minutes.</section></main>"), headers)
+        else:
+            self._send(429, {"error": "too_many_requests", "message": "too many attempts: try again later"},
+                       headers)
+        return True
 
     def _not_allowed(self) -> None:
         if self.path.split("?")[0] != "/mcp":
@@ -378,6 +499,7 @@ class Handler(BaseHTTPRequestHandler):
         # browser blocked the final 302 to the MCP client's loopback callback after a good sign-in.
         for k, v in (headers or {}).items():
             self.send_header(k, v)
+        self._close_if_unread()
         self.end_headers()
         self.wfile.write(body)
 
@@ -386,6 +508,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Location", url)
         self.send_header("Content-Length", "0")
         self.send_header("Cache-Control", "no-store")
+        self._close_if_unread()
         self.end_headers()
 
     def _body(self) -> bytes | None:
@@ -395,7 +518,9 @@ class Handler(BaseHTTPRequestHandler):
             return None
         if length < 0 or length > MAX_BODY:
             return None
-        return self.rfile.read(length)
+        data = self.rfile.read(length)
+        self._body_read = True
+        return data
 
     def _form(self) -> dict | None:
         raw = self._body()
@@ -428,9 +553,11 @@ class Handler(BaseHTTPRequestHandler):
                               f"SameSite=Strict; Max-Age={max_age}{secure}"}
 
     def _admin(self, method: str, path: str) -> None:
+        """The admin pages (part of the core): there when the server has admins (KB_ADMINS, admins.txt or
+        an access plugin with roles) and a login webhook for the sign-in."""
         import addons
         with_roles = callable(getattr(self.access, "role", None))  # the access plugin names its own admins
-        if not (self.admins or with_roles) or self.oauth is None or not addons.on("admin"):
+        if not (self.admins or with_roles) or self.oauth is None:
             self._send(404, {"error": "not found"})
             return
         base = self._base()
@@ -440,12 +567,18 @@ class Handler(BaseHTTPRequestHandler):
             if method == "GET":
                 self._send_page(200, admin.login_page(base))
                 return
-            self._admin_login(base)
+            if not self._limited(self.login_limit, page=True):
+                self._admin_login(base)
             return
         if path[len("/admin"):] in (getattr(self.access, "PUBLIC", None) or []) \
                 and callable(getattr(self.access, "public_page", None)):
-            self._plugin_public(base, method, path)
+            if method != "POST" or not self._limited(self.login_limit, page=True):
+                self._plugin_public(base, method, path)
             return
+        if session is not None:
+            session = self._recheck(sid, session)
+            if session is False:
+                return  # the permission webhook is down: the 503 page went out
         if session is None:
             self._redirect(f"{base}/admin/login")
             return
@@ -483,6 +616,16 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if tab is not None:
                 self._plugin_page(base, session, sid, "POST", path, form, tab)
+                return
+            if path in ("/admin/settings/addon", "/admin/settings/set"):
+                who = admin_name(session["user"])
+                status, note, done = admin.change_setting(form)
+                if done:
+                    action = "setting" if path.endswith("/set") else \
+                        f"add-on {'on' if str(form.get('on')) == '1' else 'off'}"
+                    log(f"admin: {action} {done} by {who}")
+                    _audit(who, action, done)
+                self._send_page(status, admin.settings_page(base, session["csrf"], note, bad=status != 200))
                 return
             if path == "/admin/clients/revoke":
                 cid = str(form.get("client_id", ""))
@@ -524,6 +667,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_page(200, admin.clients_page(base, session["csrf"], self.oauth.clients))
         elif path == "/admin/index":
             self._send_page(200, admin.index_page(base, session["csrf"], USAGE))
+        elif path == "/admin/settings":
+            self._send_page(200, admin.settings_page(base, session["csrf"]))
         elif tab is not None:
             self._plugin_page(base, session, sid, "GET", path, {}, tab)
         elif path == "/admin/howto":
@@ -531,6 +676,37 @@ class Handler(BaseHTTPRequestHandler):
                                                   member))
         else:
             self._send(404, {"error": "not found"})
+
+    def _recheck(self, sid: str | None, session: dict):
+        """Check the token behind a session again on every request (the verdict is cached for
+        KB_AUTH_CACHE_SECONDS): a new password, a removed token or a lost admin right ends the session
+        or its admin pages at once, not after 8 hours. -> the session, None (ended) or False (503 sent)."""
+        try:
+            ident = self.auth.check(f"Bearer {session['token']}")
+        except AuthError as e:
+            if e.status == 503:
+                self._send_page(503, admin.page("KB admin", "<main><section>The sign-in service is not "
+                                                            "available. Try again in a minute.</section></main>"))
+                return False
+            self.sessions.drop(sid)
+            return None
+        role = self._role(session["token"])
+        is_admin = admin.is_admin(ident.user, self.admins) or role == "admin"
+        if not is_admin and not (role == "member" and self._member_home()):
+            self.sessions.drop(sid)
+            return None
+        session["admin"] = is_admin
+        return session
+
+    def _role(self, token: str) -> str | None:
+        """The role the access plugin gives a token ("admin", "member"), or None."""
+        if not callable(getattr(self.access, "role", None)):
+            return None
+        try:
+            return self.access.role(token, kb_core)
+        except Exception as e:  # noqa: BLE001 — a broken plugin gives nobody a role
+            log(f"access plugin role failed: {type(e).__name__}")
+            return None
 
     def _plugin_tab(self, path: str) -> tuple[str, str, str] | None:
         """The tab of the access plugin that owns an /admin path: (label, path under /admin, who)."""
@@ -544,9 +720,10 @@ class Handler(BaseHTTPRequestHandler):
         safety: there is no session and so no csrf value."""
         form = (self._form() or {}) if method == "POST" else {}
         query = {k: v[0] for k, v in urllib.parse.parse_qs(self.path.partition("?")[2]).items()}
-        ip = (self.headers.get("X-Forwarded-For") or self.client_address[0]).split(",")[0].strip()
         req = {"method": method, "path": path[len("/admin"):], "form": form, "query": query, "base": base,
-               "now": time.time(), "ip": ip, "audit": lambda action, detail="": _audit("?", action, detail)}
+               "now": time.time(), "ip": self._client_ip(),
+               "audit": lambda action, detail="": _audit("?", action, detail),
+               "forget": self.auth.forget, "drop_sessions": self.sessions.drop_user}
         try:
             status, title, body = self.access.public_page(req, kb_core)
         except Exception as e:  # noqa: BLE001 — a broken plugin page never takes the server down
@@ -592,6 +769,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             if path == "/local/login":
+                if self._limited(self.login_limit, page=False):
+                    return
+                form["ip"] = self._client_ip()   # the plugin counts wrong passwords per name and address
                 status, body, *rest = self.access.login(form, kb_core)
                 self._send(int(status), body, rest[0] if rest else None)
                 return
@@ -610,7 +790,10 @@ class Handler(BaseHTTPRequestHandler):
     def _admin_login(self, base: str) -> None:
         form = self._form() or {}
         env = self.oauth.env
-        url, h = env["KB_LOGIN_URL"], oauth.kb_login.hook_headers(env)
+        url = env["KB_LOGIN_URL"]
+        h = {**oauth.kb_login.hook_headers(env), **self_headers(url)}
+        if SELF_HEADER in h:
+            h["X-Forwarded-For"] = self._client_ip()   # our own webhook counts the person's address
         try:
             if form.get("lid"):
                 challenge = self.logins.take(str(form["lid"]))
@@ -622,12 +805,12 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 data = oauth.kb_login.post(url, {"username": str(form.get("username", "")),
                                                  "password": str(form.get("password", ""))}, headers=h)
-                challenge = (data.get("two_factor") or {}).get("challenge")
+                challenge = oauth.kb_login.challenge_of(data)
                 if challenge:
                     self._send_page(200, admin.login_page(base, "code", self.logins.put(challenge)))
                     return
             token = data.get("token")
-            if not token:
+            if not isinstance(token, str) or not token:
                 raise oauth.kb_login.LoginError("the login webhook answered without a token")
             ident = self.auth.check(f"Bearer {token}")
         except (oauth.kb_login.LoginError, AuthError) as e:
@@ -635,12 +818,7 @@ class Handler(BaseHTTPRequestHandler):
             _audit(str(form.get("username", "")) or "?", "admin sign-in refused", str(e)[:200])
             self._send_page(200, admin.login_page(base, error=str(e)))
             return
-        role = None
-        if callable(getattr(self.access, "role", None)):
-            try:
-                role = self.access.role(token, kb_core)
-            except Exception as e:  # noqa: BLE001 — a broken plugin gives nobody a role
-                log(f"access plugin role failed: {type(e).__name__}")
+        role = self._role(token)
         is_admin = admin.is_admin(ident.user, self.admins) or role == "admin"
         member_home = self._member_home() if role == "member" else None
         if not is_admin and not member_home:
@@ -694,11 +872,13 @@ class Handler(BaseHTTPRequestHandler):
                 path.startswith("/.well-known/openid-configuration"):
             self._send(200, srv.server_metadata(base))
         elif path == "/authorize":
+            if self._limited(self.authorize_limit, page=True):   # per address only: no lockout of all
+                return
             q = {k: v[0] for k, v in urllib.parse.parse_qs(qs).items()}
             try:
-                txn = srv.start(q)
+                txn = srv.start(q, self._client_ip())
             except oauth.OAuthError as e:
-                self._send_page(400, oauth.page(f"{base}/authorize", "", "password", e.description))
+                self._send_page(e.status, oauth.page(f"{base}/authorize", "", "password", e.description))
                 return
             self._send_page(200, oauth.page(f"{base}/authorize", txn, "password"))
         else:
@@ -711,6 +891,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, {"error": "invalid_request", "error_description": "unreadable body"})
             return
         if path == "/register":
+            if self._limited(self.register_limit, page=False):
+                return
             try:
                 self._send(201, srv.register(form))
             except oauth.OAuthError as e:
@@ -723,6 +905,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/authorize":
             txn, step = str(form.get("txn", "")), form.get("step")
             action = f"{base}/authorize"
+            if self._limited(self.login_limit, page=True):
+                return
             try:
                 if step == "code":
                     self._redirect(srv.code_step(txn, str(form.get("code", ""))))
@@ -742,6 +926,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": "not found"})
 
     def do_POST(self) -> None:  # noqa: N802
+        self._body_read = False  # one handler serves every request of a kept-alive connection
         path = self.path.split("?")[0]
         if path == "/admin" or path.startswith("/admin/"):
             self._admin("POST", path.rstrip("/"))
@@ -774,19 +959,15 @@ class Handler(BaseHTTPRequestHandler):
         if length < 0 or length > MAX_BODY:
             self._send(413, {"error": "body too large"})
             return
+        raw = self.rfile.read(length)
+        self._body_read = True
         try:
-            payload = json.loads(self.rfile.read(length) or b"null")
+            payload = json.loads(raw or b"null")
         except (ValueError, UnicodeDecodeError):
             self._send(400, rpc_error(None, -32700, "parse error"))
             return
-        if isinstance(payload, list):
-            answers = [a for a in (handle_message(m, ident) for m in payload) if a is not None]
-            self._send(200, answers) if answers else self._send(202, None)
-        elif isinstance(payload, dict):
-            answer = handle_message(payload, ident)
-            self._send(200, answer) if answer is not None else self._send(202, None)
-        else:
-            self._send(400, rpc_error(None, -32600, "invalid request"))
+        status, body = mcp_rpc.handle_payload(payload, lambda m: handle_message(m, ident))
+        self._send(status, body)
 
 
 def secrets_compare(a: str, b: str) -> bool:
@@ -808,33 +989,48 @@ def make_server(host: str = HOST, port: int = PORT, auth: Authenticator | None =
     env = login_env() if oauth_env is None else oauth_env
 
     def check(token: str) -> None:
-        auth.check(f"Bearer {token}")
+        auth.check_upstream(token)   # the token behind a wrapper: never resolved as a wrapper again
 
     srv_oauth = oauth.Server(env, check, os.path.join(kb_core.KB, "logs", "oauth-clients.json")) \
         if env else None
     if srv_oauth is not None:
         srv_oauth.on_event = _audit
+        srv_oauth.headers = self_headers(env.get("KB_LOGIN_URL", ""))
+        auth.access_tokens = srv_oauth.resolve
     if access is None:  # False: no access plugin, whatever is installed
         import addons
         import plugins
         access = plugins.access(addons.enabled())
+    admin.set_access(access or None)  # the pages show this plugin until the next start
     handler = type("KbHandler", (Handler,), {"auth": auth, "oauth": srv_oauth,
                                               "access": access or None,
                                               "admins": admin.admins() if admins is None else admins,
-                                              "sessions": admin.Sessions(), "logins": admin.Logins()})
+                                              "sessions": admin.Sessions(), "logins": admin.Logins(),
+                                              "login_limit": admin.login_throttle(),
+                                              "register_limit": admin.register_throttle()})
     srv = ThreadingHTTPServer((host, port), handler)
     srv.daemon_threads = True
+    _LISTENING.add((host, srv.server_address[1]))
     return srv
 
 
-def refuse_reason(env: dict | None = None) -> str | None:
-    """Why the server must not start, or None. Off unless explicitly switched on and configured."""
+def refuse_reason(env: dict | None = None, access=None) -> str | None:
+    """Why the server must not start, or None. Off unless explicitly switched on and configured. `access`
+    is the access plugin that is on (None: none is)."""
     env = os.environ if env is None else env
     if env.get("KB_SERVER", "off").lower() != "on":
         return ("kb-http is off. It is a shared, network-facing server: set KB_SERVER=on and "
                 "KB_PERMISSION_URL=<permission webhook> to run it (docs/access-protocol.md).")
-    if not env.get("KB_PERMISSION_URL"):
-        return "kb-http: KB_PERMISSION_URL is not set — there is no way to check who is asking."
+    url = env.get("KB_PERMISSION_URL", "")
+    if not url:
+        return ("kb-http: no way to check who is asking. Set KB_PERMISSION_URL to your permission webhook, or "
+                "switch on an access plugin on this server: `kb addon list` shows the installed ones, "
+                "`kb addon on users` switches the KB's own users back on (`kb addon install contrib/users` "
+                "installs it).")
+    if access is None and urllib.parse.urlsplit(url).path == "/local/permissions" and self_headers(url):
+        return (f"kb-http: KB_PERMISSION_URL ({url}) is this server's own webhook, but no access plugin is on: "
+                "every token would get 403. Switch it on: `kb addon on users` (or the plugin you use; "
+                "`kb addon list` shows them), then start again.")
     return None
 
 
@@ -844,21 +1040,26 @@ def main() -> int:
         return 0
     import addons
     import plugins
-    if plugins.access(addons.enabled()) is not None:
+    on = sorted(n for n in addons.enabled() if plugins.is_access(n))
+    if len(on) > 1:
+        log(f"kb-http: {len(on)} access plugins are on ({', '.join(on)}); {on[0]} answers the sign-in, the others "
+            f"do nothing. Switch the others off: kb addon off <name>.")
+    access = plugins.access(addons.enabled())
+    if access is not None:
         # An access plugin: both webhooks are this server, unless the unit says otherwise.
         global PERMISSION_URL
         me = f"http://{'127.0.0.1' if HOST in ('', '0.0.0.0', '::') else HOST}:{PORT}"
         os.environ.setdefault("KB_PERMISSION_URL", f"{me}/local/permissions")
         os.environ.setdefault("KB_LOGIN_URL", f"{me}/local/login")
         PERMISSION_URL = os.environ["KB_PERMISSION_URL"]
-    reason = refuse_reason()
+    reason = refuse_reason(access=access)
     if reason:
         print(reason, file=sys.stderr)
         return 2
     warm.enable()  # long-lived graphify and qmd: no cold start per call (bin/warm.py)
     kb_core.warm_qmd()
     usage = Usage(USAGE_FILE)
-    srv = make_server(usage=usage)
+    srv = make_server(usage=usage, access=access or False)
     log(f"kb-http listening on {HOST}:{PORT}, permissions={PERMISSION_URL}, docs_mode={kb_core.DOCS_MODE}, "
         f"projects={','.join(kb_core.PROJECTS)}")
     warm_docs()

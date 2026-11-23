@@ -50,6 +50,7 @@ sandbox/node_modules/
 
 # Add-ons switched on locally (kb addon install)
 /addons.json
+/addons.json.tmp.*
 
 # Benchmark questions about private code (bench/graph_vs_grep.py reads them)
 /bench/local/
@@ -64,8 +65,13 @@ sandbox/node_modules/
 
 # The users plugin (contrib/users): token hashes of real people. Never in git.
 /users.json
-/users.json.tmp
+/users.json.lock
+/.users.json.*.tmp
 # Admin names of one server (KB_ADMINS file).
 /admins.txt
 # Mail settings of the users plugin: holds the SMTP password. Never in git.
 /smtp.env
+
+# Settings an admin changes on the running server (bin/settings.py): local to one server.
+/settings.json
+/settings.json.tmp.*

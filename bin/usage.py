@@ -12,7 +12,7 @@ processes safely, and one row per call gives honest medians and p95 per tool and
 
 The database sits next to the old JSON path (`usage-local.json` -> `usage-local.sqlite`). A JSON file
 found there is imported once as totals (it has no per-call rows) and renamed `*.json.imported`.
-Rows older than USAGE_DAYS are dropped.
+Rows older than USAGE_DAYS are dropped, at the start and once an hour.
 """
 from __future__ import annotations
 
@@ -28,6 +28,16 @@ USAGE_DAYS = 90       # rows older than this are dropped
 USAGE_HOURS = 48      # per-hour counts for the sparklines
 USAGE_TOP_ARGS = 200  # most frequent arguments kept per tool in a snapshot
 RECENT = 200          # durations per tool for the percentiles
+PRUNE_EVERY = 3600    # seconds between two drops of old rows in a running server
+SNAPSHOT_SECONDS = 5  # a snapshot is reused this long: /metrics scrapes and page loads do not each scan
+
+# The main argument of each tool: the "question" a call asks. A tool not named here keys on its string
+# arguments without the paging and option ones.
+MAIN_ARGS = {"search": ("q",), "contracts_search": ("query",), "code_grep": ("pattern",),
+             "graph_explain": ("symbol",), "graph_affected": ("symbol",), "graph_path": ("from", "to"),
+             "graph_routes": ("from", "to"), "docs_get": ("path",), "connections": ("service",)}
+NOT_THE_QUESTION = {"project", "page", "page_length", "cursor", "limit", "budget", "domain", "scope", "mode",
+                    "min_score", "k", "glob", "diff", "files", "code", "calls"}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS calls (
@@ -72,8 +82,20 @@ class Usage:
         self.db.execute("PRAGMA busy_timeout=10000")
         self.db.executescript(SCHEMA)
         self._import_json(path)
-        self.db.execute("DELETE FROM calls WHERE ts < ?", (time.time() - USAGE_DAYS * 86400,))
-        self.db.execute("DELETE FROM events WHERE ts < ?", (time.time() - USAGE_DAYS * 86400,))
+        self._snap: tuple[float, dict] | None = None
+        self._pruned = 0.0
+        self._prune()
+
+    def _prune(self) -> None:
+        """Drop the rows older than USAGE_DAYS: at the start and then once per PRUNE_EVERY seconds."""
+        cut = time.time() - USAGE_DAYS * 86400
+        try:
+            with self._lock:
+                self.db.execute("DELETE FROM calls WHERE ts < ?", (cut,))
+                self.db.execute("DELETE FROM events WHERE ts < ?", (cut,))
+        except sqlite3.Error as e:
+            _log(f"usage: cannot drop old rows: {e}")
+        self._pruned = time.monotonic()
 
     def _import_json(self, path: str) -> None:
         if not path.endswith(".json") or not os.path.isfile(path):
@@ -88,10 +110,18 @@ class Usage:
             _log(f"usage: cannot import {path}: {e}")
 
     @staticmethod
-    def arg_key(args: dict) -> str:
-        """The main argument of a call, short: what people ask the KB about."""
-        parts = [str(v) for k, v in sorted(args.items()) if isinstance(v, (str, int)) and k != "diff"]
-        return " | ".join(" ".join(p.split()) for p in parts)[:120]
+    def arg_key(args: dict, tool: str = "") -> str:
+        """The main argument of a call, short: what people ask the KB about. One question is one key
+        whatever its page, limit or options: the project has its own column, and a call that only turns a
+        page (a cursor) asks no new question, so it has no key. Old rows keep the old key (all string and
+        number arguments joined by " | "): they stay readable and count apart."""
+        if not isinstance(args, dict) or args.get("cursor"):
+            return ""
+        names = [k for k in MAIN_ARGS.get(tool, ()) if k in args] \
+            or [k for k in ("q", "query", "pattern") if k in args][:1] \
+            or sorted(k for k in args if k not in NOT_THE_QUESTION)
+        parts = [args[k] for k in names if isinstance(args.get(k), (str, int)) and not isinstance(args.get(k), bool)]
+        return " → ".join(" ".join(str(p).split()) for p in parts if str(p).strip())[:120]
 
     def record(self, tool: str, user: str, args: dict, ok: bool, seconds: float) -> None:
         project = ",".join(p.strip() for p in str(args.get("project") or "all").split(",") if p.strip()) or "all"
@@ -99,9 +129,12 @@ class Usage:
             with self._lock:
                 self.db.execute("INSERT INTO calls (ts, tool, user, project, ok, seconds, arg) VALUES (?,?,?,?,?,?,?)",
                                 (time.time(), tool, user, project, 1 if ok else 0, round(seconds, 3),
-                                 self.arg_key(args)))
+                                 self.arg_key(args, tool)))
+                self._snap = None
         except sqlite3.Error as e:
             _log(f"usage: cannot record a call: {e}")
+        if time.monotonic() - self._pruned > PRUNE_EVERY:
+            self._prune()
 
     def save(self) -> None:
         """Every call is written when it is recorded; kept so callers need not know."""
@@ -228,39 +261,50 @@ class Usage:
         return out
 
     def snapshot(self) -> dict:
-        """The counters in the shape the admin pages and /metrics read (JSON-compatible)."""
+        """The counters in the shape the admin pages and /metrics read (JSON-compatible). SQLite sums
+        the rows (GROUP BY); the result is reused for SNAPSHOT_SECONDS, and a call recorded by this process
+        makes a new one."""
+        with self._lock:
+            snap = self._snap
+        if snap is not None and time.monotonic() - snap[0] < SNAPSHOT_SECONDS:
+            return json.loads(json.dumps(snap[1]))  # a copy: callers change what they get
+        d = self._snapshot()
+        with self._lock:
+            self._snap = (time.monotonic(), d)
+        return json.loads(json.dumps(d))
+
+    def _snapshot(self) -> dict:
         d: dict = {"since": time.strftime("%Y-%m-%d"), "tools": {}, "days": {}, "users": {}, "args": {},
                    "hours": {}, "projects": {}, "recent": {}}
-        rows = self._rows("SELECT ts, tool, user, project, ok, seconds, arg FROM calls ORDER BY ts")
-        if rows:
-            d["since"] = time.strftime("%Y-%m-%d", time.localtime(rows[0][0]))
-        hour_cut = time.time() - USAGE_HOURS * 3600
-        for ts, tool, user, project, ok, seconds, arg in rows:
-            lt = time.localtime(ts)
-            t = d["tools"].setdefault(tool, {"calls": 0, "errors": 0, "seconds": 0.0})
-            t["calls"] += 1
-            t["errors"] += 0 if ok else 1
-            t["seconds"] += seconds
-            day = d["days"].setdefault(time.strftime("%Y-%m-%d", lt), {})
-            day[tool] = day.get(tool, 0) + 1
-            if ts >= hour_cut:
-                h = d["hours"].setdefault(time.strftime("%Y-%m-%d %H", lt), {})
-                h[tool] = h.get(tool, 0) + 1
-            u = d["users"].setdefault(user, {})
-            u[tool] = u.get(tool, 0) + 1
+        first = self._rows("SELECT MIN(ts) FROM calls")[0][0]
+        if first is not None:
+            d["since"] = time.strftime("%Y-%m-%d", time.localtime(first))
+        for tool, calls, errors, seconds in self._rows(
+                "SELECT tool, COUNT(*), SUM(1 - ok), SUM(seconds) FROM calls GROUP BY tool"):
+            d["tools"][tool] = {"calls": calls, "errors": errors, "seconds": round(seconds or 0.0, 1)}
+        for day, tool, n in self._rows(
+                "SELECT strftime('%Y-%m-%d', ts, 'unixepoch', 'localtime') AS day, tool, COUNT(*) FROM calls "
+                "GROUP BY day, tool"):
+            d["days"].setdefault(day, {})[tool] = n
+        for hour, tool, n in self._rows(
+                "SELECT strftime('%Y-%m-%d %H', ts, 'unixepoch', 'localtime') AS hour, tool, COUNT(*) FROM calls "
+                "WHERE ts >= ? GROUP BY hour, tool", (time.time() - USAGE_HOURS * 3600,)):
+            d["hours"].setdefault(hour, {})[tool] = n
+        for user, tool, n in self._rows("SELECT user, tool, COUNT(*) FROM calls GROUP BY user, tool"):
+            d["users"].setdefault(user, {})[tool] = n
+        for project, tool, n in self._rows("SELECT project, tool, COUNT(*) FROM calls GROUP BY project, tool"):
             for p in project.split(","):
                 pr = d["projects"].setdefault(p, {})
-                pr[tool] = pr.get(tool, 0) + 1
-            if arg:
-                a = d["args"].setdefault(tool, {})
-                a[arg] = a.get(arg, 0) + 1
+                pr[tool] = pr.get(tool, 0) + n
+        for tool, arg, n in self._rows(
+                "SELECT tool, arg, n FROM (SELECT tool, arg, COUNT(*) AS n, ROW_NUMBER() OVER "
+                "(PARTITION BY tool ORDER BY COUNT(*) DESC) AS r FROM calls WHERE arg != '' GROUP BY tool, arg) "
+                "WHERE r <= ? ORDER BY tool, n DESC", (USAGE_TOP_ARGS,)):
+            d["args"].setdefault(tool, {})[arg] = n
+        for tool, seconds in self._rows(
+                "SELECT tool, seconds FROM (SELECT tool, seconds, ts, ROW_NUMBER() OVER "
+                "(PARTITION BY tool ORDER BY ts DESC) AS r FROM calls) WHERE r <= ? ORDER BY tool, ts", (RECENT,)):
             d["recent"].setdefault(tool, []).append(seconds)
-        for t in d["tools"].values():
-            t["seconds"] = round(t["seconds"], 1)
-        for tool, r in d["recent"].items():
-            d["recent"][tool] = r[-RECENT:]
-        for tool, a in d["args"].items():
-            d["args"][tool] = dict(sorted(a.items(), key=lambda kv: -kv[1])[:USAGE_TOP_ARGS])
         legacy = self._legacy()
         if legacy:
             since = min(d["since"], str(legacy.get("since") or d["since"]))

@@ -176,7 +176,7 @@ class RunCodeOverSocket(unittest.TestCase):
             wr.flush()
         self.serve(script)
         calls = []
-        with mock.patch.object(kb_core, "call_tool", lambda n, a, al=None, c=None: calls.append((n, al, c)) or "v1"):
+        with mock.patch.object(kb_core, "call_tool", lambda n, a, al=None, c=None, nested=False: calls.append((n, al, c)) or "v1"):
             out = kb_core.run_code("return 1", {"api"}, "ann")
         self.assertIn("hi", out)
         self.assertIn('"n": 1', out)

@@ -19,8 +19,10 @@ Endpoints — the MCP shape plus ergonomic aliases:
     POST /graph/explain   {symbol}              -> {"text": …}
     POST /graph/affected  {symbol}              -> {"text": …}
     GET  /doc?path=…                            -> {"text": …}
-    GET  /  and  /web/…, /graphify-out/…        -> the dashboard, so its docs search can call /search
-    POST /mcp         MCP JSON-RPC (initialize, tools/list, tools/call): an MCP client over HTTP
+    GET  /  and  /web/…, /graphify-out/…        -> the dashboard, so its docs search can call /search;
+                                                   with --token these files need the token too
+    POST /mcp         MCP JSON-RPC (initialize, tools/list, tools/call): an MCP client over HTTP; the
+                                                   message rules and batch limits of bin/mcp_rpc.py
     GET  /admin, /admin/index, /admin/usage     -> the admin pages, local mode only (no token, loopback):
                                                    no sign-in, this machine is the trust boundary
 
@@ -39,12 +41,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import addons
 import admin
 import kb_core
+import mcp_rpc
 import paths
 import warm
 
@@ -119,30 +123,11 @@ def static_file(path: str):
 CSRF = __import__("secrets").token_urlsafe(24)  # this process's form token for the local admin pages
 
 
-def mcp(message: dict) -> dict | None:
-    """One MCP JSON-RPC message, local mode: every project (the same as the stdio kb-mcp)."""
-    mid, method = message.get("id"), message.get("method")
-    if method == "initialize":
-        return {"jsonrpc": "2.0", "id": mid, "result": {
-            "protocolVersion": (message.get("params") or {}).get("protocolVersion", "2025-06-18"),
-            "capabilities": {"tools": {}},
-            "serverInfo": {"name": "kb", "version": kb_core.VERSION, "apiContract": kb_core.API_CONTRACT},
-            "instructions": kb_core.instructions()}}
-    if method == "ping":
-        return {"jsonrpc": "2.0", "id": mid, "result": {}}
-    if method == "tools/list":
-        return {"jsonrpc": "2.0", "id": mid, "result": {"tools": kb_core.tools()}}
-    if method == "tools/call":
-        params = message.get("params") or {}
-        try:
-            text, err = kb_core.call_tool(params.get("name", ""), params.get("arguments") or {}), False
-        except kb_core.ToolError as e:
-            text, err = f"(error: {e})", True
-        return {"jsonrpc": "2.0", "id": mid,
-                "result": {"content": [{"type": "text", "text": text}], "isError": err}}
-    if "id" not in message:
-        return None  # a notification
-    return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": f"method not found: {method}"}}
+def mcp(message) -> dict | None:
+    """One MCP JSON-RPC message, local mode: every project (the same as the stdio kb-mcp). The rules of a
+    message (notifications, the jsonrpc field, faults) are those of the team server: bin/mcp_rpc.py."""
+    return mcp_rpc.handle_message(message, call=lambda name, args: kb_core.call_tool(name, args),
+                                  instructions=kb_core.instructions)
 
 
 def dispatch(method: str, path: str, query: dict, body: dict) -> dict:
@@ -188,8 +173,8 @@ def make_handler(host: str, token: str | None):
             self.wfile.write(data)
 
         def _static(self, path: str) -> bool:
-            """Serve a dashboard file if `path` names one. The page carries no secrets and loopback is
-            the trust boundary, so it needs no token; its /search calls do, when one is set."""
+            """Serve a dashboard file if `path` names one. Without a token loopback is the trust
+            boundary; with a token every file needs it, as the graph data is the index itself."""
             target = static_file(path)
             if target is None:
                 return False
@@ -212,8 +197,9 @@ def make_handler(host: str, token: str | None):
             self.wfile.write(body)
 
         def _admin(self, method: str, path: str, query: dict | None = None) -> None:
-            """Local admin pages: only without a token on loopback (the dashboard's own trust)."""
-            if token or host not in LOOPBACK or not addons.on("admin"):
+            """Local admin pages (part of the core): only without a token on loopback (the dashboard's own
+            trust)."""
+            if token or host not in LOOPBACK:
                 raise ApiError(404, f"no route for {method} {path}")
             base = ""
             if method == "POST":
@@ -231,6 +217,16 @@ def make_handler(host: str, token: str | None):
                     self._page(200, admin.status_page(base, CSRF, admin.status(None), {"name": "local"},
                                                       admin.rebuild()))
                     return
+                if path in ("/admin/settings/addon", "/admin/settings/set"):
+                    status, note, done = admin.change_setting(form)
+                    if done:
+                        action = "setting" if path.endswith("/set") else \
+                            f"add-on {'on' if form.get('on') == '1' else 'off'}"
+                        sys.stderr.write(f"kb-api: admin: {action} {done} by local\n")
+                        if kb_core.LOCAL_USAGE is not None:
+                            kb_core.LOCAL_USAGE.event("local", action, done)
+                    self._page(status, admin.settings_page(base, CSRF, note, bad=status != 200))
+                    return
                 self.send_response(302)
                 self.send_header("Location", "/admin")
                 self.send_header("Content-Length", "0")
@@ -246,6 +242,8 @@ def make_handler(host: str, token: str | None):
                 self._page(200, admin.audit_page(base, CSRF, kb_core.LOCAL_USAGE, query))
             elif path == "/admin/clients":
                 self._page(200, admin.clients_page(base, CSRF, {}, "Local mode: no browser sign-in."))
+            elif path == "/admin/settings":
+                self._page(200, admin.settings_page(base, CSRF))
             else:
                 raise ApiError(404, f"no route for {method} {path}")
 
@@ -262,8 +260,12 @@ def make_handler(host: str, token: str | None):
                     self.send_header("Content-Length", "0")
                     self.end_headers()
                     return
-                if method == "GET" and self._static(parsed.path):
-                    return
+                if method == "GET" and static_file(parsed.path) is not None:
+                    # The graph data files are the index itself: with a token they need it like /search.
+                    if token and not authorized(host, token, self.headers.get("Authorization")):
+                        raise ApiError(401, "missing or invalid token")
+                    if self._static(parsed.path):
+                        return
                 clean = parsed.path.rstrip("/") or "/"
                 if method == "GET" and clean == "/metrics" and (
                         addons.on("metrics") or os.environ.get("KB_METRICS", "off").lower() == "on"):
@@ -289,16 +291,13 @@ def make_handler(host: str, token: str | None):
                         msg = json.loads(raw or b"null")
                     except ValueError:
                         raise ApiError(400, "parse error") from None
-                    answers = [a for a in (mcp(m) for m in (msg if isinstance(msg, list) else [msg]))
-                               if a is not None] if isinstance(msg, (list, dict)) else None
-                    if answers is None:
-                        raise ApiError(400, "invalid request")
-                    if not answers:
-                        self.send_response(202)
+                    status, answer = mcp_rpc.handle_payload(msg, mcp)
+                    if answer is None:
+                        self.send_response(status)
                         self.send_header("Content-Length", "0")
                         self.end_headers()
                         return
-                    self._reply(200, answers if isinstance(msg, list) else answers[0])
+                    self._reply(status, answer)
                     return
                 body = _json_body(raw)
                 self._reply(200, dispatch(method, clean, query, body))

@@ -18,10 +18,22 @@ What it implements (MCP authorization spec 2025-06-18):
 Deliberate limits:
   * Public clients only, PKCE S256 required, redirect URIs on loopback only (a desktop client's
     local callback). A page elsewhere cannot get a code sent to it.
-  * The access token *is* the API token. A refresh returns it again while the API still accepts it;
-    once it expired, the client sends the person through the browser again.
-  * Codes, login transactions and refresh tokens live in memory (a restart means one more browser
-    sign-in). Registered clients are kept in a file: they hold no secret.
+  * The access token is a token of this server (`kbo_…`) that stands for the token of the login webhook
+    and ends after KB_OAUTH_TOKEN_TTL (8 hours), the `expires_in` the client is told. kb-http swaps it for
+    the token behind it and checks that with the permission webhook. A refresh gives a new access token
+    while the permission webhook still accepts the token behind it; once that ended, the client sends the
+    person through the browser again. The access token a refresh replaces ends a minute later, a client
+    keeps at most KB_OAUTH_TOKENS_PER_CLIENT (50) access and refresh tokens, and the tokens, codes and
+    sign-ins of a revoked client stop at once.
+  * Codes, login transactions, access and refresh tokens live in memory (a restart means one more
+    browser sign-in). Registered clients are kept in a file: they hold no secret.
+  * /register needs no sign-in, so everything a stranger can make has a limit (environment, defaults):
+    KB_OAUTH_MAX_CLIENTS (1000) clients, KB_OAUTH_MAX_URIS (10) redirect URIs per client of at most
+    KB_OAUTH_MAX_URI_LENGTH (512) characters, KB_OAUTH_MAX_TXNS (1000) sign-ins in progress, of them
+    KB_OAUTH_TXNS_PER_ADDRESS (10) of one client address. A full list pushes out the oldest sign-in of the
+    address that has the most, or one older than a minute, never a fresh sign-in of another person; a client
+    that nobody signed in with goes after KB_OAUTH_CLIENT_DAYS (1), and first when the list is full; a refresh token ends after
+    KB_OAUTH_REFRESH_DAYS (30). kb-http limits registrations per address (admin.register_throttle).
   * Enrolling a new authenticator is not done here (it shows a secret): the page says to use the app
     or bin/kb-login once.
 """
@@ -35,13 +47,36 @@ import importlib.util
 import json
 import os
 import secrets
+import tempfile
 import threading
 import time
 import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CODE_TTL = 300          # authorization codes and login transactions, seconds
-TOKEN_TTL = int(os.environ.get("KB_OAUTH_TOKEN_TTL", str(8 * 3600)))  # what expires_in reports
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name) or default)
+    except ValueError:
+        return default
+
+
+TOKEN_TTL = _env_int("KB_OAUTH_TOKEN_TTL", 8 * 3600)    # an access token ends after this; expires_in says so
+ACCESS_PREFIX = "kbo_"                                    # the access tokens of this server
+# Limits: /register needs no sign-in, so nothing a stranger sends may grow without end.
+MAX_CLIENTS = _env_int("KB_OAUTH_MAX_CLIENTS", 1000)     # registered clients in all
+MAX_URIS = _env_int("KB_OAUTH_MAX_URIS", 10)             # redirect URIs of one client
+MAX_URI_LENGTH = _env_int("KB_OAUTH_MAX_URI_LENGTH", 512)
+MAX_TXNS = _env_int("KB_OAUTH_MAX_TXNS", 1000)           # sign-ins in progress (GET /authorize)
+CLIENT_DAYS = _env_int("KB_OAUTH_CLIENT_DAYS", 1)        # a client nobody signed in with goes after this
+TXNS_PER_CLIENT = _env_int("KB_OAUTH_TXNS_PER_CLIENT", 20)  # sign-ins in progress of one client
+TXNS_PER_ADDRESS = _env_int("KB_OAUTH_TXNS_PER_ADDRESS", 10)  # sign-ins in progress of one client address
+TXN_FRESH = 60       # a sign-in younger than this never gives way to another address
+REFRESH_DAYS = _env_int("KB_OAUTH_REFRESH_DAYS", 30)     # a refresh token ends after this time
+ROTATE_OVERLAP = 60  # seconds the access token a refresh replaced still works (requests in flight)
+TOKENS_PER_CLIENT = _env_int("KB_OAUTH_TOKENS_PER_CLIENT", 50)  # live access and refresh tokens of one client
 LOOPBACK = ("localhost", "127.0.0.1", "[::1]", "::1")
 
 
@@ -67,11 +102,26 @@ def b64url_sha256(verifier: str) -> str:
 
 
 def is_loopback_redirect(uri: str) -> bool:
+    """An http URI on this computer, in its plain form. A backslash, a user part, a control character or
+    a space is refused: Python and a browser can read such a URI as two different hosts
+    (`http://evil.example\\@localhost/` is localhost for Python and evil.example for a browser)."""
+    if not isinstance(uri, str) or not uri or len(uri) > MAX_URI_LENGTH:
+        return False
+    if "\\" in uri or any(ord(c) <= 0x20 or ord(c) == 0x7F for c in uri) or not uri.isascii():
+        return False
     try:
         u = urllib.parse.urlsplit(uri)
+        port = u.port
     except ValueError:
         return False
-    return u.scheme == "http" and (u.hostname or "") in LOOPBACK and not u.fragment
+    if u.scheme != "http" or u.fragment or "@" in u.netloc or u.username is not None:
+        return False
+    host = (u.hostname or "").lower()
+    if host not in LOOPBACK:
+        return False
+    # The authority must be exactly host[:port]: nothing else may hide in it.
+    shown = f"[{host}]" if ":" in host else host
+    return u.netloc.lower() == (shown if port is None and not u.netloc.endswith(":") else f"{shown}:{port}")
 
 
 class Server:
@@ -88,6 +138,8 @@ class Server:
         self.txns: dict[str, dict] = {}
         self.codes: dict[str, dict] = {}
         self.refresh: dict[str, dict] = {}
+        self.access: dict[str, dict] = {}    # SHA-256 of an access token -> the token behind it, client, end
+        self.headers: dict[str, str] = {}    # extra headers for the login webhook (kb-http: its self-call header)
 
     # ------------------------------------------------------------------ storage
     def _load_clients(self) -> dict:
@@ -101,17 +153,35 @@ class Server:
     def _save_clients(self) -> None:
         if not self.clients_file:
             return
-        os.makedirs(os.path.dirname(self.clients_file) or ".", exist_ok=True)
-        tmp = f"{self.clients_file}.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self.clients, f)
-        os.replace(tmp, self.clients_file)
+        folder = os.path.dirname(self.clients_file) or "."
+        os.makedirs(folder, exist_ok=True)
+        # A temporary file of its own: a second process (or a test) on the same file must not rename ours away.
+        fd, tmp = tempfile.mkstemp(prefix=f".{os.path.basename(self.clients_file)}.", suffix=".tmp", dir=folder)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(self.clients, f)
+            os.replace(tmp, self.clients_file)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     def _expire(self) -> None:
         t = self.now()
-        for table in (self.txns, self.codes):
-            for k in [k for k, v in table.items() if v["exp"] < t]:
+        for table in (self.txns, self.codes, self.refresh, self.access):
+            for k in [k for k, v in table.items() if v.get("exp", float("inf")) < t]:
                 del table[k]
+
+    def _prune_clients(self) -> bool:
+        """Drop the clients that registered more than CLIENT_DAYS ago and never had a sign-in. -> changed"""
+        cut = self.now() - CLIENT_DAYS * 86400
+        old = [cid for cid, c in self.clients.items()
+               if not c.get("users") and (c.get("client_id_issued_at") or 0) < cut]
+        for cid in old:
+            del self.clients[cid]
+        return bool(old)
 
     # ------------------------------------------------------------------ metadata
     @staticmethod
@@ -135,8 +205,11 @@ class Server:
         uris = body.get("redirect_uris")
         if not isinstance(uris, list) or not uris or not all(isinstance(u, str) for u in uris):
             raise OAuthError(400, "invalid_redirect_uri", "redirect_uris is required")
+        if len(uris) > MAX_URIS:
+            raise OAuthError(400, "invalid_redirect_uri", f"{MAX_URIS} redirect URIs at most")
         if not all(is_loopback_redirect(u) for u in uris):
-            raise OAuthError(400, "invalid_redirect_uri", "only http loopback redirect URIs are allowed")
+            raise OAuthError(400, "invalid_redirect_uri", "only plain http loopback redirect URIs are allowed "
+                                                          f"(at most {MAX_URI_LENGTH} characters)")
         client_id = "kb-" + secrets.token_urlsafe(16)
         client = {"client_id": client_id, "redirect_uris": uris,
                   "client_name": str(body.get("client_name") or "")[:100],
@@ -145,19 +218,36 @@ class Server:
                   "grant_types": ["authorization_code", "refresh_token"],
                   "response_types": ["code"]}
         with self.lock:
+            changed = self._prune_clients()
+            if len(self.clients) >= MAX_CLIENTS:   # full: the oldest client nobody signed in with goes
+                unused = sorted((c.get("client_id_issued_at") or 0, cid) for cid, c in self.clients.items()
+                                if not c.get("users"))
+                if unused:
+                    del self.clients[unused[0][1]]
+                    changed = True
+            if len(self.clients) >= MAX_CLIENTS:
+                if changed:
+                    self._save_clients()
+                raise OAuthError(503, "temporarily_unavailable", "too many registered clients: ask an admin")
             self.clients[client_id] = client
-            self._save_clients()
+            try:
+                self._save_clients()
+            except OSError:
+                del self.clients[client_id]   # not on disk: not registered (kb-http answers 503)
+                raise OAuthError(503, "temporarily_unavailable", "the client could not be saved: try again later") \
+                    from None
         return client
 
     # ------------------------------------------------------------------ authorize
-    def start(self, q: dict) -> str:
-        """Check the authorize request; returns a transaction id for the login page."""
+    def start(self, q: dict, ip: str = "") -> str:
+        """Check the authorize request; returns a transaction id for the login page. `ip` is the client
+        address: a flood from one address or many must not push out a person's sign-in."""
         client = self.clients.get(q.get("client_id", ""))
         if not client:
             raise OAuthError(400, "invalid_client", "unknown client_id: register first")
         redirect = q.get("redirect_uri", "")
-        if redirect not in client["redirect_uris"] and not (
-                is_loopback_redirect(redirect) and _same_app(redirect, client["redirect_uris"])):
+        if not is_loopback_redirect(redirect) or not (
+                redirect in client["redirect_uris"] or _same_app(redirect, client["redirect_uris"])):
             raise OAuthError(400, "invalid_request", "redirect_uri is not registered for this client")
         if q.get("response_type") != "code":
             raise OAuthError(400, "unsupported_response_type", "response_type must be code")
@@ -166,10 +256,43 @@ class Server:
         txn = secrets.token_urlsafe(24)
         with self.lock:
             self._expire()
+            # Full: room is made only at the cost of the flood. An address over its own limit loses its own
+            # oldest sign-in; a full client or a full list loses one of the busiest address, or one older
+            # than TXN_FRESH. A fresh sign-in of another person never goes: then this request is refused.
+            own = sorted((t["created"], k) for k, t in self.txns.items() if t.get("ip") == ip)
+            if len(own) >= TXNS_PER_ADDRESS > 0:
+                del self.txns[own[0][1]]
+            same = [k for k, t in self.txns.items() if t["client_id"] == client["client_id"]]
+            if (len(same) >= TXNS_PER_CLIENT and not self._make_room(same, ip)) or \
+                    (len(self.txns) >= MAX_TXNS and not self._make_room(list(self.txns), ip)):
+                raise OAuthError(503, "temporarily_unavailable", "too many sign-ins in progress: try again in a minute")
+            now = self.now()
             self.txns[txn] = {"client_id": client["client_id"], "redirect_uri": redirect,
-                              "state": q.get("state", ""), "challenge": q["code_challenge"],
-                              "exp": self.now() + CODE_TTL, "api_challenge": None}
+                              "state": q.get("state", ""), "challenge": q["code_challenge"], "ip": ip,
+                              "created": now, "exp": now + CODE_TTL, "api_challenge": None}
         return txn
+
+    def _make_room(self, keys: list[str], ip: str) -> bool:
+        """Drop one sign-in of `keys`: the oldest of this address, else the oldest of the address with the
+        most (two or more: more than one person makes), else the oldest one older than TXN_FRESH. False
+        when every one is the fresh sign-in of another address. The caller holds the lock."""
+        rows = sorted((self.txns[k]["created"], k, self.txns[k].get("ip", "")) for k in keys)
+        if not rows:
+            return False
+        mine = [k for _, k, a in rows if a == ip]
+        if not mine:
+            count: dict[str, int] = {}
+            for _, _, a in rows:
+                count[a] = count.get(a, 0) + 1
+            busiest = max(count, key=count.get)
+            if count[busiest] >= 2:
+                mine = [k for _, k, a in rows if a == busiest]
+            else:
+                mine = [k for created, k, _ in rows if created < self.now() - TXN_FRESH]
+        if not mine:
+            return False
+        del self.txns[mine[0]]
+        return True
 
     def password_step(self, txn_id: str, username: str, password: str) -> tuple[str, str | None]:
         """-> ("code", None) when a code is needed next, ("done", redirect URL) when signed in."""
@@ -177,11 +300,11 @@ class Server:
         txn["user"] = username
         try:
             data = kb_login.post(self.env["KB_LOGIN_URL"], {"username": username, "password": password},
-                                 headers=kb_login.hook_headers(self.env))
+                                 headers=self._hook_headers(txn))
         except kb_login.LoginError as e:
             self._event(username, "sign-in refused", str(e)[:200])
             raise
-        challenge = (data.get("two_factor") or {}).get("challenge")
+        challenge = kb_login.challenge_of(data)
         if challenge:
             txn["api_challenge"] = challenge
             return "code", None
@@ -193,11 +316,19 @@ class Server:
             raise OAuthError(400, "invalid_request", "no second step pending")
         try:
             data = kb_login.post(self.env["KB_LOGIN_URL"], {"challenge": txn["api_challenge"], "code": code.strip()},
-                                 headers=kb_login.hook_headers(self.env))
+                                 headers=self._hook_headers(txn))
         except kb_login.LoginError as e:
             self._event(txn.get("user", "?"), "sign-in refused", f"code: {str(e)[:180]}")
             raise
         return self._finish(txn_id, data.get("token"))
+
+    def _hook_headers(self, txn: dict) -> dict:
+        """KB_HOOK_HEADERS, and the headers kb-http adds when the login webhook is kb-http itself: its
+        self-call header and the address of the person, so that the webhook counts that address."""
+        out = {**kb_login.hook_headers(self.env), **self.headers}
+        if self.headers and txn.get("ip"):
+            out["X-Forwarded-For"] = txn["ip"]
+        return out
 
     def _txn(self, txn_id: str) -> dict:
         with self.lock:
@@ -208,7 +339,7 @@ class Server:
         return txn
 
     def _finish(self, txn_id: str, token: str | None) -> str:
-        if not token:
+        if not isinstance(token, str) or not token:
             raise kb_login.LoginError("the API answered without a token")
         with self.lock:
             txn = self.txns.pop(txn_id, None)
@@ -250,15 +381,20 @@ class Server:
                 pass
 
     def revoke(self, client_id: str) -> bool:
-        """Forget a client and its refresh tokens (admin page). False when there is no such client."""
+        """Forget a client, its sign-ins in progress, codes and tokens (admin page). False when there is no
+        such client."""
         with self.lock:
             if client_id not in self.clients:
                 return False
             del self.clients[client_id]
+            for txn in [t for t, v in self.txns.items() if v["client_id"] == client_id]:
+                del self.txns[txn]
             for rt in [rt for rt, v in self.refresh.items() if v["client_id"] == client_id]:
                 del self.refresh[rt]
             for code in [c for c, v in self.codes.items() if v["client_id"] == client_id]:
                 del self.codes[code]
+            for at in [at for at, v in self.access.items() if v["client_id"] == client_id]:
+                del self.access[at]
             self._save_clients()
         return True
 
@@ -279,26 +415,67 @@ class Server:
                 raise OAuthError(400, "invalid_grant", "PKCE verification failed")
             return self._issue(entry["token"], entry["client_id"], entry.get("user", ""))
         if grant == "refresh_token":
+            rt = form.get("refresh_token", "")
             with self.lock:
-                entry = self.refresh.pop(form.get("refresh_token", ""), None)  # rotated on use
+                self._expire()
+                entry = self.refresh.pop(rt, None)  # rotated on use
             if not entry:
                 raise OAuthError(400, "invalid_grant", "unknown refresh token")
             if form.get("client_id") and form["client_id"] != entry["client_id"]:
                 raise OAuthError(400, "invalid_grant", "refresh token was issued to another client")
             try:
                 self.check_token(entry["token"])
-            except Exception:  # noqa: BLE001 — expired or revoked: sign in again
-                raise OAuthError(400, "invalid_grant", "the API token expired: sign in again") from None
+            except Exception as e:  # noqa: BLE001
+                if getattr(e, "status", None) in (401, 403):  # expired or revoked: sign in again
+                    raise OAuthError(400, "invalid_grant", "the API token expired: sign in again") from None
+                # The permission webhook is down (503) or broke: the refresh token stays for the next try.
+                with self.lock:
+                    if entry["client_id"] in self.clients:
+                        self.refresh[rt] = entry
+                raise OAuthError(503, "temporarily_unavailable",
+                                 "the sign-in service is not available: try again later") from None
             self._seen(entry["client_id"], entry.get("user", ""))
-            return self._issue(entry["token"], entry["client_id"], entry.get("user", ""))
+            return self._issue(entry["token"], entry["client_id"], entry.get("user", ""), replaces=entry.get("at"))
         raise OAuthError(400, "unsupported_grant_type", "use authorization_code or refresh_token")
 
-    def _issue(self, token: str, client_id: str, user: str = "") -> dict:
+    def _issue(self, token: str, client_id: str, user: str = "", replaces: str | None = None) -> dict:
+        """A new access token that ends after TOKEN_TTL, and a refresh token. The map keeps only the
+        SHA-256 of the access token. The client must still exist under the lock: one revoked while the
+        refresh asked the permission webhook gets nothing. `replaces` is the SHA-256 of the access token
+        a refresh supersedes: it ends after ROTATE_OVERLAP. A client keeps at most TOKENS_PER_CLIENT
+        access and refresh tokens; the oldest go first."""
         rt = secrets.token_urlsafe(32)
+        at = ACCESS_PREFIX + secrets.token_urlsafe(32)
         with self.lock:
-            self.refresh[rt] = {"token": token, "client_id": client_id, "user": user}
-        return {"access_token": token, "token_type": "Bearer", "expires_in": TOKEN_TTL,
+            self._expire()
+            if client_id not in self.clients:
+                raise OAuthError(400, "invalid_grant", "the client was revoked: sign in again")
+            now = self.now()
+            old = self.access.get(replaces or "")
+            if old is not None:
+                old["exp"] = min(old["exp"], now + ROTATE_OVERLAP)
+            for table in (self.access, self.refresh):
+                mine = sorted((v["exp"], k) for k, v in table.items() if v["client_id"] == client_id)
+                for _, k in mine[:max(0, len(mine) - TOKENS_PER_CLIENT + 1)]:
+                    del table[k]
+            self.refresh[rt] = {"token": token, "client_id": client_id, "user": user, "at": _sha(at),
+                                "exp": now + REFRESH_DAYS * 86400}
+            self.access[_sha(at)] = {"token": token, "client_id": client_id, "exp": now + TOKEN_TTL}
+        return {"access_token": at, "token_type": "Bearer", "expires_in": TOKEN_TTL,
                 "refresh_token": rt}
+
+    def resolve(self, access_token: str) -> str | None:
+        """The login webhook's token behind an access token of this server, or None when it is unknown,
+        ended or its client was revoked."""
+        with self.lock:
+            entry = self.access.get(_sha(access_token))
+            if entry is None or entry["exp"] < self.now() or entry["client_id"] not in self.clients:
+                return None
+            return entry["token"]
+
+
+def _sha(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
 
 
 def _same_app(redirect: str, registered: list[str]) -> bool:
@@ -333,7 +510,7 @@ def page(action: str, txn: str, step: str, error: str = "") -> bytes:
                   '<input id="c" name="code" autocomplete="one-time-code" inputmode="numeric" autofocus required>')
         button = "Confirm"
     else:
-        lead = "Sign in with your user name and password of the API."
+        lead = "Sign in with your user name and password."
         fields = ('<input type="hidden" name="step" value="password"><label for="u">User name</label>'
                   '<input id="u" name="username" autocomplete="username" autofocus required>'
                   '<label for="p">Password</label>'

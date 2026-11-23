@@ -81,10 +81,11 @@ Off until you install them; an add-on that is off adds no tool, page or route.
 | `code-mode` | `run_code`: a small program that calls the tools, in a sandbox | Node 22+ |
 | `fast-routes` | `graph_routes` on a Rust core, 2-3x faster | graphify via uv or pipx |
 | `metrics` | `GET /metrics` for Prometheus, Grafana or PMM | — |
-| `admin` | `/admin`: status, charts, usage, sign-in clients | on a shared server: `KB_ADMINS` |
-| `audit` | an Audit tab: sign-ins, admin actions, every tool call with user and argument | `admin` |
+| `audit` | an Audit tab: sign-ins, admin actions, every tool call with user and argument | the admin pages |
 
-`kb addon list` shows what is on, `kb addon remove <name>` switches one off. An add-on can also live
+`kb addon list` shows what is on, `kb addon remove <name>` switches one off. The admin pages (`/admin`:
+status, charts, usage, sign-in clients, settings) are part of the core: on a shared server they need
+`KB_ADMINS` or an access plugin with roles. An add-on can also live
 outside this repository, under its own licence: `kb addon install <folder with plugin.py>` (see
 `bin/plugins.py` for the four names a plugin defines). A team server with browser
 sign-in and access per project: [docs/server.md](docs/server.md); it asks your own system who may see

@@ -20,15 +20,18 @@ Environment (or --env-file with these KEY=VALUE lines):
   KB_LOGIN_URL      the login webhook (or --login-url)
   KB_URL            the KB's MCP endpoint (or --kb-url)
   KB_HOOK_HEADERS   extra request headers as a JSON object, e.g. {"X-Client": "kb"}
+  KB_LOGIN_TIMEOUT  seconds to wait for the login webhook (30); kb-http uses it for its sign-in pages too
 """
 from __future__ import annotations
 
 import argparse
 import getpass
+import http.client
 import json
 import os
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 
@@ -52,18 +55,31 @@ def hook_headers(env: dict | None = None) -> dict[str, str]:
     return {str(k): str(v) for k, v in h.items()}
 
 
-def post(url: str, body: dict, timeout: float = 30, headers: dict | None = None) -> dict:
-    """One webhook call with `"protocol": 1`; the JSON answer, or LoginError with the reason."""
+def login_timeout(env: dict | None = None) -> float:
+    """KB_LOGIN_TIMEOUT: how long a call of the login webhook may take, in seconds (default 30)."""
+    env = os.environ if env is None else env
+    try:
+        return float(env.get("KB_LOGIN_TIMEOUT") or 30)
+    except ValueError:
+        return 30.0
+
+
+def post(url: str, body: dict, timeout: float | None = None, headers: dict | None = None) -> dict:
+    """One webhook call with `"protocol": 1`; the JSON answer, or LoginError with the reason. Every failure
+    of the network or of the answer is a LoginError: a caller never sees another exception."""
     req = urllib.request.Request(
         url, data=json.dumps({"protocol": 1, **body}).encode(), method="POST",
         headers={"Content-Type": "application/json", "Accept": "application/json",
                  "User-Agent": "kb-login/1.0", **(headers or {})})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            data = json.loads(r.read() or b"{}")
+        with urllib.request.urlopen(req, timeout=login_timeout() if timeout is None else timeout) as r:
+            data = json.loads(r.read(1024 * 1024) or b"{}")
             return data if isinstance(data, dict) else {}
     except urllib.error.HTTPError as e:
-        raw = e.read()
+        try:
+            raw = e.read(64 * 1024)
+        except (OSError, http.client.HTTPException):
+            raw = b""
         try:
             data = json.loads(raw)
         except ValueError:
@@ -74,13 +90,24 @@ def post(url: str, body: dict, timeout: float = 30, headers: dict | None = None)
         raise LoginError(f"HTTP {e.code}: {msg}") from None
     except urllib.error.URLError as e:
         raise LoginError(f"cannot reach {url}: {e.reason}") from None
+    except ValueError:
+        raise LoginError("the login webhook gave an answer that is not JSON") from None
+    except (OSError, http.client.HTTPException) as e:  # a reset, a read timeout, a broken answer
+        raise LoginError(f"the login webhook did not answer: {type(e).__name__}") from None
+
+
+def challenge_of(data: dict) -> str | None:
+    """The challenge of a second step, or None. `two_factor` counts only as an object with a string."""
+    tf = data.get("two_factor") if isinstance(data, dict) else None
+    ch = tf.get("challenge") if isinstance(tf, dict) else None
+    return ch if isinstance(ch, str) and ch else None
 
 
 def login(url: str, username: str, password: str, ask=input, env: dict | None = None) -> str:
     """The login of access protocol v1: the password, then the code when the webhook asks. -> token"""
     h = hook_headers(env)
     data = post(url, {"username": username, "password": password}, headers=h)
-    challenge = (data.get("two_factor") or {}).get("challenge")
+    challenge = challenge_of(data)
     if challenge:
         code = ask("Authenticator code (or a recovery code): ").strip()
         data = post(url, {"challenge": challenge, "code": code}, headers=h)
@@ -120,14 +147,21 @@ def write_mcp_json(path: str, token: str, kb_url: str, name: str = "kb") -> None
         raise LoginError(f"{path}: mcpServers is not an object")
     servers[name] = {"type": "http", "url": kb_url,
                      "headers": {"Authorization": f"Bearer {token}"}}
-    new = not os.path.exists(path)
-    tmp = f"{path}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2)
-        f.write("\n")
-    os.replace(tmp, path)
-    if new:
-        os.chmod(path, 0o600)  # it holds a token
+    # It holds a token: the temporary file is owner-only from its first byte, and the file keeps that mode
+    # after the rename, also when it was readable by others before.
+    folder = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", suffix=".tmp", dir=folder)
+    try:   # mkstemp makes the file 0600
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 DEFAULT_TOKEN_FILE = os.path.join("~", ".claude", "kb", "token")

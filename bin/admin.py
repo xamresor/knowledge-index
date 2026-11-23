@@ -1,22 +1,29 @@
 #!/usr/bin/env python3
 """The admin pages of the shared server (bin/kb-http): /admin.
 
-Who: the users named in KB_ADMINS (comma-separated; matched against the `uname`, `username`, `name`,
-`id` or `uid` the permission webhook returns). Nobody else sees anything, not even that the page exists
-(404). No KB_ADMINS -> no admin pages.
+Who: the users named in KB_ADMINS (comma-separated) or, without it, in `<data>/admins.txt` (one name
+per line), matched against the `uname`, `username`, `name`, `id` or `uid` the permission webhook
+returns. An access plugin with a `role()` function (contrib/users) names its own admins and members
+instead. Nobody else sees anything, not even that the page exists (404). No admin names and no access
+plugin with roles -> no admin pages.
 
 Sign-in: the same login as the browser sign-in of MCP clients (user name, password, the authenticator
-code, through the API's own login). The API token is checked like any tool call; then a session
-cookie (random, HttpOnly, Secure behind TLS, SameSite=Strict, 8 hours) stands for it. Every form
-carries the session's own CSRF token. Pages are plain HTML, no scripts.
+code, through the login webhook). The token is checked like any tool call; then a session cookie
+(random, HttpOnly, Secure behind TLS, SameSite=Strict, 8 hours) stands for it. Every request checks
+the token of the session again (cached KB_AUTH_CACHE_SECONDS): a removed token or a new password ends
+the session, and a lost admin right ends the admin pages. Every form carries the session's own CSRF
+token. Pages are plain HTML, no scripts. The password pages have an attempt limit (Throttle).
 
 What it shows and does:
   * status: version, the graph (built when, nodes, edges), the last builds and failures, the warm
     helpers and their memory, cursors and sign-in clients in use, problems the build found;
   * usage: calls per tool, per day, per user, the slowest tools;
   * sign-in clients: the registered MCP clients; revoking one ends its refresh tokens;
-  * rebuild: starts `bin/kb-refresh --force` (once at a time).
-Roles are not here on purpose: they live in the API (one place to keep them).
+  * rebuild: starts `bin/kb-refresh --force` (once at a time);
+  * settings: the add-on switches (`<data>/addons.json`) and the settings of bin/settings.py.
+
+The pages are part of the core, not an add-on: kb-http shows them when there are admins, kb-api on
+loopback without a token.
 """
 from __future__ import annotations
 
@@ -30,6 +37,7 @@ import subprocess
 import threading
 import time
 import urllib.parse
+from collections import OrderedDict, deque
 
 import addons  # noqa: E402
 import kb_core
@@ -120,21 +128,117 @@ class Logins:
         return v["challenge"] if v and v["exp"] >= time.monotonic() else None
 
 
+class Throttle:
+    """A limit on attempts in a sliding window: per client address, and a tighter one while all addresses
+    together pass `total`. The global cap never shuts the page for everybody: a flood from many addresses
+    would then lock out every person. Over the cap, an address gets BUSY_PER_IP attempts in the window
+    instead of `per_ip`: a person at a fresh address still signs in (password, then the code), a flooding
+    address waits.
+
+    Memory is bounded: at most MAX_IPS addresses, kept in the order of their last attempt. Expired ones
+    leave from the front, a few per attempt; over MAX_IPS the address with the oldest attempt goes. An
+    address keeps at most max(per_ip, BUSY_PER_IP) times, and the global list at most `total`."""
+
+    BUSY_PER_IP = 5
+    MAX_IPS = 10000
+
+    def __init__(self, per_ip: int, total: int, window: float):
+        self.per_ip, self.total, self.window = per_ip, total, window
+        self.ips: "OrderedDict[str, list[float]]" = OrderedDict()
+        self.all: deque[float] = deque()
+        self.lock = threading.Lock()
+
+    def hit(self, ip: str) -> int | None:
+        """Count one attempt of `ip`. -> None when it may go on, else the seconds to wait."""
+        if self.per_ip <= 0 and self.total <= 0:
+            return None
+        now = time.monotonic()
+        cut = now - self.window
+        with self.lock:
+            while self.all and self.all[0] <= cut:
+                self.all.popleft()
+            while self.ips:
+                first, times = next(iter(self.ips.items()))
+                if times and times[-1] > cut:
+                    break
+                del self.ips[first]
+            mine = [t for t in self.ips.get(ip, ()) if t > cut]
+            if len(mine) >= self.per_ip > 0:
+                return int(mine[0] - cut) + 1
+            if len(self.all) >= self.total > 0 and len(mine) >= self.BUSY_PER_IP:
+                return int(mine[0] - cut) + 1
+            mine.append(now)
+            del mine[:-max(self.per_ip, self.BUSY_PER_IP)]
+            if self.total > 0:
+                self.all.append(now)
+                while len(self.all) > self.total:   # enough to know that the cap is reached
+                    self.all.popleft()
+            self.ips[ip] = mine
+            self.ips.move_to_end(ip)
+            while len(self.ips) > self.MAX_IPS:     # a flood of addresses: the least recent goes
+                self.ips.popitem(last=False)
+        return None
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name) or default)
+    except ValueError:
+        return default
+
+
+def login_throttle() -> Throttle:
+    """KB_LOGIN_LIMIT attempts per client address (20) in KB_LOGIN_WINDOW seconds (300), at /admin/login,
+    /authorize and /local/login. Over KB_LOGIN_LIMIT_ALL attempts of all addresses (2000) each address gets
+    Throttle.BUSY_PER_IP. 0 = no limit."""
+    return Throttle(_env_int("KB_LOGIN_LIMIT", 20), _env_int("KB_LOGIN_LIMIT_ALL", 2000),
+                    _env_int("KB_LOGIN_WINDOW", 300))
+
+
+def register_throttle() -> Throttle:
+    """KB_OAUTH_REGISTER_LIMIT client registrations per address (20) per hour. Over
+    KB_OAUTH_REGISTER_LIMIT_ALL of all addresses (2000) each address gets Throttle.BUSY_PER_IP. 0 = no limit."""
+    return Throttle(_env_int("KB_OAUTH_REGISTER_LIMIT", 20), _env_int("KB_OAUTH_REGISTER_LIMIT_ALL", 2000), 3600)
+
+
 _rebuild_lock = threading.Lock()
+_rebuild_proc: subprocess.Popen | None = None
+
+
+def building(lock_file: str | None = None) -> bool:
+    """True while a build holds logs/update.lock. bin/kb-refresh keeps the file and takes a flock on it,
+    so the file alone says nothing: a free flock means no build runs."""
+    import fcntl
+    lock_file = lock_file or os.path.join(kb_core.KB, "logs", "update.lock")
+    try:
+        fd = os.open(lock_file, os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    except OSError:
+        return False
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
 
 
 def rebuild() -> str:
-    """Start one forced rebuild in the background; refuse while one runs."""
-    lock_file = os.path.join(kb_core.KB, "logs", "update.lock")
-    if os.path.exists(lock_file) or not _rebuild_lock.acquire(blocking=False):
-        return "A build is already running."
-    try:
+    """Start one forced rebuild in the background; refuse while one runs. The lock covers the check and
+    the start, and the last started process counts as running until it ends: kb-refresh takes the flock
+    a moment after it starts, and a second click in that moment must not start a second build."""
+    global _rebuild_proc
+    with _rebuild_lock:
+        if building() or (_rebuild_proc is not None and _rebuild_proc.poll() is None):
+            return "A build is already running."
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kb-refresh")
-        subprocess.Popen([script, "--force"], cwd=kb_core.KB, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, start_new_session=True)
-        return "Rebuild started. It takes a few minutes; the status page shows it in the build log."
-    finally:
-        _rebuild_lock.release()
+        _rebuild_proc = subprocess.Popen([script, "--force"], cwd=kb_core.KB, stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.DEVNULL, start_new_session=True)
+    return "Rebuild started. It takes a few minutes; the status page shows it in the build log."
 
 
 # ---------------------------------------------------------------------------------- facts
@@ -194,7 +298,7 @@ def status(oauth_server) -> dict:
     return {
         "version": kb_core.VERSION, "contract": kb_core.API_CONTRACT, "graph": graph_facts(),
         "builds": builds, "failed": [b for b in builds if "exit=0" not in b],
-        "building": os.path.exists(os.path.join(logs, "update.lock")),
+        "building": building(os.path.join(logs, "update.lock")),
         "helpers": helpers, "server_mb": _rss_mb(os.getpid()),
         "cursors": len(kb_core.CURSORS.items),
         "clients": len(oauth_server.clients) if oauth_server else 0,
@@ -260,11 +364,32 @@ svg .grid{stroke:var(--line)}svg .bar{fill:var(--accent)}svg .badbar{fill:none;s
 svg .badtxt{fill:var(--crit);font-weight:600}
 main.login{max-width:360px;margin:12vh auto;padding:0}label{display:block;font-size:12px;color:var(--ink2);margin:12px 0 4px}
 input{width:100%;padding:8px;border:1px solid var(--line);border-radius:3px;font:inherit;background:var(--page);color:var(--ink)}
-footer.src{margin:24px 16px;font-size:12px;color:var(--ink2)}footer.src a{color:inherit}"""
+footer.src{margin:24px 16px;font-size:12px;color:var(--ink2)}footer.src a{color:inherit}
+form.inline{display:flex;gap:8px;align-items:center;margin:0}
+select{padding:6px 8px;border:1px solid var(--line);border-radius:3px;font:inherit;background:var(--page);color:var(--ink)}"""
 
 
 def esc(x) -> str:
     return html.escape(str(x))
+
+
+# The access plugin the server started with (kb-http sets it once in make_server). The pages show its tabs
+# and links, not the plugin that addons.json names now: a switch takes effect after a restart, and the
+# pages must not change before the server does. Unset (kb-api, a test without a server): read addons.json.
+UNSET = object()
+_access = UNSET
+
+
+def set_access(mod) -> None:
+    global _access
+    _access = mod
+
+
+def access():
+    if _access is not UNSET:
+        return _access
+    import plugins
+    return plugins.access(addons.enabled())
 
 
 # How many asked questions wait for a label: the yellow mark beside the Questions tab on every page.
@@ -290,13 +415,12 @@ def page(title: str, body: str, base: str = "", tab: str = "", csrf: str = "", r
     nav = ""
     if csrf:
         tabs = [("Status", ""), ("Index", "/index"), ("Usage", "/usage"), ("Questions", "/questions"),
-                ("Audit", "/audit"), ("Clients", "/clients"), ("How to", "/howto")]
+                ("Audit", "/audit"), ("Clients", "/clients"), ("Settings", "/settings"), ("How to", "/howto")]
         if not addons.on("audit"):
             tabs.remove(("Audit", "/audit"))
         if not addons.on("questions"):
             tabs.remove(("Questions", "/questions"))
-        import plugins
-        extra = getattr(plugins.access(addons.enabled()), "TABS", None) or []  # the access plugin's own pages
+        extra = getattr(access(), "TABS", None) or []  # the access plugin's own pages
         for label, path, _who in extra:
             tabs.insert(-1, (label, path))
         if member:
@@ -329,9 +453,8 @@ def login_page(base: str, step: str = "password", lid: str = "", error: str = ""
         fields = ('<label for="u">User name</label><input id="u" name="username" autocomplete="username" autofocus required>'
                   '<label for="p">Password</label><input id="p" name="password" type="password" '
                   'autocomplete="current-password" required>')
-    import plugins
     forgot = (f'<p><a href="{base}/admin/forgot">Forgot the password?</a></p>'
-              if "/forgot" in (getattr(plugins.access(addons.enabled()), "PUBLIC", None) or []) else "")
+              if "/forgot" in (getattr(access(), "PUBLIC", None) or []) else "")
     body = (f'<main class="login">' + panel("KB admin · sign in", f'{err}<form method="post" action="{base}/admin/login">'
             f'{fields}<p><button class="primary">Sign in</button></p></form>{forgot}') + '</main>')
     return page("KB admin · sign in", body)
@@ -420,11 +543,10 @@ def howto_page(base: str, csrf: str, login_url: str = "", member: bool = False) 
     commands on the page work when pasted. `login_url` is the public address of the login webhook
     (KB_PUBLIC_LOGIN_URL): the server itself often reaches the webhook on a loopback address."""
     mcp = f"{base}/mcp"
-    import plugins
-    access = plugins.access(addons.enabled())  # an access plugin answers the login at this server itself
-    own = bool(getattr(access, "TOKENS", False))  # ... and people hold tokens that they make on its pages
-    login_url = login_url or (f"{base}/local/login" if access is not None else "")
-    secret = getattr(access, "SIGN_IN_HINT", "") or "the password"
+    plugin = access()  # an access plugin answers the login at this server itself
+    own = bool(getattr(plugin, "TOKENS", False))  # ... and people hold tokens that they make on its pages
+    login_url = login_url or (f"{base}/local/login" if plugin is not None else "")
+    secret = getattr(plugin, "SIGN_IN_HINT", "") or "the password"
     header = panel("Claude Code: a token in a header",
                    "<p>The shortest way on this server. Sign in to these pages, open \"My tokens\" and make a token "
                    "for this computer. A token lives until you remove it, so there is no sign-in to repeat. Keep "
@@ -489,10 +611,125 @@ def clients_page(base: str, csrf: str, clients: dict, note: str = "") -> bytes:
         for cid, c in sorted(clients.items(), key=lambda kv: -kv[1].get("client_id_issued_at", 0)))
     body = (f'<main>{f"<div class=note>{esc(note)}</div>" if note else ""}<section class=panel><h2>Sign-in clients</h2><div class=body>'
             f'<p>MCP clients that registered for the browser sign-in, with who signed in through each and when. Revoking one ends its refresh tokens: '
-            f'it has to sign in again. A token it already holds lives until the API ends it.</p>'
+            f'it has to sign in again, and its access tokens stop at once.</p>'
             f'<table><tr><th>Name</th><th>Users</th><th>Client id</th><th>Registered</th><th>Redirect</th><th></th></tr>'
             f'{rows or "<tr><td colspan=6>none</td></tr>"}</table></div></section></main>')
     return page("KB admin · clients", body, base, "Clients", csrf)
+
+
+def settings_page(base: str, csrf: str, note: str = "", bad: bool = False) -> bytes:
+    """The add-on switches and the settings of bin/settings.py. A value that an env variable sets is
+    shown locked: the page cannot change it."""
+    import plugins
+    import settings
+    on = addons.enabled()
+    env_addons = os.environ.get("KB_ADDONS")
+    hidden = f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+    rows = []
+    for name, what in addons.known().items():
+        state = name in on
+        notes = []
+        if name in plugins.installed() and _is_access(name):
+            notes.append("an access plugin: switched only on the server (kb addon on|off), then a restart")
+        elif addons.needs_restart(name):
+            notes.append("takes effect after a restart")
+        lack = addons.missing(name) if state else None
+        if lack:
+            notes.append(f'<span class="bad">missing: {esc(lack)}</span>')
+        if env_addons is not None:
+            control = '<span class="muted">set by KB_ADDONS</span>'
+        else:
+            control = (f'<form method="post" action="{base}/admin/settings/addon" class="inline">{hidden}'
+                       f'<input type="hidden" name="name" value="{esc(name)}">'
+                       f'<input type="hidden" name="on" value="{"0" if state else "1"}">'
+                       f'<button{"" if state else " class=primary"}>{"Switch off" if state else "Switch on"}</button></form>')
+        rows.append(f'<tr><td><code>{esc(name)}</code></td><td>{esc(what)}</td>'
+                    f'<td class="{"ok" if state else "muted"}">{"on" if state else "off"}</td><td>{control}</td>'
+                    f'<td>{"<br>".join(n if n.startswith("<span") else esc(n) for n in notes)}</td></tr>')
+    lock_note = ('<p class="muted">KB_ADDONS is set: it decides which add-ons are on, and these switches are '
+                 'read-only. Change the variable and restart the server.</p>' if env_addons is not None else
+                 '<p class="muted">A switch writes <code>addons.json</code> in the data folder. Most add-ons '
+                 'follow at once; the ones marked below follow after a restart.</p>')
+    srows = []
+    for r in settings.rows():
+        if r["locked"]:
+            control = f'<span class="muted">set by {esc(r["env"])}</span>'
+        else:
+            opts = "".join(f'<option value="{esc(c)}"{" selected" if c == r["value"] else ""}>{esc(c)}</option>'
+                           for c in r["choices"])
+            control = (f'<form method="post" action="{base}/admin/settings/set" class="inline">{hidden}'
+                       f'<input type="hidden" name="name" value="{esc(r["key"])}">'
+                       f'<select name="value" aria-label="{esc(r["key"])}">{opts}</select><button>Save</button></form>')
+        srows.append(f'<tr><td><code>{esc(r["key"])}</code></td><td>{esc(r["description"])}'
+                     f'{" Takes effect after a restart." if r["restart"] else ""}</td>'
+                     f'<td><b>{esc(r["value"])}</b><br><span class="muted">default {esc(r["default"])}, '
+                     f'env {esc(r["env"])}</span></td><td>{control}</td></tr>')
+    msg = f'<div class="note{" bad" if bad else ""}">{esc(note)}</div>' if note else ""
+    body = (f'<main>{msg}'
+            + panel("Add-ons", lock_note + '<table><tr><th>Add-on</th><th>What it gives</th><th>State</th><th></th>'
+                    '<th>Note</th></tr>' + "".join(rows) + '</table>', "core add-ons and installed plugins")
+            + panel("Settings", '<table><tr><th>Setting</th><th>What it does</th><th>Value</th><th></th></tr>'
+                    + "".join(srows) + '</table>', "settings.json in the config folder; an env variable wins")
+            + '</main>')
+    return page("KB admin · settings", body, base, "Settings", csrf)
+
+
+def _is_access(name: str) -> bool:
+    """An installed plugin that answers the access webhooks (it is chosen once, at the start)."""
+    import plugins
+    return plugins.is_access(name)
+
+
+def _access_refusal(name: str, turn_on: bool) -> str | None:
+    """Why the page must not make this switch, or None. The access plugin decides who signs in: switched
+    off from the browser, the server refuses to start after the next restart (or every token gets 403),
+    and nobody can switch it back from the browser. A second one replaces the first at the next start.
+    The command line on the server can still do both, on purpose."""
+    import plugins
+    mod = access()
+    # The plugin the server runs now is known by its installed name first, whatever its source looks like
+    # (it may import login and permissions from another file); NAME only when it was not loaded by name.
+    started = (plugins.name_of(mod) or getattr(mod, "NAME", None)) if mod is not None else None
+    if name != started and not plugins.is_access(name):
+        return None
+    active = {n for n in addons.enabled() if plugins.is_access(n)} | ({started} if started else set())
+    if not turn_on and name in active:
+        return (f"{name} answers the sign-in of this server: switched off here, nobody could sign in after a "
+                f"restart. Switch it off on the server: kb addon off {name}, then restart.")
+    if turn_on and active - {name}:
+        return (f"{', '.join(sorted(active - {name}))} answers the sign-in already, and a server has one access "
+                f"plugin. Change it on the server: kb addon on {name}, kb addon off "
+                f"{sorted(active - {name})[0]}, then restart.")
+    return None
+
+
+def change_setting(form: dict) -> tuple[int, str, str]:
+    """Apply one form of the Settings page -> (status, note for the page, audit text or "").
+    The caller checked the session and the csrf value."""
+    import settings
+    name = str(form.get("name", ""))
+    if "value" in form:
+        value = str(form.get("value", ""))
+        if name not in settings.REGISTRY:
+            return 400, f"No such setting: {name}.", ""
+        try:
+            settings.set_value(name, value)
+        except settings.Locked:
+            return 409, f"{name} is set by {settings.REGISTRY[name].env}: change the variable instead.", ""
+        except ValueError as e:
+            return 400, str(e), ""
+        return 200, f"Saved: {name} = {settings.get(name)}.", f"{name} = {settings.get(name)}"
+    turn_on = str(form.get("on", "")) == "1"
+    if name not in addons.known():
+        return 400, f"No such add-on: {name}.", ""
+    if os.environ.get("KB_ADDONS") is not None:
+        return 409, "KB_ADDONS is set: change the variable instead.", ""
+    refusal = _access_refusal(name, turn_on)
+    if refusal:
+        return 409, refusal, ""
+    addons.set_enabled(name, turn_on)
+    later = " It takes effect after a restart." if addons.needs_restart(name) else ""
+    return 200, f"{name}: {'on' if turn_on else 'off'}.{later}", name
 
 
 # ---------------------------------------------------------------------------------- charts
@@ -743,21 +980,35 @@ PSEUDO_NAMES = {"domain": "(domain groups)", "db": "(database tables)"}
 def _history(facts: dict) -> list[dict]:
     """The KB's own small history of its headline numbers, one point per graph build (kept in
     logs/index-history.json, last 60): the tiles' sparklines need no Prometheus."""
+    import tempfile
     path = os.path.join(kb_core.KB, "logs", "index-history.json")
-    try:
-        with open(path, encoding="utf-8") as f:
-            hist = json.load(f)
-    except (OSError, ValueError):
-        hist = []
-    if facts.get("built") and (not hist or hist[-1].get("built") != facts["built"]):
-        hist = (hist + [facts])[-60:]
+    with _history_lock:  # two page loads at once: one reads while the other writes
         try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(hist, f)
-        except OSError:
-            pass
+            with open(path, encoding="utf-8") as f:
+                hist = json.load(f)
+            if not isinstance(hist, list):
+                hist = []
+        except (OSError, ValueError):
+            hist = []
+        if facts.get("built") and (not hist or hist[-1].get("built") != facts["built"]):
+            hist = (hist + [facts])[-60:]
+            tmp = None
+            try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                fd, tmp = tempfile.mkstemp(prefix=".index-history.", suffix=".tmp", dir=os.path.dirname(path))
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(hist, f)
+                os.replace(tmp, path)  # a reader sees the old file or the new one, never half of one
+            except OSError:
+                if tmp:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
     return hist
+
+
+_history_lock = threading.Lock()
 
 
 def index_page(base: str, csrf: str, usage) -> bytes:

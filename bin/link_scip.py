@@ -7,9 +7,10 @@ sees a call through a typed property or an interface that the AST graph misses. 
 Laravel API (2026-11-20) found 125 cross-file method calls with `scip-php` and 40 in the AST graph.
 
 What this step does, for each project, when the add-on is on:
-  1. Get an `index.scip`: run the indexer on the staged copy under `repos/<project>` (PHP only,
-     `KB_SCIP_PHP` or `scip-php` on the PATH), else take a ready index (`<data>/scip/<project>.scip`
-     or `index.scip` in the project root), else skip the project with one log line.
+  1. Get an `index.scip`: reuse the last run's index when the staged code did not change
+     (`<data>/scip/<project>.scip.key`), else run the indexer on the staged copy under
+     `repos/<project>` (PHP only, `KB_SCIP_PHP` or `scip-php` on the PATH), else take a ready index
+     (`<data>/scip/<project>.scip` or `index.scip` in the project root), else skip the project.
   2. Decode the protobuf with the standard library (only the fields used here).
   3. Map each method symbol to the graph's method node in the same file (by name, then line).
   4. A reference to a method from inside another method becomes a `calls` edge, EXTRACTED
@@ -312,11 +313,53 @@ def run_php_indexer(staged: str, root: str, out: str) -> bool:
             os.unlink(produced)
 
 
+def _stat_line(path: str) -> str:
+    st = os.stat(path)
+    return f"{st.st_size} {int(st.st_mtime)}"
+
+
+def _index_key(staged: str) -> str | None:
+    """What a fresh index depends on: the project's staged-code manifest (bin/kb writes it after a
+    good graphify run) and the indexer command. None when there is no manifest or no indexer."""
+    cmd = _php_indexer()
+    try:
+        with open(os.path.join(staged, "graphify-out", ".kb-manifest"), encoding="utf-8") as fh:
+            manifest = fh.read().strip()
+    except OSError:
+        return None
+    return f"{manifest} {' '.join(cmd)}" if manifest and cmd else None
+
+
+def store_is_derived(store: str) -> bool:
+    """True when the store file is the one this step wrote for the key in `<store>.key`.
+
+    The key file has two lines: the index key and `<size> <mtime seconds>` of the store. bin/kb
+    leaves a derived store out of its build signature: the staged code already covers it, and the
+    file is rewritten in the same build. A store the user put there has no matching key file."""
+    try:
+        with open(store + ".key", encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        return len(lines) == 2 and lines[1] == _stat_line(store)
+    except OSError:
+        return False
+
+
 def find_index(name: str, root: str, repos_dir: str) -> tuple[str | None, str]:
-    """The index file for a project and where it came from: a fresh run, the store or the root."""
+    """The index file for a project and where it came from: the last run, a fresh run, the store or
+    the root. A project whose staged code did not change since the last run is not indexed again."""
     store = os.path.join(os.path.dirname(os.path.abspath(repos_dir)), "scip", f"{name}.scip")
     staged = os.path.join(repos_dir, name)
+    key = _index_key(staged) if os.path.isdir(staged) and root else None
+    if key and store_is_derived(store):
+        with open(store + ".key", encoding="utf-8") as fh:
+            if fh.read().splitlines()[0] == key:
+                return store, "cached"
     if os.path.isdir(staged) and root and run_php_indexer(staged, root, store):
+        if key:
+            with open(store + ".key", "w", encoding="utf-8") as fh:
+                fh.write(f"{key}\n{_stat_line(store)}\n")
+        elif os.path.exists(store + ".key"):
+            os.unlink(store + ".key")
         return store, "indexed"
     if os.path.isfile(store):
         return store, "ready"

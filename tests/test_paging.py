@@ -120,12 +120,19 @@ class Paginate(unittest.TestCase):
         self.assertEqual(out.count("qmd://"), 2, out)
         self.assertEqual(seen, [2])
 
-    def test_docs_page_two_skips_the_first_hits(self):
-        hits = "".join(f"qmd://kb-api/d{i}.md:1 #{i}\nTitle: D{i}\n\n" for i in range(10))
-        out = kb_core._page_hits("[projects: api]\n\n" + hits, 2, 5)
-        self.assertIn("d5.md", out)
-        self.assertNotIn("d4.md", out)
-        self.assertIn("page: 3", out)
+    def test_docs_page_two_is_cut_from_page_one_text(self):
+        # page 2 without a cursor runs the same `limit` and cuts the same text (no hits 6-10 of a new query)
+        seen = []
+
+        def fake_docs(args, allowed=None):
+            seen.append(args.get("limit"))
+            return "[projects: api]\n\n" + "".join(
+                f"qmd://kb-api/d{i}.md:1 #{i}\nTitle: D{i}\n\n" + "t" * 400 + "\n\n" for i in range(int(args["limit"])))
+        with mock.patch.object(kb_core, "search_docs", fake_docs):
+            out = kb_core.call_tool("search", {"q": "x", "domain": "docs", "limit": 5, "page": 2,
+                                               "page_length": 1000})
+        self.assertEqual(seen, [5])
+        self.assertIn("page 2 of", out)
 
 
 class BackendCalls(unittest.TestCase):

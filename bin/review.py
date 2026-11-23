@@ -21,7 +21,12 @@ from __future__ import annotations
 import re
 from collections import defaultdict, deque
 
-MAX_DIFF = 2_000_000
+# kb-http refuses a request body over 1 MB, so a larger diff never reaches the tool there.
+MAX_DIFF = 1_000_000
+# `files`: at most this many items, and this many changed lines after the ranges are expanded. The
+# line sets go to the graph worker as JSON; without a cap, 2000 items of "x:1-9999" took 1.3 GB.
+MAX_FILES = 1000
+MAX_LINES = 200_000
 SYMBOL_TYPES = {"method", "function", "symbol", "class", "model", "controller", "interface", "trait",
                 "service", "request", "resource", "enum"}
 CONTAINER_TYPES = {"class", "model", "controller", "interface", "trait", "service", "request", "resource", "enum"}
@@ -45,15 +50,17 @@ def parse_diff(text: str) -> dict[str, set[int]]:
     old_path = new_path = None
     cur: set[int] | None = None
     new_no = old_no = 0
+    old_left = new_left = 0   # lines the current hunk still holds: a '---' line inside it is content
     deleted = False
     for line in text.splitlines():
         if line.startswith("diff --git "):
             cur, old_path, new_path = None, None, None
+            old_left = new_left = 0
             continue
-        if line.startswith("--- "):
+        if old_left <= 0 and new_left <= 0 and line.startswith("--- "):
             old_path = _strip(line[4:])
             continue
-        if line.startswith("+++ "):
+        if old_left <= 0 and new_left <= 0 and line.startswith("+++ "):
             new_path = _strip(line[4:])
             deleted = new_path is None
             path = new_path or old_path
@@ -62,19 +69,31 @@ def parse_diff(text: str) -> dict[str, set[int]]:
         m = _HUNK.match(line)
         if m:
             old_no, new_no = int(m.group(1)), int(m.group(3))
+            old_left = int(m.group(2)) if m.group(2) is not None else 1
+            new_left = int(m.group(4)) if m.group(4) is not None else 1
             continue
-        if cur is None or not line:
+        if cur is None:
+            continue
+        if not line:
+            if old_left > 0 and new_left > 0:   # a context line whose blank was trimmed
+                new_no, old_no, old_left, new_left = new_no + 1, old_no + 1, old_left - 1, new_left - 1
             continue
         tag = line[0]
         if tag == "+":
             cur.add(new_no)
             new_no += 1
+            new_left -= 1
         elif tag == "-":
             cur.add(old_no if deleted else new_no)
             old_no += 1
+            old_left -= 1
         elif tag == " ":
             new_no += 1
             old_no += 1
+            old_left -= 1
+            new_left -= 1
+    if sum(map(len, out.values())) > MAX_LINES:
+        raise ValueError(f"the diff changes more than {MAX_LINES} lines: pass 'files' instead")
     return out
 
 
@@ -86,8 +105,13 @@ def _strip(p: str) -> str | None:
 
 
 def parse_files(items: list[str]) -> dict[str, set[int]]:
-    """["app/X.php", "app/Y.php:10-20,31"] -> {path: lines}; no lines = the whole file."""
+    """["app/X.php", "app/Y.php:10-20,31"] -> {path: lines}; no lines = the whole file.
+
+    ValueError above MAX_FILES items or MAX_LINES lines in all (each range counts in full)."""
+    if len(items) > MAX_FILES:
+        raise ValueError(f"at most {MAX_FILES} files")
     out: dict[str, set[int]] = {}
+    total = 0
     for item in items:
         path, _, spec = str(item).partition(":")
         lines = out.setdefault(path.strip(), set())
@@ -96,7 +120,12 @@ def parse_files(items: list[str]) -> dict[str, set[int]]:
             if a.strip().isdigit():
                 lo = int(a)
                 hi = int(b) if b.strip().isdigit() else lo
-                lines.update(range(lo, min(hi, lo + 5000) + 1))
+                hi = min(hi, lo + 5000)
+                total += max(0, hi - lo + 1)
+                if total > MAX_LINES:
+                    raise ValueError(f"at most {MAX_LINES} changed lines in all: name whole files "
+                                     "(no lines) or fewer ranges")
+                lines.update(range(lo, hi + 1))
     return out
 
 

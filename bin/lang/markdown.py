@@ -36,9 +36,11 @@ CONTRIBUTES = {"nodes": ["doc"], "relations": ["links_to", "documents"]}
 PRIORITY = 80          # after the code plugins: it needs their symbols to point at
 
 WIKILINK = re.compile(r"\[\[([^\]|#]+)")
-MD_LINK = re.compile(r"\[[^\]]*\]\(([^)#\s]+\.md)\)")
+MD_LINK = re.compile(r"\[[^\]]*\]\(([^)#\s]+\.md)(?:#[^)\s]*)?\)")   # `b.md#setup` links to b.md
 DISTINCTIVE = re.compile(r"^(?:[A-Z][a-z0-9]+[A-Z]\w*|\w+\(\)|\w+::\w+)$")
 MAX_MENTIONS_PER_DOC = 12
+#: Bytes read from one document. A longer file is cut here: the head names what it is about.
+MAX_DOC_BYTES = 2 * 1024 * 1024
 
 
 def _is_distinctive(label: str) -> bool:
@@ -50,28 +52,68 @@ def _is_distinctive(label: str) -> bool:
 def _words(text: str) -> set[str]:
     """Every standalone token of a doc that a distinctive label could equal.
 
-    Each shape is searched on its own and with overlaps (`A::b()` yields `A::b`, `b()`, `A`, `b`),
-    so the result equals testing `(?<!\\w)label(?!\\w)` for every label, one regex per label."""
+    The result equals testing `(?<!\\w)label(?!\\w)` for every label: `A::b()` yields `A::b`, `b()`,
+    `A` and `b`. Every such token starts where a run of word characters starts, so one linear pass
+    over the runs is enough (a lookahead scan at every position was quadratic on one long word)."""
     def free(a: int, b: int) -> bool:
         return not (a and (text[a - 1].isalnum() or text[a - 1] == "_")) and \
             not (b < len(text) and (text[b].isalnum() or text[b] == "_"))
     out: set[str] = set()
-    for pattern in (r"(?=(\w+::\w+))", r"(?=(\w+\(\)))", r"(?=(\w+))"):
-        for m in re.finditer(pattern, text):
-            if free(m.start(1), m.end(1)):
-                out.add(m.group(1))
+    runs = [(m.start(), m.end()) for m in re.finditer(r"\w+", text)]
+    for i, (a, b) in enumerate(runs):
+        if free(a, b):
+            out.add(text[a:b])
+        if text.startswith("()", b) and free(a, b + 2):
+            out.add(text[a:b + 2])
+        if text.startswith("::", b) and i + 1 < len(runs) and runs[i + 1][0] == b + 2 \
+                and free(a, runs[i + 1][1]):
+            out.add(text[a:runs[i + 1][1]])
     return out
+
+
+def _doc_files(root: str):
+    """(path, relative path) of every markdown file under `root` that is safe to read: a regular
+    file (not a device or a pipe) whose real path stays inside the docs root."""
+    base = Path(root)
+    if not base.is_dir():
+        return
+    real_base = base.resolve()
+    for path in sorted(base.rglob("*.md")):
+        if any(part in {"node_modules", ".git", "vendor"} for part in path.parts):
+            continue
+        try:
+            real = path.resolve()
+            real.relative_to(real_base)
+        except (OSError, ValueError, RuntimeError):
+            continue
+        if not real.is_file():
+            continue
+        yield path, str(path.relative_to(base))
+
+
+def _read_doc(path: Path) -> str | None:
+    """The first MAX_DOC_BYTES of a document, or None when it cannot be read."""
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(MAX_DOC_BYTES).decode("utf-8", errors="ignore")
+    except OSError:
+        return None
 
 
 def _doc_id(repo: str, rel: str) -> str:
     return graph_io.node_id(repo, rel)
 
 
+def _mention(label: str) -> str:
+    """How a doc writes the symbol: graphify labels a method `.name()`, a doc writes `name()`."""
+    return label[1:] if label.startswith(".") and label.endswith("()") else label
+
+
 def _symbol_index(graph: dict) -> dict[str, str]:
-    """label -> node id, for distinctive labels that are **unambiguous** in the graph."""
+    """mention -> node id, for distinctive labels that are **unambiguous** in the graph."""
     seen: dict[str, str | None] = {}
     for node in graph_io.nodes(graph):
-        label = node.get("label", "")
+        label = _mention(node.get("label", ""))
         if not _is_distinctive(label):
             continue
         seen[label] = None if label in seen else node["id"]   # None marks "ambiguous"
@@ -90,13 +132,7 @@ def enrich(graph: dict, roots: list[tuple[str, str]]) -> tuple[int, int]:
     new_nodes: list[dict] = []
 
     for repo, root in roots:
-        base = Path(root)
-        if not base.is_dir():
-            continue
-        for path in sorted(base.rglob("*.md")):
-            if any(part in {"node_modules", ".git", "vendor"} for part in path.parts):
-                continue
-            rel = str(path.relative_to(base))
+        for path, rel in _doc_files(root):
             nid = _doc_id(repo, rel)
             by_path[(repo, rel)] = nid
             by_stem.setdefault((repo, path.stem), nid)
@@ -111,18 +147,12 @@ def enrich(graph: dict, roots: list[tuple[str, str]]) -> tuple[int, int]:
     edges: list[dict] = []
     for repo, root in roots:
         base = Path(root)
-        if not base.is_dir():
-            continue
-        for path in sorted(base.rglob("*.md")):
-            if any(part in {"node_modules", ".git", "vendor"} for part in path.parts):
-                continue
-            rel = str(path.relative_to(base))
+        for path, rel in _doc_files(root):
             src = by_path.get((repo, rel))
             if not src:
                 continue
-            try:
-                text = path.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
+            text = _read_doc(path)
+            if text is None:
                 continue
 
             # doc -> doc: the link is written in the file, so this is EXTRACTED

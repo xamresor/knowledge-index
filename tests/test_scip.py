@@ -248,6 +248,27 @@ class Runner(unittest.TestCase):
         self.assertIn("indexer failed", p.stderr)
         self.assertEqual(len(self.edges()), 2)
 
+    def test_unchanged_project_is_not_indexed_again(self):
+        fx = os.path.join(self.data, "fixture.scip")
+        with open(fx, "wb") as f:
+            f.write(fixture())
+        runs = os.path.join(self.data, "runs.log")
+        tool = os.path.join(self.data, "fake-scip-php")
+        with open(tool, "w") as f:
+            f.write(f"#!/bin/sh\necho run >> {runs}\ncp {fx} index.scip\n")
+        os.chmod(tool, os.stat(tool).st_mode | stat.S_IEXEC)
+        out = os.path.join(self.repos, "api", "graphify-out")
+        os.makedirs(out)
+        with open(os.path.join(out, ".kb-manifest"), "w") as f:
+            f.write("sig-1")
+        self.assertIn("(indexed)", self.run_main("scip", KB_SCIP_PHP=tool).stdout)
+        self.assertIn("(cached)", self.run_main("scip", KB_SCIP_PHP=tool).stdout)
+        with open(os.path.join(out, ".kb-manifest"), "w") as f:
+            f.write("sig-2")
+        self.assertIn("(indexed)", self.run_main("scip", KB_SCIP_PHP=tool).stdout)
+        with open(runs) as f:
+            self.assertEqual(len(f.read().split()), 2)
+
     def test_addon_is_known(self):
         with mock.patch.dict(os.environ, {"KB_ADDONS": "scip"}):
             import addons

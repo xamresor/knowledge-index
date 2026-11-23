@@ -16,7 +16,7 @@ One number, from the question's own words and qmd's keyword index (read-only, no
     coverage = sum of idf(word) for the question's words that the first hit contains
                / sum of idf(word) for all the question's words
 
-    idf(word) = ln((N + 1) / (df + 0.5))    N = documents in the index, df = documents with the word
+    idf(word) = ln((N + 1) / (df + 0.5))    N = documents the caller may see, df = those with the word
 
 Plainly: how much of the question's *specific* vocabulary the first hit holds. A word that every
 document has ("kb") weighs nearly nothing; a word that no document has ("terraform") weighs most. So
@@ -100,22 +100,40 @@ def first_hit(out: str) -> tuple[str, str] | None:
     return (m.group(1), m.group(2)) if m else None
 
 
-class Index:
-    """Read-only questions to qmd's keyword index: how many documents hold a word, does one doc."""
+CONTRACTS_DIR = "contracts/"   # contract docs: open to every caller (bin/access.py)
 
-    def __init__(self, path: str):
+
+class Index:
+    """Read-only questions to qmd's keyword index: how many documents hold a word, does one doc.
+
+    `collections` limits the counts to the documents a caller may see: those collections, plus the
+    contract docs of every collection whose name starts with `contract_prefix`. None = the whole
+    index (a local caller). Without the limit the counts would tell a limited caller which words
+    the docs of hidden projects hold."""
+
+    def __init__(self, path: str, collections: list[str] | None = None, contract_prefix: str | None = None):
         self.con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2)
+        self.scope, self.params = "", ()
+        if collections is not None:
+            marks = ",".join("?" * len(collections)) or "NULL"
+            self.scope = f" AND (d.collection IN ({marks})"
+            self.params = tuple(collections)
+            if contract_prefix:
+                self.scope += " OR (substr(d.path, 1, ?) = ? AND substr(d.collection, 1, ?) = ?)"
+                self.params += (len(CONTRACTS_DIR), CONTRACTS_DIR, len(contract_prefix), contract_prefix)
+            self.scope += ")"
 
     def close(self) -> None:
         self.con.close()
 
     def size(self) -> int:
-        return self.con.execute("SELECT COUNT(*) FROM documents WHERE active = 1").fetchone()[0]
+        return self.con.execute("SELECT COUNT(*) FROM documents d WHERE d.active = 1" + self.scope,
+                                self.params).fetchone()[0]
 
     def df(self, match: str) -> int:
         return self.con.execute(
             "SELECT COUNT(*) FROM documents_fts f JOIN documents d ON d.id = f.rowid "
-            "WHERE d.active = 1 AND documents_fts MATCH ?", (match,)).fetchone()[0]
+            "WHERE d.active = 1 AND documents_fts MATCH ?" + self.scope, (match, *self.params)).fetchone()[0]
 
     def doc_id(self, collection: str, path: str) -> int | None:
         row = self.con.execute("SELECT id FROM documents WHERE active = 1 AND collection = ? AND path = ?",
@@ -160,11 +178,13 @@ def grade(query: str, out: str, index: Index | None) -> Grade:
     return Grade(coverage(terms, df, held, n) if hit else 0.0, missing, absent)
 
 
-def open_index(kb: str) -> Index | None:
+def open_index(kb: str, collections: list[str] | None = None,
+               contract_prefix: str | None = None) -> Index | None:
+    """qmd's index, its counts limited to `collections` (+ contract docs) when given (see Index)."""
     path = index_path(kb)
     if not path:
         return None
     try:
-        return Index(path)
+        return Index(path, collections, contract_prefix)
     except sqlite3.Error:
         return None

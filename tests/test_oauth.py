@@ -190,7 +190,9 @@ class OAuthFlow(unittest.TestCase):
             "redirect_uri": client["redirect_uris"][0], "client_id": client["client_id"]}, form=True)
         self.assertEqual(status, 200, text)
         tok = json.loads(text)
-        self.assertEqual(tok["access_token"], TOKEN)
+        # An access token of this server that stands for the API token and ends after expires_in.
+        self.assertTrue(tok["access_token"].startswith(oauth.ACCESS_PREFIX))
+        self.assertEqual(tok["expires_in"], oauth.TOKEN_TTL)
         status, _, _ = self.call("POST", "/mcp", {"jsonrpc": "2.0", "id": 1, "method": "ping"},
                                  headers={"Authorization": f"Bearer {tok['access_token']}"})
         self.assertEqual(status, 200)
@@ -203,7 +205,8 @@ class OAuthFlow(unittest.TestCase):
                                                        "refresh_token": tok["refresh_token"]}, form=True)
         self.assertEqual(status, 200)
         new = json.loads(text)
-        self.assertEqual(new["access_token"], TOKEN)
+        self.assertTrue(new["access_token"].startswith(oauth.ACCESS_PREFIX))
+        self.assertNotEqual(new["access_token"], tok["access_token"])
         status, _, _ = self.call("POST", "/token", {"grant_type": "refresh_token",
                                                     "refresh_token": tok["refresh_token"]}, form=True)
         self.assertEqual(status, 400)  # the old refresh token is gone

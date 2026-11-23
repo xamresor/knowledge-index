@@ -114,16 +114,25 @@ class ActionParts(unittest.TestCase):
     def test_controller_with_method(self):
         self.assertEqual(
             lh.action_parts(r"App\Http\Controllers\Api\AuthController@changePassword"),
-            ("Http/Controllers/Api/AuthController.php", "changePassword"))
+            ("App/Http/Controllers/Api/AuthController.php", "changePassword"))
 
     def test_controller_without_method(self):
         suf, method = lh.action_parts(r"App\Http\Controllers\CategoryController")
-        self.assertEqual(suf, "Http/Controllers/CategoryController.php")
+        self.assertEqual(suf, "App/Http/Controllers/CategoryController.php")
         self.assertIsNone(method)
 
     def test_non_controller_skipped(self):
         self.assertIsNone(lh.action_parts("Closure"))
         self.assertIsNone(lh.action_parts(r"App\Livewire\SomeComponent@render"))
+
+
+class ControllerFile(unittest.TestCase):
+    def test_a_bare_file_name_match_is_not_enough(self):
+        # the part from Http/ on must match: a same-named file in another folder is not the controller
+        ns = "App/Http/Controllers/V1/UserController.php"
+        self.assertIsNone(lh.controller_file(ns, ["app/Legacy/UserController.php"]))
+        self.assertEqual(lh.controller_file(ns, ["app/Http/Controllers/V1/UserController.php"]),
+                         "app/Http/Controllers/V1/UserController.php")
 
 
 class MatchRoute(unittest.TestCase):
@@ -208,7 +217,7 @@ class LoadRoutes(unittest.TestCase):
                         "action": "App\\Http\\Controllers\\OrderController@index"}], fh)
         self.addCleanup(os.unlink, fh.name)
         self.assertEqual(lh.load_routes(fh.name),
-                         {("get", "api/orders"): ("Http/Controllers/OrderController.php", "index")})
+                         {("get", "api/orders"): ("App/Http/Controllers/OrderController.php", "index")})
 
 
 class CallSourceIsTheFunction(unittest.TestCase):
@@ -311,7 +320,7 @@ class MutationGaps(unittest.TestCase):
                         "action": "App\\Http\\Controllers\\OrderController@show"}], fh)
         self.addCleanup(os.unlink, fh.name)
         self.assertEqual(lh.load_routes(fh.name),
-                         {("get", "api/orders/{}"): ("Http/Controllers/OrderController.php", "show")})
+                         {("get", "api/orders/{}"): ("App/Http/Controllers/OrderController.php", "show")})
 
 
 class LinkEdgesEndToEnd(unittest.TestCase):

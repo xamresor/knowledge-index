@@ -47,6 +47,7 @@ LIST_FIELDS = ("summable", "not_summable", "synonyms")
 MAX_HITS = 5
 
 _lock = threading.Lock()
+_parse_lock = threading.Lock()   # held while a graph is parsed (graph_tables), apart from the cache lock
 _FILES: dict[str, tuple[float, dict, list]] = {}      # path -> (mtime, entries, errors)
 _GRAPH: dict[str, tuple[float, dict]] = {}            # graph path -> (mtime, table -> projects)
 
@@ -154,6 +155,15 @@ def graph_tables(graph: str) -> dict[str, set[str]]:
         hit = _GRAPH.get(graph)
         if hit and hit[0] == mtime:
             return hit[1]
+    with _parse_lock:                   # one parse per graph file and mtime, whatever the threads
+        with _lock:
+            hit = _GRAPH.get(graph)
+            if hit and hit[0] == mtime:
+                return hit[1]
+        return _graph_tables(graph, mtime)
+
+
+def _graph_tables(graph: str, mtime: float) -> dict[str, set[str]]:
     try:
         with open(graph, encoding="utf-8") as f:
             g = json.load(f)
@@ -187,6 +197,10 @@ def problems(graph: str, allowed: set[str] | None = None, known_projects=None) -
                               has a dictionary file: no file, no noise)
     """
     tables = graph_tables(graph)
+    if allowed is not None:
+        # a limited caller learns only of the tables its own projects use: a table that only a hidden
+        # project touches is "unknown" here, so the check is no oracle for the hidden projects
+        tables = {t: owners for t, owners in tables.items() if owners & allowed}
     rows = []
     for project, path in files(allowed).items():
         where = os.path.basename(path)

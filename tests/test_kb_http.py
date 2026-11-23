@@ -248,7 +248,7 @@ class FilterTests(unittest.TestCase):
             with mock.patch.object(access, "GRAPH", src), \
                     mock.patch.object(access, "FILTERED_DIR", os.path.join(d, "filtered")):
                 path = access.graph_for({"admin"}, ["api", "web", "admin"])
-                self.assertTrue(path.endswith("filtered/admin/graph.json"))
+                self.assertTrue(path.startswith(os.path.join(d, "filtered", "v-")) and path.endswith("/graph.json"))
                 with open(path) as f:
                     ids = {n["id"] for n in json.load(f)["nodes"]}
                 self.assertIn("admin::Page.vue", ids)
@@ -272,28 +272,51 @@ class FilterTests(unittest.TestCase):
 
 
 class DocsFilterTests(unittest.TestCase):
-    OUT = ("[note]\n"
-           "qmd://kb-api/auth.md:1 #a1\nTitle: Auth\nScore:  90%\n\napi text\n\n"
-           "qmd://kb-web/login.md:3 #b2\nTitle: Login\nScore:  80%\n\nfe text\n\n"
-           "qmd://kb-api/contracts/web-api.md #c3\nTitle: Contract\nScore:  70%\n\nc text\n\n"
-           "qmd://other/web/x.md #d4\nTitle: Other collection\nScore:  60%\n\nx\n")
+
+    HITS = [{"file": "qmd://kb-api/auth.md", "line": 1, "docid": "#a1", "title": "Auth", "score": 0.9,
+             "snippet": "api text"},
+            {"file": "qmd://kb-web/login.md", "line": 3, "docid": "#b2", "title": "Login", "score": 0.8,
+             "snippet": "fe text"},
+            {"file": "qmd://kb-api/contracts/web-api.md", "line": 1, "docid": "#c3", "title": "Contract",
+             "score": 0.7, "snippet": "c text"},
+            {"file": "qmd://other/web/x.md", "line": 1, "docid": "#d4", "title": "Other collection",
+             "score": 0.6, "snippet": "x"}]
+
+    def setUp(self):
+        for name, value in (("PROJECTS", {"api": [], "web": []}), ("DOC_PROJECTS", {"api", "web"}),
+                            ("HOME_PROJECTS", [])):
+            p = mock.patch.object(kb_core, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def qmd(self, cmds):
+        """qmd --format json over the collections named with -c (every collection without one)."""
+        def run(cmd, **kw):
+            cmds.append(cmd)
+            cols = [cmd[i + 1] for i, x in enumerate(cmd) if x == "-c"]
+            return json.dumps([h for h in self.HITS
+                               if not cols or any(h["file"].startswith(f"qmd://{c}/") for c in cols)])
+        return run
 
     def test_search_drops_other_projects_but_keeps_contracts(self):
         cmds = []
-        with mock.patch.object(kb_core, "run", lambda cmd, **kw: cmds.append(cmd) or self.OUT):
+        with mock.patch.object(kb_core, "run", self.qmd(cmds)):
             out = kb_core.call_tool("search", {"q": "login", "domain": "docs"}, {"web"})
         self.assertIn("qmd://kb-web/login.md", out)
         self.assertIn("qmd://kb-api/contracts/web-api.md", out)  # contracts are open to all
         self.assertNotIn("qmd://kb-api/auth.md", out)
         self.assertNotIn("Other collection", out)
-        self.assertNotIn("-c", cmds[0])        # every collection is searched, then filtered
-        self.assertIn("25", cmds[0])           # 5x the hits (limit 5) are asked for, then filtered
+        own, other = cmds[0], cmds[1]
+        self.assertEqual(own[own.index("-c") + 1], "kb-web")    # the caller's collections, by name
+        self.assertEqual(own[own.index("-n") + 1], "5")
+        self.assertEqual(other[other.index("-c") + 1], "kb-api")  # the others, for their contract docs
+        self.assertEqual(other[other.index("-n") + 1], "25")
 
     def test_nothing_allowed(self):
-        with mock.patch.object(kb_core, "run", lambda cmd, **kw: self.OUT):
+        with mock.patch.object(kb_core, "run", self.qmd([])):
             out = kb_core.search_docs({"q": "x"}, {"nobody"})
         self.assertIn("contracts/web-api.md", out)
-        with mock.patch.object(kb_core, "run", lambda cmd, **kw: "qmd://kb-api/a.md #1\nx"):
+        with mock.patch.object(kb_core, "run", lambda cmd, **kw: json.dumps([self.HITS[0]])):
             self.assertIn("no results in your projects", kb_core.search_docs({"q": "x"}, {"web"}))
 
     def test_get_checks_resolved_path(self):

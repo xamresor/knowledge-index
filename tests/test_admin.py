@@ -60,6 +60,12 @@ class Admin(unittest.TestCase):
             s.server_close()
         cls.tmp.cleanup()
 
+    def setUp(self):
+        # The tests sign in from this machine, and a request of this machine counts against the password
+        # limit (only kb-http's own webhook calls do not): a fresh limit per test.
+        for s in (self.srv, self.other):
+            s.RequestHandlerClass.login_limit = admin.login_throttle()
+
     def client(self):
         jar = http.cookiejar.CookieJar()
         return urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar), NoRedirect)
@@ -143,7 +149,7 @@ class Admin(unittest.TestCase):
         from usage import Usage
         u = Usage(os.path.join(self.tmp.name, "logs", "audit-off.json"))
         with mock.patch.object(kb_http, "USAGE", u), \
-                mock.patch.dict(os.environ, {"KB_ADDONS": "admin"}):
+                mock.patch.dict(os.environ, {"KB_ADDONS": "none"}):
             c = self.client()
             self.sign_in(c, self.base)
             status, _, _ = self.req(c, "GET", f"{self.base}/admin/audit")
@@ -200,7 +206,7 @@ class Questions(unittest.TestCase):
                        mock.patch.object(kb_core, "GRAPH", os.path.join(cls.tmp.name, "graph.json")),
                        mock.patch.object(kb_core, "PROJECTS", {"api": [], "web": []}),
                        mock.patch.object(kb_core, "warm_qmd", lambda: None),
-                       mock.patch.dict(os.environ, {"KB_ADDONS": "admin,questions"})]  # the add-on is off by default
+                       mock.patch.dict(os.environ, {"KB_ADDONS": "questions"})]  # the add-on is off by default
         for p in cls.patches:
             p.start()
         cls.usage = kb_http.Usage(os.path.join(cls.tmp.name, "usage.json"))
@@ -272,7 +278,7 @@ class Questions(unittest.TestCase):
         self.sign_in(c, self.base)
         csrf = self.csrf(c)
         self.usage.record("search", "bob", {"query": "a question nobody labels"}, True, 0.1)
-        with mock.patch.dict(os.environ, {"KB_ADDONS": "admin"}):
+        with mock.patch.dict(os.environ, {"KB_ADDONS": "none"}):
             _, _, page = self.req(c, "GET", f"{self.base}/admin")
             self.assertNotIn("Questions", page)
             self.assertNotIn('class="wait"', page)

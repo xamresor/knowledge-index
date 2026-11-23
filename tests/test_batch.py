@@ -27,9 +27,9 @@ class Batch(unittest.TestCase):
         self.seen = []
         real = kb_core.call_tool
 
-        def spy(name, args, allowed=None, caller=None):
+        def spy(name, args, allowed=None, caller=None, nested=False):
             self.seen.append((name, allowed, caller))
-            return real(name, args, allowed, caller)
+            return real(name, args, allowed, caller, nested)
         p = mock.patch.object(kb_core, "call_tool", spy)
         p.start()
         self.addCleanup(p.stop)

@@ -15,9 +15,11 @@ A `plugin.py` defines:
   def build(core) -> None                        # optional: run at the end of `kb update`
 
 An access plugin also defines both of these, and kb-http then answers the two webhooks of the access
-protocol (docs/access-protocol.md) from it, at `/local/login` and `/local/permissions`:
+protocol (docs/access-protocol.md) from it, at `/local/login` and `/local/permissions`. It also says
+`ACCESS = True`: the Settings page reads that line without loading the plugin (without it, a plugin.py
+that defines both functions itself counts, one that imports them does not):
 
-  def login(body, core) -> (status, body) or (status, body, headers)
+  def login(body, core) -> (status, body) or (status, body, headers)   # body["ip"]: the client address
   def permissions(token, projects, core) -> (status, body)
 
 It may bring pages to `/admin` as well (the plugin `contrib/users` does: users, rights, tokens):
@@ -46,6 +48,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import sys
 import threading
 
@@ -108,6 +111,33 @@ def active(enabled: set[str]) -> list:
         except Exception as e:  # noqa: BLE001
             sys.stderr.write(f"kb: plugin {name} failed to load: {type(e).__name__}: {e}\n")
     return mods
+
+
+_ACCESS_FLAG = re.compile(r"^ACCESS\s*=\s*(True|False)\s*(?:#.*)?$", re.M)
+
+
+def is_access(name: str) -> bool:
+    """An installed plugin that answers the access webhooks. Read from the source, not by loading it: a page
+    must not run the code of a plugin that is off. A line `ACCESS = True` or `ACCESS = False` in plugin.py
+    decides; without it, a plugin that defines both `login` and `permissions` in plugin.py counts. A plugin
+    that imports them from another file must say `ACCESS = True`."""
+    try:
+        with open(os.path.join(installed()[name], "plugin.py"), encoding="utf-8") as f:
+            src = f.read()
+    except (OSError, KeyError):
+        return False
+    flag = _ACCESS_FLAG.search(src)
+    if flag:
+        return flag.group(1) == "True"
+    return "\ndef login(" in src and "\ndef permissions(" in src
+
+
+def name_of(mod) -> str | None:
+    """The installed name of a loaded plugin module (its add-on name), or None."""
+    for name, loaded in list(_loaded.items()):
+        if loaded is mod:
+            return name
+    return None
 
 
 def access(enabled: set[str]):

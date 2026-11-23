@@ -36,6 +36,15 @@ ENTRY = re.compile(r"(^|/)(pages|app|routes)/|(^|/)(index|main)\.[jt]sx?$|\.conf
 
 def unused(graph: dict, projects: list[str] | None, limit: int = 60, roots: dict[str, str] | None = None) -> str:
     """Classes and frontend modules nothing in the graph depends on, minus what is wired by convention."""
+    found = unused_candidates(graph, projects)
+    if roots:
+        found = _not_named_elsewhere(found, roots)
+    return format_unused(found, limit, scanned=bool(roots))
+
+
+def unused_candidates(graph: dict, projects: list[str] | None) -> dict[str, list[str]]:
+    """"repo:file" -> labels of the classes and frontend modules of `projects` that nothing in `graph`
+    depends on. Pass the graph of every project the caller may see: a use from another project counts."""
     nodes = {n["id"]: n for n in graph.get("nodes", [])}
     edges = graph.get("links") if "links" in graph else graph.get("edges", [])
     want = set(projects) if projects else {n.get("repo") for n in nodes.values() if n.get("repo")}
@@ -54,14 +63,16 @@ def unused(graph: dict, projects: list[str] | None, limit: int = 60, roots: dict
             continue
         if n.get("type") in CONTAINER_TYPES or (n.get("type") == "file" and f.endswith(FRONTEND)):
             found[f"{repo}:{f}"].append(str(n.get("label")))
-    if roots:
-        found = _not_named_elsewhere(found, roots)
+    return dict(found)
+
+
+def format_unused(found: dict[str, list[str]], limit: int = 60, scanned: bool = False) -> str:
     rows = [f"- {f}  ({', '.join(sorted(set(labels))[:4])}{' …' if len(set(labels)) > 4 else ''})"
             for f, labels in sorted(found.items())]
     if not rows:
         return "(nothing unused found)"
     head = (f"Possibly unused ({len(rows)}): nothing in the graph depends on these files"
-            + (" and their names appear in no other indexed file" if roots else "")
+            + (" and their names appear in no other indexed file" if scanned else "")
             + ". Code loaded by a computed name, config outside the indexed folders or a framework convention "
               "can still be alive: check before deleting.")
     more = [f"… +{len(rows) - limit} more"] if len(rows) > limit else []
@@ -162,31 +173,67 @@ def build(graph: dict, routes: list[dict] | None, projects: list[str] | None, bu
 def _not_named_elsewhere(found: dict[str, list[str]], roots: dict[str, str]) -> dict[str, list[str]]:
     """Drop candidates whose name appears in another file of the indexed code: the graph misses
     `new X(...)` inside an array, `X::class` in a relation, a string in a registry."""
+    return scan_names(found, roots)[0]
+
+
+def _name_of(label: str) -> str:
+    return re.sub(r"\.(php|tsx?|jsx?|vue|mjs)$", "", str(label).rsplit("/", 1)[-1]).strip(".()")
+
+
+def scan_names(found: dict[str, list[str]], roots: dict[str, str],
+               deadline: float | None = None) -> tuple[dict[str, list[str]], bool]:
+    """-> (the candidates whose name no other file holds, complete?). `complete` is False when the
+    scan stopped at `deadline` (time.monotonic()): the files not read could still use a candidate.
+
+    A name can belong to several candidates (`Helper` in api and in sw). A use in project P keeps
+    P's own candidate of that name alive; it keeps the candidates of other projects alive only when
+    P has no candidate of that name (a class used only by another project). A candidate's own file
+    never keeps it alive."""
     import os
-    names: dict[str, str] = {}                      # name -> "repo:file" that defines it
+    import time
+    names: dict[str, list[str]] = {}                # name -> every "repo:file" that defines it
     for key, labels in found.items():
         for label in labels:
-            name = re.sub(r"\.(php|tsx?|jsx?|vue|mjs)$", "", str(label).rsplit("/", 1)[-1]).strip(".()")
-            if len(name) >= 4:
-                names[name] = key
+            name = _name_of(label)
+            if len(name) >= 4 and key not in names.setdefault(name, []):
+                names[name].append(key)
     if not names:
-        return found
+        return found, True
     pattern = re.compile(r"\b(" + "|".join(sorted(map(re.escape, names), key=len, reverse=True)) + r")\b")
     alive: set[str] = set()
+    complete = True
+
+    def own_file(key: str, repo: str, rel: str) -> bool:
+        kr, _, kf = key.partition(":")
+        return kr == repo and (kf == rel or kf.endswith("/" + rel))
+
     for repo, root in roots.items():
+        if not complete:
+            break
         for dirpath, dirnames, filenames in os.walk(root):
+            if deadline is not None and time.monotonic() > deadline:
+                complete = False
+                break
             dirnames[:] = [d for d in dirnames if d not in ("graphify-out", "node_modules", "vendor", ".git")]
             for fn in filenames:
                 if not fn.endswith((".php", *FRONTEND)):
                     continue
+                if deadline is not None and time.monotonic() > deadline:   # one big folder: stop inside it
+                    complete = False
+                    break
                 path = os.path.join(dirpath, fn)
-                rel = f"{repo}:{os.path.relpath(path, root)}"
+                rel = os.path.relpath(path, root)
                 try:
                     with open(path, encoding="utf-8", errors="replace") as fh:
                         text = fh.read(2_000_000)
                 except OSError:
                     continue
                 for m in set(pattern.findall(text)):
-                    if not names[m].endswith(rel.split(":", 1)[1]) or not names[m].startswith(repo + ":"):
-                        alive.add(names[m])
-    return {k: v for k, v in found.items() if k not in alive}
+                    keys = names[m]
+                    mine = [k for k in keys if k.startswith(repo + ":")]
+                    for key in (mine or keys):
+                        if not own_file(key, repo, rel):
+                            alive.add(key)
+            if not complete:
+                break
+    return {k: v for k, v in found.items() if k not in alive}, complete
