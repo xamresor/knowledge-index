@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import textwrap
 import unittest
 
@@ -64,6 +65,23 @@ class Plugins(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr[-800:])
         import json
         return json.loads(p.stdout.strip().splitlines()[-1])
+
+    def test_two_threads_load_one_module(self):
+        slow = os.path.join(self.home, "slow")
+        os.makedirs(slow)
+        with open(os.path.join(slow, "plugin.py"), "w") as f:
+            f.write("import time\ntime.sleep(0.2)\n")
+        sys.path.insert(0, BIN)
+        import plugins
+        plugins._loaded.pop("slow", None)
+        self.addCleanup(plugins._loaded.pop, "slow", None)
+        got = []
+        threads = [threading.Thread(target=lambda: got.append(plugins.load("slow", slow))) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(len({id(m) for m in got}), 1)
 
     def test_off_until_switched_on(self):
         self.assertFalse(self.probe("")["listed"])

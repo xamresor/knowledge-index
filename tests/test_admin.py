@@ -291,3 +291,21 @@ class Questions(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Charts(unittest.TestCase):
+    def test_time_labels_of_many_builds_do_not_overlap(self):
+        rows = [(f"11-{20 + i // 6} {10 + i % 6}:{i:02d}", 300.0, False) for i in range(18)]
+        svg = admin.vbars(rows, " s")
+        xs = [float(x) for x in re.findall(r'<text x="([\d.]+)" y="202" text-anchor="middle">', svg)]
+        self.assertGreater(len(xs), 2)
+        self.assertLess(len(xs), len(rows))
+        label_w = max(len(r[0]) for r in rows) * 6.5
+        self.assertTrue(all(b - a >= label_w for a, b in zip(xs, xs[1:])), xs)
+        self.assertIn('text-anchor="end">11-22 15:17</text>', svg)  # the last label stays inside the chart
+
+    def test_the_axis_stays_close_to_the_largest_value(self):
+        self.assertEqual(admin.nice(455 * 1.1), 600)
+        self.assertEqual(admin.nice(500), 500)
+        self.assertEqual(admin.nice(1.0), 1)
+        self.assertEqual(admin.nice(0.3), 0.4)

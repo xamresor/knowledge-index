@@ -14,6 +14,15 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+- **Fixed: a sign-in refused at random with "permission webhook answered 503".** Two copies of the users
+  store could write `users.json` through one temporary file, and one of them failed with `FileNotFoundError`.
+  Every save now takes its own temporary file, and the plugin and the store load once per process under a lock.
+- **Changed: a `5xx` answer of the permission webhook is `503`, not `403`, and is not cached.** Before, one
+  outage locked the person out for `KB_AUTH_CACHE_SECONDS`.
+- **Build times per step.** `bin/kb` prints the seconds of each step and writes one line per build to
+  `logs/build-steps.log`.
+- **Fixed: the x labels of the build-time chart overlapped,** and the axis jumped to 1,000 for a 455 s maximum.
+  The chart now skips labels that do not fit, and the axis has the steps 4, 6 and 8 too.
 - **Add-on `scip`: precise PHP calls.** At `kb update` the add-on reads a SCIP index (`scip-php`, or a ready
   `index.scip`) and adds EXTRACTED `calls` edges between methods the graph already has (`bin/link_scip.py`).
 - **Docker image for the shared server.** `Dockerfile`, `docker/compose.example.yml` and `docs/docker.md`: one

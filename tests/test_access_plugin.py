@@ -101,7 +101,7 @@ class Slot(unittest.TestCase):
     def test_a_broken_plugin_is_an_outage_not_an_open_door(self):
         self.assertEqual(post(f"{self.base}/local/permissions", {"projects": ["api"]}, "boom")[0], 503)
         init = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
-        self.assertEqual(post(f"{self.base}/mcp", init, "boom")[0], 403)   # the core reads a failed webhook as "no"
+        self.assertEqual(post(f"{self.base}/mcp", init, "boom")[0], 503)   # an outage, still no door
 
     def test_without_a_plugin_and_without_own_users_the_addresses_do_not_exist(self):
         self.assertEqual(post(f"{self.plain_base}/local/login", {"username": "ann", "password": "pw"})[0], 404)

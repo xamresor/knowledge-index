@@ -77,6 +77,16 @@ class FailedBuildKeepsTheGraph(unittest.TestCase):
         self.assertFalse(os.path.exists(self.graph + ".prev"))
 
 
+    def test_a_build_logs_the_seconds_of_each_step(self):
+        p = self.build(fail=False)
+        self.assertEqual(p.returncode, 0, p.stderr[-800:])
+        self.assertRegex(p.stdout, r"==> Merging into one cross-repo graph\n(.*\n)*?    \(\d+s\)")
+        data = os.path.dirname(self.out_dir) if os.path.basename(self.out_dir) == "graphify-out" else self.home
+        with open(os.path.join(data, "logs", "build-steps.log")) as f:
+            lines = f.read().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertRegex(lines[0], r"exit=0 graph \| \d+s Building per-project graphs \| \d+s Merging")
+
 LOGGING_GRAPHIFY = r"""#!/bin/sh
 # Logs every call. update without --force refuses (like graphify's shrink guard) when FAKE_REFUSE is set.
 echo "$*" >> "$FAKE_LOG"

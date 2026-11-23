@@ -47,11 +47,13 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import paths  # noqa: E402
 
 _loaded: dict[str, object] = {}
+_load_lock = threading.RLock()
 
 
 def folder() -> str:
@@ -71,8 +73,17 @@ def installed() -> dict[str, str]:
 
 
 def load(name: str, path: str):
+    """Load a plugin once per process. The lock keeps concurrent first calls (request threads) from making
+    two module objects, which would mean two copies of the plugin's state."""
     if name in _loaded:
         return _loaded[name]
+    with _load_lock:
+        if name in _loaded:
+            return _loaded[name]
+        return _load(name, path)
+
+
+def _load(name: str, path: str):
     spec = importlib.util.spec_from_file_location(f"kb_plugin_{name.replace('-', '_')}",
                                                   os.path.join(path, "plugin.py"))
     mod = importlib.util.module_from_spec(spec)

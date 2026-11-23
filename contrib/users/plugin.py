@@ -35,6 +35,7 @@ Store: `<data>/users.json`, readable by the owner only. Standard library only.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
 import json
@@ -44,6 +45,7 @@ import secrets
 import sys
 import smtplib
 import ssl
+import tempfile
 import threading
 import time
 from email.message import EmailMessage
@@ -147,12 +149,19 @@ class Store:
 
     def _save(self) -> None:
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-        tmp = f"{self.path}.tmp"
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump({"users": self._users}, f, indent=1, sort_keys=True)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, self.path)
+        # A temporary file of its own for every save: another Store on the same file (the CLI, a second load
+        # of the plugin) must not rename it away between our write and our rename.
+        fd, tmp = tempfile.mkstemp(prefix=f".{os.path.basename(self.path)}.", suffix=".tmp",
+                                   dir=os.path.dirname(self.path) or ".")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump({"users": self._users}, f, indent=1, sort_keys=True)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, self.path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
         self._mtime = os.stat(self.path).st_mtime
 
     # ------------------------------------------------------------------ admin side
@@ -579,10 +588,16 @@ def default_path() -> str:
     return os.path.join(str(paths.data_home()), "users.json")
 
 
+_STORE_LOCK = threading.Lock()
+
+
 def store(core=None) -> Store:
+    """The one Store of this process. The lock keeps the first concurrent calls from making two."""
     global STORE
     if STORE is None:
-        STORE = Store(os.path.join(core.KB, "users.json") if core is not None else default_path())
+        with _STORE_LOCK:
+            if STORE is None:
+                STORE = Store(os.path.join(core.KB, "users.json") if core is not None else default_path())
     return STORE
 
 

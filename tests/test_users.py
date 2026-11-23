@@ -239,6 +239,37 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(self.store.permissions(key, ["api"])[0], 401)
 
 
+    def test_two_stores_that_save_at_once_do_not_break_each_other(self):
+        # Two Store objects on one file (two loads of the plugin, or the CLI next to the server) must not share
+        # a temporary file: B's save between A's write and A's rename used to end A with FileNotFoundError.
+        self.store.add("ann", ["api"])
+        other = users.Store(self.path)
+        real_replace = os.replace
+        nested = []
+
+        def replace(src, dst):
+            if not nested:
+                nested.append(1)
+                other.add("bob", ["api"])
+            return real_replace(src, dst)
+
+        with mock.patch.object(users.os, "replace", side_effect=replace):
+            self.store.add("cid", ["api"])
+        self.assertEqual([n for n in os.listdir(self.tmp.name) if n != "users.json"], [])  # no temporary file left
+
+    def test_one_store_for_concurrent_first_calls(self):
+        with mock.patch.object(users, "STORE", None), mock.patch.object(users, "Store") as cls:
+            cls.side_effect = lambda path: (threading.Event().wait(0.05), object())[1]
+            got = []
+            threads = [threading.Thread(target=lambda: got.append(users.store())) for _ in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self.assertEqual(cls.call_count, 1)
+            self.assertEqual(len({id(g) for g in got}), 1)
+
+
 class HttpTest(unittest.TestCase):
     """kb-http answers both webhooks itself and shows the Users tab to an admin of the store."""
 

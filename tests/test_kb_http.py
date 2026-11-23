@@ -128,7 +128,7 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(self.status_of("Bearer unknown"), 401)
         self.assertEqual(self.status_of("Bearer noaccess"), 403)
         self.assertEqual(self.status_of("Bearer gone"), 403)
-        self.assertEqual(self.status_of("Bearer boom"), 403)
+        self.assertEqual(self.status_of("Bearer boom"), 503)       # a 5xx of the webhook is an outage
         self.assertEqual(self.status_of("Bearer none"), 403)       # empty project list
         self.assertEqual(self.status_of("Bearer bad-shape"), 503)  # 200 without projects
 
@@ -137,6 +137,14 @@ class AuthTests(unittest.TestCase):
         for _ in range(2):
             with self.assertRaises(kb_http.AuthError) as cm:
                 a.check("Bearer all")
+            self.assertEqual(cm.exception.status, 503)
+        self.assertEqual(a.upstream_calls, 2)
+
+    def test_a_5xx_of_the_webhook_is_503_and_not_cached(self):
+        a = self.auth(ttl=60)
+        for _ in range(2):
+            with self.assertRaises(kb_http.AuthError) as cm:
+                a.check("Bearer boom")
             self.assertEqual(cm.exception.status, 503)
         self.assertEqual(a.upstream_calls, 2)
 

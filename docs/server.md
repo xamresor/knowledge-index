@@ -24,7 +24,7 @@ Identity is yours, not this tool's. The server talks to your system through **ac
 webhooks ([access-protocol.md](access-protocol.md)): the *login* webhook turns a user name, password
 and code into a token; the *permission* webhook gets that token and the KB's project names and answers
 with the allowed ones, or `"*"`. Your system needs to know nothing about the KB. 401 stays 401, any
-other refusal is 403, an unreachable webhook is 503 (never cached). Verdicts are cached
+other refusal is 403, an unreachable webhook or a 5xx answer is 503 (never cached). Verdicts are cached
 `KB_AUTH_CACHE_SECONDS` (60) per SHA-256 of the token; the token is never logged.
 
 | Variable | Default | Meaning |

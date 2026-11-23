@@ -204,6 +204,9 @@ class Authenticator:
             return AuthError(503, "auth service unreachable")
         if status == 401:
             return AuthError(401, "invalid or expired token")
+        if status >= 500:  # an outage of the webhook, not a refusal: 503, and the cache does not keep it
+            log(f"auth: permission webhook answered {status}")
+            return AuthError(503, "auth service unavailable")
         if status != 200:
             return AuthError(403, f"access denied (permission webhook answered {status})")
         try:

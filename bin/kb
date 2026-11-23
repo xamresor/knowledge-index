@@ -30,11 +30,31 @@ export GRAPHIFY_VIZ_NODE_LIMIT="${GRAPHIFY_VIZ_NODE_LIMIT:-20000}"
 GRAPH_PREV=""
 BUILD_START=""
 BUILD_KIND=""
+# Seconds per build step: `step "title"` closes the open step, prints its time and opens the next one.
+STEP_NAME=""
+STEP_START=0
+STEP_TIMES=""
+step_end() {
+  [ -n "$STEP_NAME" ] || return 0
+  local took=$(( $(date +%s) - STEP_START ))
+  echo "    (${took}s)"
+  STEP_TIMES+=" | ${took}s ${STEP_NAME}"
+  STEP_NAME=""
+}
+step() {
+  step_end
+  STEP_NAME="$1"
+  STEP_START=$(date +%s)
+  echo "==> $1"
+}
 keep_graph() {
   local rc=$?
+  step_end || true
   if [ -n "$BUILD_START" ]; then  # one line per build: when, exit, seconds, which build (admin charts)
     mkdir -p "$KB_DATA/logs"
     echo "$(date '+%F %T') exit=$rc $(( $(date +%s) - BUILD_START ))s $BUILD_KIND" >>"$KB_DATA/logs/builds.log"
+    # the same build split by step, to see where the time goes
+    [ -z "$STEP_TIMES" ] || echo "$(date '+%F %T') exit=$rc $BUILD_KIND$STEP_TIMES" >>"$KB_DATA/logs/build-steps.log"
   fi
   if [ "$rc" -ne 0 ] && [ -n "$GRAPH_PREV" ] && [ -f "$GRAPH_PREV" ]; then
     mv -f "$GRAPH_PREV" "$OUT/graph.json"
@@ -118,7 +138,7 @@ stage_and_build() {
 
 build_graph() {
   require_cfg
-  echo "==> Building per-project graphs"
+  step "Building per-project graphs"
   local merge_inputs=() routes_specs=() scip_specs=()
   while IFS='|' read -r name code docs routes calls serves; do
     [ -z "$name" ] && continue
@@ -189,12 +209,12 @@ build_graph() {
     } | sha256sum)
   if [ "${BUILD_KIND:-}" != "build" ] && [ "${KB_FORCE:-0}" != "1" ] && [ -f "$OUT/graph.json" ] \
       && [ -f "$post_file" ] && [ "$(cat "$post_file")" = "$post_sig" ]; then
-    echo "==> Inputs unchanged — merged graph kept"
+    echo "    Inputs unchanged — merged graph kept"
     return 0
   fi
   rm -f "$post_file"   # a run that dies half-way must not leave a signature that matches
 
-  echo "==> Merging into one cross-repo graph"
+  step "Merging into one cross-repo graph"
   # From here on graph.json is rewritten in place, step by step. Keep the last good one aside, so a
   # build that dies half-way does not leave a half-built graph for the tools to serve (keep_graph).
   if [ -f "$OUT/graph.json" ]; then
@@ -208,7 +228,7 @@ build_graph() {
     cp "${merge_inputs[0]}" "$OUT/graph.json"
   fi
 
-  echo "==> Injecting HTTP edges (frontend -> controllers)"
+  step "Injecting HTTP edges (frontend -> controllers)"
   # re-walk config for calls/serves with their frontend roots
   while IFS='|' read -r name code docs routes calls serves; do
     [ -z "$calls" ] || [ -z "$serves" ] && continue
@@ -221,15 +241,15 @@ build_graph() {
     done
   done < <(read_projects)
 
-  echo "==> Canonicalizing duplicate symbol/reference nodes"
+  step "Canonicalizing duplicate symbol/reference nodes"
   "$PY" "$KB/bin/dedupe.py" "$OUT/graph.json"
-  echo "==> Decluttering framework god nodes (before clustering)"
+  step "Decluttering framework god nodes (before clustering)"
   "$PY" "$KB/bin/declutter.py" "$OUT/graph.json" "$([ -f "$KB_CONFIG/kb.hubs.txt" ] && echo "$KB_CONFIG/kb.hubs.txt" || echo "$KB/kb.hubs.txt")"
-  echo "==> Clustering (locks final community ids)"
+  step "Clustering (locks final community ids)"
   graphify cluster-only "$KB_DATA" --no-label >/dev/null
-  echo "==> Labeling communities by namespace/domain"
+  step "Labeling communities by namespace/domain"
   "$PY" "$KB/bin/label_namespaces.py" "$OUT/graph.json" "$OUT/.graphify_labels.json" | head -1
-  echo "==> Re-rendering report + full visualization with labels"
+  step "Re-rendering report + full visualization with labels"
   # Clustering and labeling are mutually dependent THROUGH FILES: `cluster-only` can renumber
   # community ids, while the labels file is keyed by those ids. So this is a two-step fixpoint, not a
   # redundant call: label (ids from pass 1) -> re-render with labels (ids may shift) -> label again.
@@ -237,24 +257,24 @@ build_graph() {
   graphify cluster-only "$KB_DATA" --no-label >/dev/null
   "$PY" "$KB/bin/label_namespaces.py" "$OUT/graph.json" "$OUT/.graphify_labels.json" >/dev/null
 
-  echo "==> Enriching with node types, domains, db_table nodes + domain anchors"
+  step "Enriching with node types, domains, db_table nodes + domain anchors"
   "$PY" "$KB/bin/enrich.py" "$OUT/graph.json" "$KB_DATA/repos"
-  echo "==> Adding data-layer links (eloquent model rels, FK table->table, SQL code->table)"
+  step "Adding data-layer links (eloquent model rels, FK table->table, SQL code->table)"
   "$PY" "$KB/bin/link_data.py" "$OUT/graph.json" "$KB_DATA/repos"
   # Add-on `scip` (off by default): precise calls from a SCIP index. Before the typed-call linker,
   # so that one does not add an INFERRED copy of an edge the index proves.
   "$PY" "$KB/bin/link_scip.py" "$OUT/graph.json" "$KB_DATA/repos" "${scip_specs[@]}"
-  echo "==> Linking PHP calls through typed variables and properties"
+  step "Linking PHP calls through typed variables and properties"
   "$PY" "$KB/bin/link_php_calls.py" "$OUT/graph.json" "$KB_DATA/repos"
   # Docs as graph nodes (bin/lang/markdown.py): [[wikilink]] and relative links are EXTRACTED edges,
   # a bare symbol mention is INFERRED and capped. Runs after the code plugins — it points at their nodes.
   if [ "${#doc_roots[@]}" -gt 0 ]; then
-    echo "==> Linking docs into the graph (${#doc_roots[@]} doc roots)"
+    step "Linking docs into the graph (${#doc_roots[@]} doc roots)"
     "$PY" "$KB/bin/link_docs.py" "$OUT/graph.json" "${doc_roots[@]}"
   fi
-  echo "==> Mining rationale comments (NOTE/WHY/HACK/SECURITY -> rationale nodes)"
+  step "Mining rationale comments (NOTE/WHY/HACK/SECURITY -> rationale nodes)"
   "$PY" "$KB/bin/link_rationale.py" "$OUT/graph.json" "$KB_DATA/repos"
-  echo "==> Rendering custom typed/domain visualization"
+  step "Rendering custom typed/domain visualization"
   "$PY" "$KB/bin/render_viz.py" "$OUT/graph.json" "$OUT"
   rm -f "$OUT/kb-graph.html"   # 0.5.0: the shell moved to web/; drop the stale generated page
   echo "    graphify graph.html (raw upstream view) -> $OUT · shell: web/index.html"
@@ -276,11 +296,11 @@ build_contracts() {
   done < <(read_projects)
   # The KB service's own contract docs, if this checkout has any (<data>/docs/contracts/).
   [ -d "$KB_DATA/docs/$CONTRACT_DIR" ] && docs_specs+=("$SELF_DOCS=$KB_DATA/docs")
-  echo "==> Building the contract index (routes + frontend call sites)"
+  step "Building the contract index (routes + frontend call sites)"
   "$PY" "$KB/bin/contracts.py" contracts "$OUT/graph.json" "$OUT/contracts.json" "${specs[@]}"
-  echo "==> Building the connection map (contract docs + HTTP calls)"
+  step "Building the connection map (contract docs + HTTP calls)"
   "$PY" "$KB/bin/contracts.py" connections "$OUT/contracts.json" "$OUT/connections.json" "${docs_specs[@]}"
-  echo "==> Finding problems (contract docs, unknown routes)"
+  step "Finding problems (contract docs, unknown routes)"
   "$PY" "$KB/bin/contracts.py" problems "$OUT/connections.json" "$OUT/problems.json" "${prob_specs[@]}"
 }
 
@@ -331,7 +351,7 @@ qmd_embed() {
 
 build_kb() {
   require_cfg
-  echo "==> Staging + indexing docs into qmd collection '$COLLECTION'"
+  step "Staging + indexing docs into qmd collection '$COLLECTION'"
   [ -d "$KB/.qmd" ] || qmd init >/dev/null 2>&1 || true
   # Every project's docs are staged under $DOCS_STAGE/<project>/ (one qmd collection each, below).
   # rsync --delete in place, never rm -rf first: a search during a rebuild still finds the docs.

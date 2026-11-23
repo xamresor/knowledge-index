@@ -68,7 +68,7 @@ Content-Type: application/json
 | `200 {"user": {…}, "projects": "*"}` | every project of the question |
 | `401` | the token is unknown or expired: the client signs in again |
 | `403`, or `200` with an empty list | the person may not use the KB |
-| unreachable, or a body of another shape | `503`, not cached |
+| unreachable, a `5xx` answer, or a body of another shape | `503`, not cached |
 
 `user` may hold any fields; the KB shows the first of `name`, `uname`, `username`, `id`, `uid` in its
 logs and admin pages, and matches `KB_ADMINS` against them.

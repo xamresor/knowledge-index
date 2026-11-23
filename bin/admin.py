@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import math
 import os
 import secrets
 import subprocess
@@ -553,11 +554,10 @@ def questions_page(base: str, csrf: str, usage, note: str = "") -> bytes:
 
 def nice(top: float) -> float:
     """A round axis maximum at or above `top` (1, 2, 2.5, 5 x 10^n)."""
-    import math
     if top <= 0:
         return 1
     e = 10 ** math.floor(math.log10(top))
-    for m in (1, 2, 2.5, 5, 10):
+    for m in (1, 2, 2.5, 4, 5, 6, 8, 10):  # 4, 6, 8: 455 s gets a 600 axis, not 1,000
         if m * e >= top:
             return m * e
     return 10 * e
@@ -600,6 +600,10 @@ def vbars(rows: list[tuple[str, float, bool]], unit: str, width: int = 640, heig
     pw, ph = width - left - 4, height - bottom - top_pad
     step = pw / len(rows)
     bw = max(3, min(28, step * 0.72))
+    # Enough room for each x label (11 px text, about 6.5 units a character); the last bar always has its label.
+    need = max(len(label) for label, _, _ in rows) * 6.5 + 8
+    every = max(every, math.ceil(need / step))
+    labelled = set(range(len(rows) - 1, -1, -every))
     out = [f'<svg viewBox="0 0 {width} {height}" width="100%" role="img">']
     for frac in (0, .25, .5, .75, 1):
         y = top_pad + ph * (1 - frac)
@@ -615,8 +619,12 @@ def vbars(rows: list[tuple[str, float, bool]], unit: str, width: int = 640, heig
                        f'<text class="badtxt" x="{x + bw / 2:.1f}" y="{y - 5:.1f}" text-anchor="middle">failed</text>')
         else:
             out.append(f'<rect class="bar" x="{x:.1f}" y="{y:.1f}" width="{bw:.1f}" height="{bh:.1f}" rx="1.5">{tip}</rect>')
-        if i % every == 0 or i == len(rows) - 1:
-            out.append(f'<text x="{x + bw / 2:.1f}" y="{height - 8}" text-anchor="middle">{esc(label)}</text>')
+        if i in labelled:
+            cx = x + bw / 2
+            if cx + len(label) * 3.25 > width - 2:  # a label at the right edge ends there instead of being cut
+                out.append(f'<text x="{width - 2}" y="{height - 8}" text-anchor="end">{esc(label)}</text>')
+            else:
+                out.append(f'<text x="{cx:.1f}" y="{height - 8}" text-anchor="middle">{esc(label)}</text>')
     out.append("</svg>")
     return "".join(out)
 
