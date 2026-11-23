@@ -1290,10 +1290,9 @@ def _call_tool(name: str, args: dict, allowed: set[str] | None = None, caller: s
             args["budget"] = max(300, min(length // 4, CODE_BUDGET_MAX))
         if page > 1:  # without a cursor: page by hits and nodes, run again
             return _dispatch(name, {**args, "_page": page}, allowed)
-        # page 1 keeps a longer answer (4x the hits and the code budget) behind a cursor
-        want = int(args.get("limit") or 5)
-        args = {**args, "limit": want * CURSOR_WIDEN,
-                "budget": min(_budget(args) * CURSOR_WIDEN, CODE_BUDGET_MAX * CURSOR_WIDEN)}
+        # page 1 keeps a longer code answer (4x the budget) behind a cursor. The docs half keeps
+        # `limit`: a caller who asks for 2 documents gets 2; `page: 2` gives the next ones.
+        args = {**args, "budget": min(_budget(args) * CURSOR_WIDEN, CODE_BUDGET_MAX * CURSOR_WIDEN)}
     text = _dispatch(name, args, allowed)
     first = paginate(text, page, length)
     if "[page " not in first:

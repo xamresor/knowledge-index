@@ -279,7 +279,7 @@ class DocsFilterTests(unittest.TestCase):
         self.assertNotIn("qmd://kb-api/auth.md", out)
         self.assertNotIn("Other collection", out)
         self.assertNotIn("-c", cmds[0])        # every collection is searched, then filtered
-        self.assertIn("100", cmds[0])          # 5x the hits of a widened page 1 (4x 5) are asked for
+        self.assertIn("25", cmds[0])           # 5x the hits (limit 5) are asked for, then filtered
 
     def test_nothing_allowed(self):
         with mock.patch.object(kb_core, "run", lambda cmd, **kw: self.OUT):

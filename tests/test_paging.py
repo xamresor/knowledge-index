@@ -107,6 +107,19 @@ class Paginate(unittest.TestCase):
         with self.assertRaises(kb_core.ToolError):
             kb_core.call_tool("contracts_search", {"query": "x", "page": 0})
 
+    def test_docs_search_returns_at_most_limit_hits(self):
+        # a search with limit 2 printed 8 documents: page 1 asked qmd for 4x the limit
+        seen = []
+
+        def fake_docs(args, allowed=None):
+            seen.append(args.get("limit"))
+            return "[projects: api]\n\n" + "".join(
+                f"qmd://kb-api/d{i}.md:1 #{i}\nTitle: D{i}\n\n" for i in range(int(args.get("limit") or 5)))
+        with mock.patch.object(kb_core, "search_docs", fake_docs):
+            out = kb_core.call_tool("search", {"q": "release cut", "domain": "docs", "limit": 2})
+        self.assertEqual(out.count("qmd://"), 2, out)
+        self.assertEqual(seen, [2])
+
     def test_docs_page_two_skips_the_first_hits(self):
         hits = "".join(f"qmd://kb-api/d{i}.md:1 #{i}\nTitle: D{i}\n\n" for i in range(10))
         out = kb_core._page_hits("[projects: api]\n\n" + hits, 2, 5)
