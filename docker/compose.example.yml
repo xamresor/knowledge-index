@@ -1,0 +1,62 @@
+# Knowledge Index on a shared server: a template (docs/docker.md). Copy it next to your config,
+# replace the /srv paths and the webhook addresses, then:
+#   docker compose -f compose.yml up -d                      # the KB server only
+#   docker compose -f compose.yml --profile code-mode up -d  # plus the run_code sandbox
+# Build the image first: docker build -t knowledge-index:local /path/to/knowledge-index
+
+services:
+  kb:
+    image: knowledge-index:local
+    init: true                     # reaps the graphify and qmd child processes
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8790:8790"      # loopback only: put a TLS proxy in front (examples/server/)
+    environment:
+      KB_SERVER: "on"
+      KB_PERMISSION_URL: https://api.example.com/kb/permissions
+      KB_LOGIN_URL: https://api.example.com/kb/login
+      # KB_HOOK_HEADERS: '{"X-Kb-Key": "..."}'
+      KB_ADDONS: tool-multicall,fast-routes,metrics,admin
+      # With the sandbox below: add code-mode to KB_ADDONS. run_code then talks to that container.
+      KB_SANDBOX_SOCKET: /run/kb-sandbox/sandbox.sock
+      KB_ROUTES_DIR: /routes       # <project>.json per Laravel app, written by the app's container
+      KB_QMD_BACKEND: llama        # llama | none | other: the first build downloads a small model
+      KB_DOCS_MODE: light
+    volumes:
+      - kb-data:/var/lib/knowledge-index           # graph, docs index, models, logs, users
+      - /srv/kb/config:/etc/knowledge-index:ro     # kb.projects.toml (paths under /code)
+      - /srv/kb/routes:/routes:ro                  # route tables, see docs/docker.md
+      - /srv/shop/api:/code/api:ro                 # the indexed code, read-only
+      - /srv/shop/web:/code/web:ro
+      - sandbox-socket:/run/kb-sandbox
+    mem_limit: 2g
+
+  # The run_code sandbox in its own container: no network, a read-only root, no capabilities, and
+  # none of the KB volumes. The KB server reaches it through a Unix socket in a shared volume.
+  sandbox:
+    image: knowledge-index:local
+    profiles: ["code-mode"]
+    command: ["node", "/opt/kb/sandbox/socket-server.mjs"]
+    init: true
+    restart: unless-stopped
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp:size=16m"]
+    environment:
+      KB_SANDBOX_SOCKET: /run/kb-sandbox/sandbox.sock
+      KB_SANDBOX_MAX: "4"          # programs at once
+      KB_RUN_SECONDS: "20"         # keep equal to the KB server's value
+    volumes:
+      - sandbox-socket:/run/kb-sandbox
+    healthcheck:
+      test: ["CMD", "test", "-S", "/run/kb-sandbox/sandbox.sock"]
+      interval: 30s
+    pids_limit: 64
+    mem_limit: 512m
+    cpus: 1.0
+
+volumes:
+  kb-data:
+  sandbox-socket:

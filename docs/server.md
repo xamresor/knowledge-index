@@ -11,6 +11,8 @@ graph tools run on a filtered copy of the graph, doc hits are checked by their r
 docs and the cross-repo `http_request` edges stay visible to everyone: they are the interfaces between
 services (`KB_CONTRACT_EDGES=0` hides the edges too).
 
+To run it in Docker, with graphify, rustworkx and qmd in one image, see [Docker](docker.md).
+
 **It does not start unless you switch it on.** A local install never opens a port by accident:
 
 ```bash

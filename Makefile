@@ -1,4 +1,4 @@
-.PHONY: install check build graph kb update label status open vendor demo demo-build qmd-backend serve test help
+.PHONY: install check build graph kb update label status open vendor demo demo-build qmd-backend serve test mutation help
 .DEFAULT_GOAL := help
 
 install: ## First-run setup: check requirements, create config, print the MCP snippet
@@ -48,6 +48,9 @@ serve:  ## HTTP API on 127.0.0.1:8899 (same core as MCP; PORT=… TOKEN=… to o
 
 test:   ## Run the unit tests (stdlib unittest, no deps)
 	@python3 -m unittest discover -s tests
+
+mutation: ## Break the link_http matcher on purpose; every mutant must fail the tests
+	@python3 bench/mutation.py
 
 help:
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:.*## /\t/' | sort

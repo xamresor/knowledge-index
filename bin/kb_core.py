@@ -40,6 +40,8 @@ from concurrent.futures import ThreadPoolExecutor
 import access
 import addons
 import contracts
+import datadict
+import docs_grade
 import paths
 import query_build
 import warm
@@ -520,6 +522,8 @@ def instructions(projects: list[str] | None = None) -> str:
         + ("a lookup that needs the answer of another, or a filter over a long answer -> run_code "
            "(a small program calling kb(tool, args)); " if addons.on("code-mode") else "") +
         "how A reaches B -> graph_routes (several ways, with the routes they cross) or graph_path (one shortest); "
+        + ("which table holds some data -> search (its data dictionary block names the table, grain and "
+           "the columns that may be summed); " if addons.on("datadict") else "") +
         "a diff or a pull request to review -> review_context (pass the git diff); an exact string, "
         "config key, SQL or error text -> code_grep; a free question -> search (domain docs, code or both). "
         "Trust: edges marked EXTRACTED come from the syntax; INFERRED ones (http_request, eloquent, "
@@ -537,6 +541,9 @@ RUN_SECONDS = int(os.environ.get("KB_RUN_SECONDS", "20"))
 _SANDBOX_PKG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sandbox")
 _SANDBOX_DATA = os.path.join(str(paths.data_home()), "sandbox")
 SANDBOX = _SANDBOX_DATA if os.path.isdir(os.path.join(_SANDBOX_DATA, "node_modules")) else _SANDBOX_PKG
+# Set: run_code connects to a sandbox service on this Unix socket (sandbox/socket-server.mjs, e.g. a
+# second container without network, docs/docker.md) instead of starting Node here. Same protocol.
+SANDBOX_SOCKET = os.environ.get("KB_SANDBOX_SOCKET", "")
 NOT_IN_BATCH = {"batch", "run_code"}
 
 # One list, published by both adapters.
@@ -562,6 +569,10 @@ TOOLS = [
          "min_score": {"type": "number", "description": "drop docs results below this score"},
          "expand_aliases": {"type": "boolean", "description": "apply the alias table (default true)"},
          "explain": {"type": "boolean", "description": "include retrieval score traces"},
+         "refuse": {"type": "boolean",
+                    "description": "docs: grade the first hit; when it holds too little of the question's "
+                                   "words, try a keyword-only search, then answer 'not found' and mark the "
+                                   "nearest hits as weak (default true; false = always the nearest hits)"},
          "budget": {"type": "integer", "description": "code: answer size in tokens (default 1800, "
                                                      "max 8000); raise it when the result says it was truncated"}},
          "required": ["q"]}},
@@ -720,7 +731,7 @@ for _t in TOOLS:
 # pre-fills them. `project` has none to write: without it the session's projects are used.
 DEFAULTS = {
     "search": {"domain": "both", "mode": "auto", "limit": 5, "expand_aliases": True, "explain": False,
-               "budget": CODE_BUDGET},
+               "refuse": True, "budget": CODE_BUDGET},
     "graph_routes": {"k": 3, "project": "all"},
 }
 for _t in TOOLS:
@@ -914,9 +925,14 @@ def _qmd_cmd(args: dict, query: str) -> list[str]:
     mode = args.get("mode", "auto")
     if DOCS_MODE == "bm25":
         mode = "lex"  # the server has no model to spare
-    verb = {"lex": "search", "vec": "vsearch"}.get(mode, "query")
-    if verb == "query":
-        query = query_build.build(query)
+    verb = "search" if mode == "lex" else "query"
+    if mode == "vec":
+        # Not `qmd vsearch`: it always expands the query with the 1.7B generation model (a 1.3 GB
+        # download and minutes on a CPU). A `vec:` query document embeds the text as it is, as the
+        # warm worker does (_searches).
+        query = f"vec: {query}"
+    elif verb == "query":
+        query = query_build.build(query, want_vector=not args.get("_lex_only"))
     cmd = [verb, query]
     if verb == "query" and DOCS_MODE == "light":
         cmd.append("--no-rerank")
@@ -944,6 +960,14 @@ def search_docs(args: dict, allowed: set[str] | None = None) -> str:
         if expanded != q:
             note = f"[alias expansion: {q!r} -> {expanded!r}]\n\n"
             q = expanded
+    head, out = _docs_scoped(args, q, allowed)
+    if args.get("refuse", True):
+        out = _judge(args, q, out, lambda extra: _docs_scoped({**args, **extra}, q, allowed)[1])
+    return note + head + out
+
+
+def _docs_scoped(args: dict, q: str, allowed: set[str] | None) -> tuple[str, str]:
+    """(the `[projects: ...]` header, the hits) of one docs search inside the caller's projects."""
     if allowed is not None:
         want = int(args.get("limit") or 5)
         projects, label, _ = scope_projects(args, allowed)
@@ -952,17 +976,53 @@ def search_docs(args: dict, allowed: set[str] | None = None) -> str:
         if narrow and set(narrow) != allowed:   # the caller narrowed: only those collections
             out = _filter_hits(_docs_once({**scoped, "project": ",".join(narrow), "limit": want * 5}, q),
                                set(narrow), want)
-            return note + f"[projects: {label}]\n\n" + out
+            return f"[projects: {label}]\n\n", out
         out = _filter_hits(_docs_once({**scoped, "project": "all", "limit": want * 5}, q),
                            allowed, want)
-        return note + f"[projects: {', '.join(sorted(allowed))} + contract docs]\n\n" + out
+        return f"[projects: {', '.join(sorted(allowed))} + contract docs]\n\n", out
     out = _docs_once(args, q)
     label = resolve_collections(args)[1]
     if _empty(out) and label.endswith("(auto)"):
         # the session's own project had nothing — widen instead of returning empty
         out = _docs_once({**args, "project": "all"}, q)
         label = f"all (nothing in {label[:-7]})"
-    return note + f"[projects: {label}]\n\n" + out
+    return f"[projects: {label}]\n\n", out
+
+
+WEAK_SHOWN = 3   # hits kept under a refusal, marked weak (see _judge)
+
+
+def _judge(args: dict, q: str, out: str, rerun) -> str:
+    """The "is this enough?" check (bin/docs_grade.py) on a docs answer.
+
+    A good first hit: the answer is returned unchanged. A weak one: in auto/hybrid mode, one
+    keyword-only search (the same query document without its `vec:` line, no model, cheap) and its
+    first hit is graded again; if that one is good, it is returned under a note. Otherwise the
+    answer is "not found". The nearest hits stay below the refusal, at most WEAK_SHOWN, marked as
+    weak: the grade is a heuristic and turns away some answerable questions (docs/design.md, "Docs search: an honest not found"),
+    so the caller can still open them, but it cannot mistake them for a confident answer."""
+    if docs_grade.first_hit(out) is None:
+        return out
+    index = docs_grade.open_index(KB)
+    try:
+        grade = docs_grade.grade(q, out, index)
+        if not grade.weak:
+            return f"[grade: {grade.label()}]\n\n{out}" if args.get("explain") else out
+        if args.get("mode", "auto") in ("auto", "hybrid") and DOCS_MODE != "bm25":
+            lex = rerun({"_lex_only": True})
+            lex_grade = docs_grade.grade(q, lex, index)
+            if docs_grade.first_hit(lex) and not lex_grade.weak:
+                return (f"[the first result was weak ({grade.label()}); keyword-only results below, "
+                        f"grade: {lex_grade.label()}]\n\n{lex}")
+    finally:
+        if index is not None:
+            index.close()
+    blocks = re.split(r"(?m)^(?=qmd://)", out)
+    head = blocks[0] if blocks[0].startswith("[") else ""
+    weak = "".join(blocks[1:1 + WEAK_SHOWN]).rstrip()
+    return (f"{docs_grade.REFUSED_MARK} no document answers this well enough. Grade: {grade.label()}]\n"
+            f"The nearest hits below are weak: probably not the answer. Search with other words, or "
+            f"pass refuse: false for the plain nearest hits.\n\n{head}{weak}")
 
 
 def _filter_hits(out: str, allowed: set[str], keep: int) -> str:
@@ -987,7 +1047,7 @@ def _searches(args: dict, q: str) -> tuple[list[dict], str | None]:
     if mode == "vec":
         return [{"type": "vec", "query": q}], None
     searches, intent = [], None
-    for line in query_build.build(q).split("\n"):
+    for line in query_build.build(q, want_vector=not args.get("_lex_only")).split("\n"):
         kind, sep, text = line.partition(":")
         kind, text = kind.strip(), text.strip()
         if not sep or not text:
@@ -1026,8 +1086,42 @@ def _docs_once(args: dict, q: str) -> str:
 
 
 def search_code(args: dict, allowed: set[str] | None = None) -> str:
-    """Code half of `search`: a scoped subgraph for the question."""
-    return graph_call(["graphify", "query", args["q"]], args, allowed)
+    """Code half of `search`: a scoped subgraph for the question. With the `datadict` add-on, the
+    tables whose meaning matches the question come first (bin/datadict.py)."""
+    out = graph_call(["graphify", "query", args["q"]], args, allowed)
+    if addons.on("datadict"):
+        out = datadict.with_search(out, args["q"], datadict.entries(_dict_scope(args, allowed)))
+    return out
+
+
+def _dict_scope(args: dict, allowed: set[str] | None) -> set[str] | None:
+    """Whose data dictionaries a call reads: the named projects, else every project the caller may
+    see (a dictionary is small, so a session's own scope is not narrowed further)."""
+    want = (args.get("project") or "").strip()
+    if want and want.lower() != "all":
+        names = {n.strip() for n in want.split(",") if n.strip()}
+        return names if allowed is None else names & allowed
+    return allowed
+
+
+def _explain(args: dict, allowed: set[str] | None) -> str:
+    """graph_explain. With the `datadict` add-on, a table node shows its meaning, and a business term
+    that names no node is read as the table it stands for."""
+    symbol = args["symbol"]
+    if not addons.on("datadict"):
+        return graph_call(["graphify", "explain", symbol], args, allowed, symbol)
+    book = datadict.entries(_dict_scope(args, allowed))
+    note = ""
+    low = symbol.strip().lower()
+    if book and not any(r[0].lower() == low for r in labels(GRAPH)):
+        tables = datadict.term_tables(symbol, book)
+        if len(tables) == 1:
+            note = f"[data dictionary: {symbol!r} is the table {tables[0]}]\n\n"
+            symbol = tables[0]
+        elif tables:
+            note = f"[data dictionary: {symbol!r} names several tables: {', '.join(tables)}; ask for one]\n\n"
+    out = graph_call(["graphify", "explain", symbol], args, allowed, symbol)
+    return note + datadict.with_explain(out, book)
 
 
 def _page_hits(out: str, page: int, want: int) -> str:
@@ -1069,8 +1163,9 @@ def search(args: dict, allowed: set[str] | None = None) -> str:
     if page > 1:
         want = int(args.get("limit") or 5)
 
-        def docs_page():
-            return _page_hits(search_docs({**args, "limit": want * page}, allowed), page, want)
+        def docs_page():   # the check judged page 1; later pages are the plain nearest hits
+            return _page_hits(search_docs({**args, "limit": want * page, "refuse": False}, allowed),
+                              page, want)
 
         def code_page():
             return _code_page(args, allowed, page)
@@ -1293,32 +1388,45 @@ def run_code(code: str, allowed: set[str] | None, caller: str | None) -> str:
     import resource
     import select
 
-    if not os.path.isdir(os.path.join(SANDBOX, "node_modules", "quickjs-emscripten")):
-        raise ToolError("run_code: the sandbox is not installed (kb addon install code-mode)")
     if len(code) > 20_000:
         raise ToolError("run_code: the program is longer than 20000 characters")
+    proc = sock = None
+    if SANDBOX_SOCKET:  # the sandbox service (sandbox/socket-server.mjs) starts the runner and limits it
+        import socket
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.connect(SANDBOX_SOCKET)
+        except OSError as e:
+            sock.close()
+            raise ToolError(f"run_code: the sandbox service at {SANDBOX_SOCKET} does not answer "
+                            f"({e.strerror or e})") from None
+        rd, wr = sock.makefile("r", encoding="utf-8"), sock.makefile("w", encoding="utf-8")
+    else:
+        if not os.path.isdir(os.path.join(SANDBOX, "node_modules", "quickjs-emscripten")):
+            raise ToolError("run_code: the sandbox is not installed (kb addon install code-mode)")
 
-    def limits():  # the Node process itself: CPU seconds and open files
-        resource.setrlimit(resource.RLIMIT_CPU, (RUN_SECONDS + 10, RUN_SECONDS + 10))
-        resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
+        def limits():  # the Node process itself: CPU seconds and open files
+            resource.setrlimit(resource.RLIMIT_CPU, (RUN_SECONDS + 10, RUN_SECONDS + 10))
+            resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
 
-    proc = subprocess.Popen(
-        ["node", "--permission", f"--allow-fs-read={SANDBOX}", os.path.join(SANDBOX, "runner.mjs")],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=SANDBOX,
-        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "NODE_OPTIONS": ""}, preexec_fn=limits)
+        proc = subprocess.Popen(
+            ["node", "--permission", f"--allow-fs-read={SANDBOX}", os.path.join(SANDBOX, "runner.mjs")],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=SANDBOX,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "NODE_OPTIONS": ""}, preexec_fn=limits)
+        rd, wr = proc.stdout, proc.stdin
     deadline = time.monotonic() + RUN_SECONDS + 15  # the script's own deadline + tool time
     try:
-        assert proc.stdin and proc.stdout
-        proc.stdin.write(json.dumps({"code": code, "deadline_ms": RUN_SECONDS * 1000,
-                                     "max_calls": RUN_CALLS, "memory_mb": 64}) + "\n")
-        proc.stdin.flush()
+        assert rd and wr
+        wr.write(json.dumps({"code": code, "deadline_ms": RUN_SECONDS * 1000,
+                             "max_calls": RUN_CALLS, "memory_mb": 64}) + "\n")
+        wr.flush()
         while True:
             left = deadline - time.monotonic()
-            if left <= 0 or not select.select([proc.stdout], [], [], left)[0]:
+            if left <= 0 or not select.select([rd], [], [], left)[0]:
                 raise ToolError(f"run_code: stopped after {RUN_SECONDS + 15} s")
-            line = proc.stdout.readline()
+            line = rd.readline()
             if not line:
-                err = (proc.stderr.read() if proc.stderr else "")[-400:]
+                err = ((proc.stderr.read() if proc and proc.stderr else "") or "")[-400:]
                 raise ToolError(f"run_code: the sandbox stopped ({err.strip() or 'no message'})")
             msg = json.loads(line)
             if msg.get("done"):
@@ -1331,15 +1439,21 @@ def run_code(code: str, allowed: set[str] | None, caller: str | None) -> str:
                     reply = {"result": call_tool(tool, dict(args), allowed, caller)}
                 except ToolError as e:
                     reply = {"error": str(e)}
-            proc.stdin.write(json.dumps(reply) + "\n")
-            proc.stdin.flush()
+            wr.write(json.dumps(reply) + "\n")
+            wr.flush()
     finally:
-        if proc.poll() is None:
-            proc.kill()
-        proc.wait(timeout=5)
-        for pipe in (proc.stdin, proc.stdout, proc.stderr):
+        if proc is not None:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)
+        for pipe in (wr, rd, proc.stderr if proc else None):
             if pipe:
-                pipe.close()
+                try:
+                    pipe.close()
+                except OSError:  # the other end is gone: nothing left to flush
+                    pass
+        if sock is not None:
+            sock.close()
     parts = []
     if msg.get("output"):
         parts.append(msg["output"].rstrip())
@@ -1398,9 +1512,10 @@ def _dispatch(name: str, args: dict, allowed: set[str] | None) -> str:
         return code_grep(args, allowed)
     if name == "repo_map":
         return repo_map(args, allowed)
-    if name in ("graph_explain", "graph_affected"):
-        verb = "explain" if name == "graph_explain" else "affected"
-        return graph_call(["graphify", verb, args["symbol"]], args, allowed, args["symbol"])
+    if name == "graph_explain":
+        return _explain(args, allowed)
+    if name == "graph_affected":
+        return graph_call(["graphify", "affected", args["symbol"]], args, allowed, args["symbol"])
     if name == "docs_get":
         return docs_get(args["path"], allowed)
     if name == "contracts_search":
@@ -1408,7 +1523,8 @@ def _dispatch(name: str, args: dict, allowed: set[str] | None) -> str:
     if name == "connections":
         return _index(contracts.connections, args.get("service", ""))
     if name == "problems":
-        return _index(contracts.problems, args.get("project", ""), allowed)
+        extra = (datadict.problems(GRAPH, allowed, set(PROJECTS)) if addons.on("datadict") else None)
+        return _index(contracts.problems, args.get("project", ""), allowed, None, extra)
     if name in PLUGIN_TOOLS:
         return str(PLUGIN_TOOLS[name].call(name, args, allowed, sys.modules[__name__]))
     if name == "version":

@@ -2,6 +2,9 @@
 
 The short path is in the [README](../README.md#quick-start). This page has the details: the requirements, what a build produces, the configuration, and how to wire the KB into each project's agent.
 
+Two ways to install: `uv tool install knowledge-index` for one person on one machine (this page), or the
+Docker image for a shared server ([Docker](docker.md)).
+
 ## Requirements
 
 These are external dependencies — not vendored. Install them and make sure they're on your `PATH`

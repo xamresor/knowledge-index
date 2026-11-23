@@ -119,7 +119,7 @@ stage_and_build() {
 build_graph() {
   require_cfg
   echo "==> Building per-project graphs"
-  local merge_inputs=() routes_specs=()
+  local merge_inputs=() routes_specs=() scip_specs=()
   while IFS='|' read -r name code docs routes calls serves; do
     [ -z "$name" ] && continue
     if [ -z "$code" ]; then
@@ -135,19 +135,31 @@ build_graph() {
       # by the KB's user, and the app's own user could not append to them later).
       # A failed run keeps the previous table: routes change rarely, and a KB with last week's routes
       # is worth more than one with none (and the linker below needs the file).
-      if env -C "$routes" LOG_CHANNEL=null php artisan route:list --json >"$KB_DATA/routes.$name.json.new" 2>/dev/null; then
+      # A ready route table instead of artisan (a server without PHP, e.g. the Docker image): the file
+      # $KB_ROUTES_DIR/<name>.json, or `routes` itself when it names a .json file. The app writes it
+      # with `php artisan route:list --json` in its own container (docs/docker.md).
+      local rfile="" how="php artisan route:list"
+      if [ -n "${KB_ROUTES_DIR:-}" ] && [ -f "$KB_ROUTES_DIR/$name.json" ]; then rfile="$KB_ROUTES_DIR/$name.json"
+      elif [ "${routes%.json}" != "$routes" ]; then rfile="$routes"; fi
+      [ -n "$rfile" ] && how="reading the route table $rfile"
+      if { [ -n "$rfile" ] && "$PY" -c 'import json,sys; assert isinstance(json.load(open(sys.argv[1])), list)' "$rfile" 2>/dev/null \
+             && cp "$rfile" "$KB_DATA/routes.$name.json.new"; } \
+         || { [ -z "$rfile" ] && env -C "$routes" LOG_CHANNEL=null php artisan route:list --json >"$KB_DATA/routes.$name.json.new" 2>/dev/null; }; then
         mv -f "$KB_DATA/routes.$name.json.new" "$KB_DATA/routes.$name.json"
       else
         rm -f "$KB_DATA/routes.$name.json.new"
         if [ -f "$KB_DATA/routes.$name.json" ]; then
-          echo "  [$name] WARNING: 'php artisan route:list' failed — using the previous route table" >&2
+          echo "  [$name] WARNING: $how failed — using the previous route table" >&2
         else
-          echo "  [$name] WARNING: 'php artisan route:list' failed — HTTP edges for this repo will be missing" >&2
+          echo "  [$name] WARNING: $how failed — HTTP edges for this repo will be missing" >&2
           echo "[]" >"$KB_DATA/routes.$name.json"
         fi
       fi
     fi
     [ -n "$calls" ] && [ -n "$serves" ] && routes_specs+=("$serves|$calls")
+    # The project root for the SCIP add-on: the Laravel app when it has one, else the parent of the
+    # first code folder (where composer.json, vendor/ or a ready index.scip live).
+    scip_specs+=("$name=${routes:-$(dirname "${code%%,*}")}")
   done < <(read_projects)
 
   # Everything below is a pure function of these inputs: the per-project manifests (staged code), the
@@ -168,6 +180,12 @@ build_graph() {
           -not -path '*/vendor/*' -printf '%P %s %T@\n' 2>/dev/null | LC_ALL=C sort
       done
       find "$KB/bin" -type f \( -name '*.py' -o -name kb \) -printf '%P %s %T@\n' | LC_ALL=C sort
+      # the add-ons that change the graph (scip) and its ready indexes
+      echo "scip=$("$PY" -c 'import sys; sys.path.insert(0, sys.argv[1]); import addons; print(addons.on("scip"))' "$KB/bin")"
+      find "$KB_DATA/scip" -type f -printf '%P %s %T@\n' 2>/dev/null | LC_ALL=C sort || true
+      for m in "${scip_specs[@]}"; do
+        if [ -f "${m#*=}/index.scip" ]; then echo "$m"; stat -c '%s %Y' "${m#*=}/index.scip"; fi
+      done
     } | sha256sum)
   if [ "${BUILD_KIND:-}" != "build" ] && [ "${KB_FORCE:-0}" != "1" ] && [ -f "$OUT/graph.json" ] \
       && [ -f "$post_file" ] && [ "$(cat "$post_file")" = "$post_sig" ]; then
@@ -223,6 +241,9 @@ build_graph() {
   "$PY" "$KB/bin/enrich.py" "$OUT/graph.json" "$KB_DATA/repos"
   echo "==> Adding data-layer links (eloquent model rels, FK table->table, SQL code->table)"
   "$PY" "$KB/bin/link_data.py" "$OUT/graph.json" "$KB_DATA/repos"
+  # Add-on `scip` (off by default): precise calls from a SCIP index. Before the typed-call linker,
+  # so that one does not add an INFERRED copy of an edge the index proves.
+  "$PY" "$KB/bin/link_scip.py" "$OUT/graph.json" "$KB_DATA/repos" "${scip_specs[@]}"
   echo "==> Linking PHP calls through typed variables and properties"
   "$PY" "$KB/bin/link_php_calls.py" "$OUT/graph.json" "$KB_DATA/repos"
   # Docs as graph nodes (bin/lang/markdown.py): [[wikilink]] and relative links are EXTRACTED edges,
@@ -413,7 +434,11 @@ addon() {
             uv tool install "graphifyy==$gver" --with rustworkx --reinstall
           elif command -v pipx >/dev/null; then pipx inject graphifyy rustworkx
           else echo "install rustworkx into graphify's environment: $gpy -m pip install rustworkx" >&2; exit 1; fi ;;
-        tool-multicall|metrics|admin|audit) : ;;   # nothing to fetch
+        tool-multicall|metrics|admin|audit|questions|datadict) : ;;   # nothing to fetch
+        scip)   # the indexer is the user's to install (docs/tools.md, "SCIP"); say when none is found
+          if [ -z "${KB_SCIP_PHP:-}" ] && ! command -v scip-php >/dev/null; then
+            echo "  no scip-php on the PATH and no KB_SCIP_PHP: only ready index.scip files will be read"
+          fi ;;
         *) echo "kb addon install <name>: $(sed -n 's/^    "\([a-z-]*\)": .*/\1/p' "$KB/bin/addons.py" | tr '\n' ' ')" >&2; exit 1 ;;
       esac
       "$PY" "$KB/bin/addons.py" on "$name" && echo "$name: on (restart the KB server to load it)"

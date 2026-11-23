@@ -74,7 +74,8 @@ class ValidateTest(unittest.TestCase):
 class QmdCommandTest(unittest.TestCase):
     def test_mode_maps_to_the_qmd_entry_points(self):
         self.assertEqual(kb_core._qmd_cmd({"mode": "lex"}, "q")[1], "search")
-        self.assertEqual(kb_core._qmd_cmd({"mode": "vec"}, "q")[1], "vsearch")
+        # vec: a `vec:` query document, not `qmd vsearch` (that one expands with the 1.7B model)
+        self.assertEqual(kb_core._qmd_cmd({"mode": "vec"}, "q")[1:3], ["query", "vec: q"])
         self.assertEqual(kb_core._qmd_cmd({"mode": "auto"}, "q")[1], "query")
         self.assertEqual(kb_core._qmd_cmd({}, "q")[1], "query", "auto is the default")
 

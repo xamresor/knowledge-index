@@ -253,3 +253,120 @@ class CallSourceIsTheFunction(unittest.TestCase):
             with open(gp) as f:
                 edges = {(e["source"], e["target"]) for e in json.load(f)["links"] if e.get("relation") == "http_request"}
         self.assertEqual(edges, {("web::create", "api::store"), ("web::list", "api::index")})
+
+
+class MutationGaps(unittest.TestCase):
+    """Cases added by the mutation pass (`make mutation`): each pins a decision that a one-line
+    change of the matcher used to leave unnoticed."""
+
+    def test_method_of_the_next_call_is_not_taken(self):
+        # a call without `method:` must not read the `method: 'POST'` of the call right below it
+        src = "apiFetch('/a')\napiFetch('/b', { method: 'POST' })"
+        self.assertEqual(calls(src), [("get", "/a"), ("post", "/b")])
+
+    def test_double_slash_collapses(self):
+        self.assertEqual(lh.norm_path("auth//listings"), "auth/listings")
+
+    def test_suffix_must_start_at_a_segment(self):
+        # `listings` is a string suffix of `api/mylistings` but not a path suffix of it
+        routes = {("get", "api/mylistings"): ("A.php", "index")}
+        self.assertIsNone(lh.match_route(routes, "get", "listings"))
+
+    def test_empty_path_matches_nothing(self):
+        # a route uri that ends with a slash (an un-normalised table) must not match the empty path
+        routes = {("get", "api/"): ("A.php", "index")}
+        self.assertIsNone(lh.match_route(routes, "get", ""))
+
+    def test_shortest_base_prefix_wins_whatever_the_table_order(self):
+        # the longer route comes first and sorts first by name: only the length order picks `v2/items`
+        routes = {("get", "api/v1/items"): ("Old.php", "index"),
+                  ("get", "v2/items"): ("New.php", "index")}
+        self.assertEqual(lh.match_route(routes, "get", "items"), ("New.php", "index"))
+
+    def test_base_prefix_must_be_base_segments_only(self):
+        # `api/auth/items` has a non-base segment, so it is no base-prefix match; two such routes are ambiguous
+        routes = {("get", "api/auth/items"): ("A.php", "index"),
+                  ("get", "admin/items"): ("B.php", "index")}
+        self.assertIsNone(lh.match_route(routes, "get", "items"))
+
+    def test_two_targets_behind_a_lost_prefix_are_no_match(self):
+        routes = {("post", "api/invoices/{}/send"): ("Invoice.php", "send"),
+                  ("post", "api/receipts/{}/send"): ("Receipt.php", "send")}
+        self.assertIsNone(lh.match_route(routes, "post", "send"))
+
+    def test_single_candidate_behind_a_lost_prefix_matches(self):
+        routes = {("post", "api/invoices/{}/send"): ("Invoice.php", "send")}
+        self.assertEqual(lh.match_route(routes, "post", "send"), ("Invoice.php", "send"))
+
+    def test_unversioned_string_argument_is_not_a_call(self):
+        self.assertEqual(calls("track('hello/world')"), [])
+        self.assertEqual(calls("usePaginatedList(`v2/items`)"), [("get", "v2/items")])
+
+    def test_unknown_verb_in_route_table_is_dropped(self):
+        import json
+        import os
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump([{"method": "GET|HEAD|OPTIONS|PROPFIND", "uri": "api/Orders/{id}",
+                        "action": "App\\Http\\Controllers\\OrderController@show"}], fh)
+        self.addCleanup(os.unlink, fh.name)
+        self.assertEqual(lh.load_routes(fh.name),
+                         {("get", "api/orders/{}"): ("Http/Controllers/OrderController.php", "show")})
+
+
+class LinkEdgesEndToEnd(unittest.TestCase):
+    """The whole `link_http.py` run: which call sites become edges."""
+
+    def run_link(self, files, routes, nodes):
+        import json
+        import os
+        import subprocess
+        import sys
+        import tempfile
+        from _kbtest import BIN
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "web", "src")
+            for rel, text in files.items():
+                path = os.path.join(src, rel)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w") as f:
+                    f.write(text)
+            g = {"directed": False, "multigraph": False, "graph": {}, "links": [], "nodes": [
+                {"id": "api::ctl", "label": "OrderController", "repo": "api", "type": "class",
+                 "source_file": "app/Http/Controllers/OrderController.php", "source_location": "L5"},
+                {"id": "api::index", "label": ".index()", "repo": "api", "type": "method",
+                 "source_file": "app/Http/Controllers/OrderController.php", "source_location": "L9"}] + nodes}
+            gp, rp = os.path.join(d, "graph.json"), os.path.join(d, "routes.json")
+            with open(gp, "w") as f:
+                json.dump(g, f)
+            with open(rp, "w") as f:
+                json.dump(routes, f)
+            p = subprocess.run([sys.executable, os.path.join(BIN, "link_http.py"), gp, rp, "api", src],
+                               capture_output=True, text=True)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            with open(gp) as f:
+                return [e for e in json.load(f)["links"] if e.get("relation") == "http_request"]
+
+    ROUTES = [{"method": "GET|HEAD", "uri": "v2/orders",
+               "action": "App\\Http\\Controllers\\OrderController@index"}]
+
+    def test_the_same_call_twice_in_one_function_is_one_edge(self):
+        edges = self.run_link(
+            {"api.ts": "export function load() {\n  apiFetch(`v2/orders`);\n  apiFetch(`v2/orders`);\n}\n"},
+            self.ROUTES,
+            [{"id": "web::file", "label": "api.ts", "repo": "web", "type": "file",
+              "source_file": "src/api.ts", "source_location": "L1"},
+             {"id": "web::load", "label": "load()", "repo": "web", "type": "symbol",
+              "source_file": "src/api.ts", "source_location": "L1"}])
+        self.assertEqual([(e["source"], e["target"], e["http_method"], e["http_uri"]) for e in edges],
+                         [("web::load", "api::index", "GET", "v2/orders")])
+
+    def test_a_php_backend_links_but_its_tests_folder_does_not(self):
+        call = "<?php\nHttp::get('v2/orders');\n"
+        node = lambda i, f: {"id": i, "label": ".sync()", "repo": "bo", "type": "method",
+                             "source_file": f, "source_location": "L1"}
+        edges = self.run_link(
+            {"Sync.php": call, "tests/SyncTest.php": call},
+            self.ROUTES,
+            [node("bo::sync", "src/Sync.php"), node("bo::test", "src/tests/SyncTest.php")])
+        self.assertEqual([(e["source"], e["target"]) for e in edges], [("bo::sync", "api::index")])

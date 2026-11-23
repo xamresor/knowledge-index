@@ -14,6 +14,20 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+- **Add-on `scip`: precise PHP calls.** At `kb update` the add-on reads a SCIP index (`scip-php`, or a ready
+  `index.scip`) and adds EXTRACTED `calls` edges between methods the graph already has (`bin/link_scip.py`).
+- **Docker image for the shared server.** `Dockerfile`, `docker/compose.example.yml` and `docs/docker.md`: one
+  image with graphify, rustworkx and qmd, the code mounted read-only, the `code-mode` sandbox as a second
+  container without network (`KB_SANDBOX_SOCKET`). A route table can come from a file (`KB_ROUTES_DIR`).
+- **`make mutation`.** A stdlib mutation pass over the HTTP-edge matcher; 12 tests added for the gaps it found.
+- **`search`: an honest "not found" for docs.** The first hit is graded by how much of the question's specific
+  words it holds; a weak answer tries a keyword-only search, then says "not found" and marks the nearest
+  hits as weak. `refuse: false` switches it off. `bench/search_baseline.py` reports the share of confident
+  wrong answers (0.42 -> 0.23 on the local set, recall@5 0.92 -> 0.87).
+- **Add-on `datadict`: a data dictionary.** A hand-written `datadict/<project>.toml` gives each table its
+  term, grain and summable columns; `search`, `graph_explain` and `problems` use it. `bench/datadict_eval.py`
+  compares search with the add-on off and on.
+- **Fixed:** `kb addon install questions` failed with the usage message.
 - **Access plugins.** The core still keeps no users. A plugin that defines `login()` and `permissions()`
   answers the two webhooks inside `kb-http`, at `/local/login` and `/local/permissions`, so a system of your
   own needs no separate webhook service; `kb-http` uses these addresses by default while such a plugin is

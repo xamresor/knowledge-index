@@ -7,6 +7,8 @@
   metrics         `GET /metrics` in the Prometheus format, for Prometheus, Grafana or PMM
   admin           the `/admin` pages (on the shared server also needs KB_ADMINS or admins.txt)
   audit           the Audit tab of the admin pages and its sign-in / admin-action log
+  scip            `kb update` adds EXTRACTED `calls` edges from a SCIP index (scip-php), bin/link_scip.py
+  datadict        the meaning of each table from a hand-written file per project (bin/datadict.py)
 
 Which are on: `<data>/addons.json` (written by `kb addon install|remove`), or KB_ADDONS (comma-separated,
 overrides the file; `KB_ADDONS=none` switches all off). An add-on that is off adds no tool, no page and
@@ -30,6 +32,9 @@ ADDONS = {
     "audit": "/admin/audit: sign-ins, admin actions and every tool call with user and argument",
     "questions": "/admin/questions: the questions people asked, a label with the right answer for each, "
                  "and the labelled ones as a golden set",
+    "scip": "kb update adds precise calls edges from a SCIP index (needs scip-php or a ready index.scip)",
+    "datadict": "data dictionary: the meaning of each table (term, grain, summable columns) from "
+                "datadict/<project>.toml, in search, graph_explain and problems",
 }
 TOOLS = {"run_code": "code-mode", "batch": "tool-multicall"}  # tool -> the add-on that brings it
 

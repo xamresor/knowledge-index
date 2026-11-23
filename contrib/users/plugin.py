@@ -563,7 +563,18 @@ def default_path() -> str:
     try:
         import paths
     except ImportError:
-        sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "bin"))
+        # A checkout: <repo>/contrib/users -> <repo>/bin. An installed package (the Docker image):
+        # bin/ sits next to the knowledge_index package in site-packages.
+        here = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "bin")
+        try:
+            import knowledge_index
+            installed = os.path.join(os.path.dirname(os.path.dirname(knowledge_index.__file__)), "bin")
+        except ImportError:
+            installed = here
+        for d in (here, installed):
+            if os.path.isfile(os.path.join(d, "paths.py")):
+                sys.path.insert(0, d)
+                break
         import paths
     return os.path.join(str(paths.data_home()), "users.json")
 

@@ -1,0 +1,27 @@
+# An allow-list: the build context gets only what the image needs. Everything else stays out, above
+# all the files of one server that name private projects or hold secrets (kb.projects.toml,
+# aliases.toml, users.json, smtp.env, admins.txt, graphify-out/, repos/, .qmd/, .docs/).
+*
+!bin/
+!web/
+!knowledge_index/
+!contrib/
+!sandbox/package.json
+!sandbox/package-lock.json
+!sandbox/runner.mjs
+!sandbox/socket-server.mjs
+!pyproject.toml
+!VERSION
+!README.md
+!LICENSE
+!Makefile
+!kb.projects.toml.example
+!aliases.toml.example
+!datadict.toml.example
+!kb.hubs.txt
+
+# Not source, even inside the allowed folders.
+**/__pycache__
+**/*.pyc
+**/node_modules
+web/vendor

@@ -324,6 +324,12 @@ def qmd(cwd: str | None = None) -> QmdWorker | None:
     global _qmd
     if not ENABLED:
         return None
+    # `qmd mcp` picks its index once, at start: `<cwd>/.qmd` when it exists, else the global one.
+    # A server that starts before the first build (the Docker order: `up`, then `kb build`) must not
+    # start the worker yet, or the worker keeps the empty global index until a restart.
+    if _qmd is None and cwd and not os.environ.get("INDEX_PATH") \
+            and not os.path.isfile(os.path.join(cwd, ".qmd", "index.yml")):
+        return None
     with _init:
         if _qmd is None:
             _qmd = QmdWorker(cwd)

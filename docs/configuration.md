@@ -32,7 +32,7 @@ serves = "api"
 | `name` | string | The project's name in answers and in access rules. Letters, digits and `-`. |
 | `code` | list of paths | Folders whose code goes into the graph. `vendor`, `node_modules`, `tests`, build output and images are left out. |
 | `docs` | path | The docs folder: Markdown is searched; PDF, DOCX, ODT, RTF, EPUB and scans are extracted to text first. |
-| `routes` | path | A Laravel app folder: `php artisan route:list --json` there gives the route table, and its routes become graph edges. |
+| `routes` | path | A Laravel app folder: `php artisan route:list --json` there gives the route table, and its routes become graph edges. A path that ends in `.json` is a ready route table instead ([Docker](docker.md#route-tables-from-the-app-s-container)). |
 | `calls` | list of paths | Folders with frontend or backend code whose HTTP calls are linked to the routes of `serves`. |
 | `serves` | string or list | The project(s) whose routes these calls go to, e.g. `"api"` or `["api", "billing-api"]`. |
 
@@ -57,6 +57,7 @@ serves = "api"
 | `KB_QMD_BACKEND` | asked once, then remembered | Embeddings: `llama` (on device), `none` (keywords only) or `other` (your own command). |
 | `KB_QMD_EMBED_CMD` | — | With `other`: the command that computes embeddings. |
 | `KB_REFRESH_WAIT_LOCK` | — | `kb-refresh` waits while your deploy holds this lock file. |
+| `KB_ROUTES_DIR` | — | A folder with ready route tables, `<project>.json`. A project with `routes` reads its table there instead of running `php artisan route:list`. |
 
 ## Answers
 
@@ -84,13 +85,18 @@ serves = "api"
 
 | Variable | Default | Description |
 |---|---|---|
-| `KB_ADDONS` | `<data>/addons.json` | Comma-separated add-ons that are on, overriding the file; `none` switches all off. Names: `code-mode`, `tool-multicall`, `fast-routes`, `metrics`, `admin`, `audit`, and installed plugins. |
+| `KB_ADDONS` | `<data>/addons.json` | Comma-separated add-ons that are on, overriding the file; `none` switches all off. Names: `code-mode`, `tool-multicall`, `fast-routes`, `metrics`, `admin`, `audit`, `questions`, `scip`, `datadict`, and installed plugins. |
 | `KB_BATCH_MAX` | `10` | Calls in one `batch`. |
 | `KB_RUN_SECONDS` | `20` | CPU seconds a `run_code` program may use. |
 | `KB_RUN_CALLS` | `30` | Tool calls a `run_code` program may make. |
+| `KB_SANDBOX_SOCKET` | — | A Unix socket of the sandbox service (`sandbox/socket-server.mjs`). Set: `run_code` runs there, e.g. in a container without network ([Docker](docker.md#the-sandbox-container-code-mode)). |
+| `KB_SANDBOX_MAX` | `4` | Sandbox service only: programs that run at once. |
 | `KB_METRICS` | `off` | `on` serves `/metrics` without the add-on. |
 | `KB_METRICS_TOKEN` | — | Bearer token or basic-auth password for `/metrics` from outside loopback. |
+| `KB_DATADICT_DIR` | `<config>/datadict` | Folder of the data dictionary files, one `<project>.toml` each ([data dictionary](data-dictionary.md)). |
 | `KB_ADMINS` | `<data>/admins.txt` | Comma-separated user names allowed into `/admin` on the shared server. |
+| `KB_SCIP_PHP` | `scip-php` on the `PATH` | Command of the PHP SCIP indexer for the `scip` add-on. It runs in `repos/<project>` and writes `index.scip` there. |
+| `KB_SCIP_TIMEOUT` | `600` | Seconds one SCIP indexer run may take. |
 
 ## The shared server (`kb-http`)
 

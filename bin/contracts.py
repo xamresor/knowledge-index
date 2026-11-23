@@ -387,8 +387,16 @@ def build_problems(docs: dict[str, str], calls: dict[str, tuple[str, list[str]]]
     return out
 
 
-def problems(project: str, allowed: set[str] | None, path: str | None = None) -> str:
-    rows = load_index(path or PROBLEMS)
+def problems(project: str, allowed: set[str] | None, path: str | None = None,
+             extra: list[dict] | None = None) -> str:
+    """`extra`: rows an add-on finds at call time (the data dictionary), merged with the built index."""
+    try:
+        rows = load_index(path or PROBLEMS)
+    except NotBuilt:
+        if not extra:
+            raise
+        rows = []
+    rows = list(rows) + list(extra or [])
     if allowed is not None:
         rows = [r for r in rows if r["project"] in allowed]
     p = project.strip().lower()

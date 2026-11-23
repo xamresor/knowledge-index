@@ -10,6 +10,9 @@
 # Generated route tables (regenerable via php artisan route:list)
 /routes.*.json
 
+# SCIP indexes of the add-on `scip` (bin/link_scip.py): code structure of the indexed projects
+/scip/
+
 # Generated graph artifacts — contain the indexed projects' code structure; not ours to commit.
 # Regenerate locally with `make update`.
 /graphify-out/
@@ -31,6 +34,9 @@ __pycache__/
 
 # Deployment data: the alias table names private projects/products/people (see aliases.toml.example)
 aliases.toml
+
+# Deployment data: the data dictionary per project names real tables (see datadict.toml.example)
+/datadict/
 
 # Vendored renderer: fetched by `make vendor`, not part of the source
 web/vendor/

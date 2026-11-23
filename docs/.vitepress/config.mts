@@ -39,6 +39,7 @@ export default defineConfig({
       { text: 'Introduction', items: [
         { text: 'Getting started', link: '/getting-started' },
         { text: 'Tools and add-ons', link: '/tools' },
+        { text: 'Data dictionary', link: '/data-dictionary' },
       ] },
       { text: 'Installation', items: [
         { text: 'Install and configure', link: '/install' },
@@ -46,6 +47,7 @@ export default defineConfig({
       ] },
       { text: 'Shared server', items: [
         { text: 'The shared server', link: '/server' },
+        { text: 'Docker', link: '/docker' },
         { text: 'Access protocol', link: '/access-protocol' },
       ] },
       { text: 'Writing docs', items: [

@@ -67,6 +67,46 @@ a call linked from its file instead of its function (now from the function). The
 questions and the fixes, so treat 100% as "these gaps are closed", not as a measured hit rate: run it on
 your own code with questions written before looking at the answers.
 
+### Docs search: an honest not found, measured (2026-11-23)
+
+A docs search always has nearest documents. Before this check, `search` gave all of them as a
+confident answer, also for questions that no document answers. qmd's own score cannot tell: it is
+rank-based, so the first hit always prints 100%. The raw best cosine and BM25 scores overlap too: for
+10 of 10 no-answer questions they fell inside the range of the answerable ones.
+
+The check (`bin/docs_grade.py`, behaviour in [tools](tools.md#when-search-finds-nothing-that-fits))
+grades the first hit by *coverage*: the share of the question's idf weight that the hit holds. A word
+that no document holds weighs most, so a question about a thing the docs never mention gets a low
+grade. It reads qmd's keyword index directly: no model, a few milliseconds. Below 0.46: one
+keyword-only search, then "not found" with the nearest 3 hits marked as weak.
+
+`bench/search_baseline.py`, one corpus of 123 Markdown files, 38 answerable and 10 no-answer
+questions, the `tool` backend with and without the check:
+
+| | recall@5 | MRR | confident wrong | no-answer answered | answerable: wrong first file | answerable refused |
+|---|---|---|---|---|---|---|
+| without the check (`refuse: false`) | 0.92 | 0.81 | 0.42 (20 of 48) | 10 of 10 | 10 of 38 | 0 |
+| with the check (default) | 0.87 | 0.78 | 0.23 (11 of 48) | 2 of 10 | 9 of 38 | 2 |
+
+*Confident wrong* is the share of all questions that got a confident wrong answer: a no-answer
+question with any hit, or an answerable question whose first file is not an expected one. A refusal
+is never confident.
+
+What it costs and what it does not do:
+
+- Two answerable questions are refused. One had the right file first (coverage 0.42), the other at
+  rank 4. That is the recall drop from 0.92 to 0.87.
+- Two no-answer questions still get an answer. "Terraform state of the Hetzner server": the
+  deployment doc holds every other word (coverage 0.57). "Sign in with Apple": every word, including
+  "apple", is in some document (coverage 1.0).
+- The check does not catch a wrong first file among the answerable questions (10 to 9 only): it
+  judges whether the words are there, not whether the fact is.
+- The keyword-only fallback rescued no question on this set. It stays because it is cheap (no model)
+  and the roadmap asked for it; drop it if a larger set shows the same.
+- The threshold was read off the same 48 questions, and the no-answer questions name foreign
+  technologies, the easy case. A question whose words all exist but whose fact does not (a near
+  miss) passes the check. Treat the numbers as an upper bound until a set written later confirms them.
+
 ### Non-goals (decided, not pending)
 
 These are **out of scope on purpose** — the table above lists them as things others do better, which is
@@ -221,7 +261,11 @@ Not aspirations — these are the properties the code already has, kept explicit
   usually a real service whose definition was never captured. Both restraints are pinned by tests.
 - **Tests sit where the risk is.** The destructive transforms (`dedupe`, `declutter`) and the artefact
   contract (`graph`) are covered, not just the easy pure parser. Stdlib `unittest`, no test deps:
-  `make test`.
+  `make test`. A mutation pass checks that the tests of the HTTP-edge matcher are not blind:
+  `make mutation` (`bench/mutation.py`) breaks `bin/link_http.py` and its call-site patterns one
+  small change at a time (a flipped regex, a GET default turned into POST, an inverted `endswith`,
+  a dropped sort). It runs the `link_http` tests on a temporary copy for each change and fails if
+  any change survives. A survivor is a test gap: add a test, do not weaken the mutant.
 - **Zero runtime dependencies.** Stdlib Python and bash only — the MCP server speaks JSON-RPC by
   hand, config is `tomllib`. This is a deliberate constraint: the tool has to run on a machine where
   installing packages is not an option.
@@ -259,38 +303,63 @@ Not aspirations — these are the properties the code already has, kept explicit
   webhook takes the token and the list of the KB's projects and answers `{user, projects: [...] | "*"}`.
   The API then needs to know nothing about the KB's project names, and a team without an API writes
   the two hooks in a few lines. The old identity endpoint (`KB_AUTH_URL`) is gone.
-- [ ] **A token file for teams without an API**: `tokens.toml` with token → user and projects, served as
-  the two webhooks by a small bundled script, for a team that has no system of its own at all.
-- [ ] **Precise PHP calls from SCIP (add-on).** Spike 2026-11-20 on one Laravel 12 API (215 files): `scip-php`
+- [x] **The KB's own users for teams without an API** (closed 2026-11-23, done another way than planned). The
+  plan was a `tokens.toml` file served as the two webhooks. The access plugin `contrib/users` does the job
+  instead: an admin adds people and their projects on the Users tab, each person makes the own tokens.
+- [x] **Precise PHP calls from SCIP (add-on).** Spike 2026-11-20 on one Laravel 12 API (215 files): `scip-php`
   indexed it in 10 s (2.2 MB) and found 125 cross-file method calls against 40 in the AST graph, for example
   calls through a typed property or an interface. Its edges would enter the graph as EXTRACTED `calls`.
   Limits seen: `scip-php` is stale (v0.0.2, 2023) and wants the project's `vendor/`; its old PHP parser (v4)
   clashes with Laravel's (v5), worked around by giving the indexed copy the same parser; it still missed calls
   to Eloquent model methods (`$order->totalDue()`). `scip-typescript` (maintained) is the TS side.
-- [ ] **Docker image for the shared server**: one image (Python, graphify with rustworkx, qmd), the
+  Done 2026-11-23: the add-on `scip` (`bin/link_scip.py`, [tools](tools.md)). Real run the same day
+  (`scip-php` dev-main, the same API, now larger): 1,719 `EXTRACTED` calls, 10 of 10 checked edges real.
+  The run found and fixed one bug: missing autoload paths in the staged copy stopped the indexer.
+- [x] **Docker image for the shared server**: one image (Python, graphify with rustworkx, qmd), the
   indexed code mounted read-only, add-ons switched by `KB_ADDONS`; the Laravel route table taken as a
   file from the app's own container. The `code-mode` sandbox as an optional second container without
   network. A local single-user install stays `uv tool install`.
-- [ ] **Mutation testing for `bin/link_http.py`.** The matcher has unit tests
+  Done 2026-11-23: `Dockerfile`, `docker/compose.example.yml`, [docker.md](docker.md). Full `docker compose` run
+  the same day (x86_64; arm64 not tried): build, CPU embeddings (first build 203 s, about 500 MB peak),
+  MCP search, `graph_explain` and `run_code` through the sandbox without network. It found and fixed four
+  bugs: the build context missed `datadict.toml.example`; the warm qmd worker started before the first
+  build kept an empty index; `mode: vec` ran `qmd vsearch`, which downloads the 1.7B model; the users
+  plugin could not find its modules in the image.
+- [x] **Mutation testing for `bin/link_http.py`.** The matcher has unit tests
   (`make test`), but tests can pass while being blind to real regressions. Add a
   mutation pass — flip a regex, swap the GET default to POST, invert an
   `endswith`, drop the shortest-suffix sort — and confirm the suite *fails* on
   each (every mutant killed). Keep it dependency-light (a small stdlib harness +
   `make mutation`) or wire up `mutmut` in a venv.
-- [ ] **An "is this enough?" check and an honest refusal for `search`.** Today `search` always returns
+  Done 2026-11-23: `make mutation`, 36 mutants, all killed; 12 tests added for the gaps it found.
+- [x] **An "is this enough?" check and an honest refusal for `search`.** Today `search` always returns
   the nearest hits, also when nothing fits. Grade the result; on a low grade drop it and either run a
   fallback search or answer "not found". Report a third number beside recall and precision: the share
   of confident wrong answers. No query rewriting here: LLM expansion was switched off for these
   searches because it added noise.
-- [ ] **A data dictionary over the tables the graph already knows (add-on).** Tables come from the PHP
+  Done 2026-11-23: `bin/docs_grade.py`, measured above ("Docs search: an honest not found"). The
+  threshold comes from the same 48 questions. Held-out check the same day (20 answerable and 10
+  no-answer questions written after the threshold): it refused 4 of 10 no-answer questions (8 of 10 on
+  the fit set) and 2 of 20 answerable ones that were right. Five no-answer questions passed with a
+  coverage of 0.47-0.50, each with a word that no document holds. A candidate rule: also refuse when a
+  question word is in no document. On both sets it catches 18 of 20 and loses no more right answers.
+  Not applied yet. A question in English about a Russian document gets a low coverage: a known gap.
+- [x] **A data dictionary over the tables the graph already knows (add-on).** Tables come from the PHP
   source (`Schema::create`, `DB::table`); `.sql` is still not parsed. Give a table node its meaning:
   the grain (what one row stands for), which columns may be summed, the business term for it. The
   source is a small hand-written file per project, like `aliases.toml`. Then the KB answers "which
   table holds revenue per customer", not only "where is this table in the code". Check before
   building more: 20 questions about data, before and after; keep it only if the answers get better.
+  Done 2026-11-23: the add-on `datadict` ([data dictionary](data-dictionary.md)). 20-question check the
+  same day on the SmartMonitor API graph (29 tables in the dictionary, `--domain code`): recall@5 of
+  tables 0.125 off, 0.95 on (a model name counted as its table). The same person wrote the questions
+  and the dictionary, and about half of the synonyms repeat words of the questions: an upper bound.
+  Recheck with a dictionary and questions from different people.
 - [ ] **Golden-set questions from the team's real use.** The current set was written by the author.
   Ten or so questions that developers really asked, each with the expected answer, show where the KB
-  misses in daily work.
+  misses in daily work. The collection is in place: the Questions page (add-on `questions`) lists the asked
+  questions and exports the labelled ones (`/admin/questions.json`). Left: label the questions of a shared
+  server, then use them in `bench/search_baseline.py`.
 
 ## Footprint
 

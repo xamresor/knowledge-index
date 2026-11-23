@@ -1,0 +1,63 @@
+# Data dictionary for one project — deployment data, NOT code. The `datadict` add-on reads it.
+#
+#   mkdir -p datadict && cp datadict.toml.example datadict/<project>.toml
+#
+# The file name is the project name from kb.projects.toml (`datadict/shop-api.toml` for `shop-api`).
+# In an installed KB the folder is <config>/datadict/; KB_DATADICT_DIR points elsewhere.
+# The file is read on every call: an edit needs no rebuild.
+#
+# One [[table]] per table. Only `name` is required. Fields:
+#   name          the table name as the code writes it (`$table`, Schema::create, DB::table)
+#   term          what the business calls it
+#   grain         what one row stands for: "one row per ..."
+#   summable      columns that may be added up (amounts, quantities)
+#   not_summable  columns that must never be added up: IDs, foreign keys, prices per unit, rates,
+#                 statuses, running balances
+#   synonyms      other words people use when they ask about this data
+#   notes         a trap or a rule a reader needs before using the numbers
+#
+# `kb` tool `problems` (with the add-on on) lists entries for unknown tables, tables of the project
+# with no entry, and mistakes in this file. `bin/datadict.py check` prints the same.
+
+[[table]]
+name = "orders"
+term = "Customer order"
+grain = "one row per order a customer placed"
+summable = ["total_amount", "tax_amount", "discount_amount"]
+not_summable = ["id", "customer_id", "status", "currency"]
+synonyms = ["sale", "purchase", "revenue"]
+notes = "Cancelled orders stay in the table: filter status != 'cancelled' before you sum revenue."
+
+[[table]]
+name = "order_items"
+term = "Order line"
+grain = "one row per product in one order"
+summable = ["quantity", "line_total"]
+not_summable = ["id", "order_id", "product_id", "unit_price"]
+synonyms = ["line item", "basket line"]
+notes = "unit_price is the price of one unit: sum line_total, not unit_price."
+
+[[table]]
+name = "customers"
+term = "Customer"
+grain = "one row per customer account"
+not_summable = ["id", "credit_limit"]
+synonyms = ["client", "buyer", "account"]
+
+[[table]]
+name = "invoices"
+term = "Invoice"
+grain = "one row per invoice sent to a customer"
+summable = ["amount_due", "amount_paid"]
+not_summable = ["id", "customer_id", "order_id", "balance"]
+synonyms = ["bill"]
+notes = "balance is a running value per customer: never sum it across rows."
+
+[[table]]
+name = "stock_movements"
+term = "Stock movement"
+grain = "one row per change of the stock of one product in one warehouse"
+summable = ["quantity_change"]
+not_summable = ["id", "product_id", "warehouse_id", "quantity_after"]
+synonyms = ["inventory change", "stock level"]
+notes = "The current stock is the sum of quantity_change per product, or the last quantity_after."

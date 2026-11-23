@@ -1,0 +1,11 @@
+{
+  "_comment": "Example only, demo names that match datadict.toml.example. Copy to bench/local/datadict-questions.json (git-ignored) and write ~20 real questions about your data, each with the tables that answer it.",
+  "queries": [
+    {"id": "dd-01", "query": "which table holds revenue per customer", "expected_tables": ["orders"]},
+    {"id": "dd-02", "query": "where are the line items of a purchase stored", "expected_tables": ["order_items"]},
+    {"id": "dd-03", "query": "how much does a client still owe us", "expected_tables": ["invoices"]},
+    {"id": "dd-04", "query": "current stock level of a product", "expected_tables": ["stock_movements"]},
+    {"id": "dd-05", "query": "list of buyers and their credit limit", "expected_tables": ["customers"]},
+    {"id": "dd-06", "query": "quantity sold per product last month", "expected_tables": ["order_items", "orders"]}
+  ]
+}

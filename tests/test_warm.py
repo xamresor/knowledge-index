@@ -37,6 +37,17 @@ class Fallback(unittest.TestCase):
             self.assertIsNone(warm.graph())
             self.assertIsNone(warm.qmd())
 
+    def test_no_qmd_worker_before_the_first_build(self):
+        # `qmd mcp` picks its index at start: started before `<kb>/.qmd` exists, it keeps the empty
+        # global index (the Docker order: the server is up before `kb build`).
+        with tempfile.TemporaryDirectory() as kb, mock.patch.object(warm, "ENABLED", True), \
+                mock.patch.object(warm, "_qmd", None), mock.patch.object(warm, "QmdWorker") as worker:
+            self.assertIsNone(warm.qmd(kb))
+            worker.assert_not_called()
+            os.makedirs(os.path.join(kb, ".qmd"))
+            open(os.path.join(kb, ".qmd", "index.yml"), "w").close()
+            self.assertIs(warm.qmd(kb), worker.return_value)
+
     def test_graph_worker_failure_falls_back_to_a_process(self):
         dead = mock.Mock(run=mock.Mock(return_value=None))
         with mock.patch.object(warm, "graph", return_value=dead), \
