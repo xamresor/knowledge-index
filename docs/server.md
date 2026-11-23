@@ -60,6 +60,13 @@ an HttpOnly, SameSite=Strict session cookie (8 hours) and a CSRF token on every 
 storage per index, documents and embedded chunks per project, build times, answer time per tool,
 calls per day), usage, and sign-in clients (revoke one). Plain HTML and server-drawn SVG, no scripts.
 
+**Questions (`/admin/questions`, add-on `questions`, off by default).** The page lists the questions people
+asked: the calls of `search`, `contracts_search` and `code_grep`, one row per question, with how often and by
+whom. An admin gives each question a label: the path or symbol that must be found, "no answer in the corpus",
+or "skip". A yellow mark beside the tab shows how many questions have no label. The labelled questions are
+the golden set from real use: `/admin/questions.json`. A label stays after the calls are deleted (90 days).
+Switch it on with `kb addon install questions`.
+
 **Browser sign-in (MCP OAuth).** With `KB_LOGIN_URL` set, an MCP client signs in
 by itself: a 401 points it to `/.well-known/oauth-protected-resource`, it registers (dynamic client
 registration), opens `/authorize` in the browser, the person types the user name, password and

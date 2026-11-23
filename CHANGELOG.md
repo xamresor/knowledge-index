@@ -14,6 +14,12 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+- **Added: the Questions page of the admin** (`/admin/questions`, add-on `questions`, off by default). It lists
+  the questions people asked (calls of `search`, `contracts_search`, `code_grep`); an admin labels each one with
+  the path or symbol that must be found, "no answer in the corpus" or "skip". A yellow mark beside the tab counts
+  the questions without a label. The labelled questions are a golden set from real use
+  (`/admin/questions.json`). Labels live in the usage database and stay after the calls are deleted.
+
 ## [0.15.1] — 2026-11-20
 
 - **Added: the documentation site** [knowledge-index.sereda.lv](https://knowledge-index.sereda.lv), built

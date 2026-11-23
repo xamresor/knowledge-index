@@ -458,6 +458,21 @@ class Handler(BaseHTTPRequestHandler):
                 _audit(admin_name(session["user"]), "revoke client", f"{cid[:12]} {note}")
                 self._send_page(200, admin.clients_page(base, session["csrf"], self.oauth.clients, note))
                 return
+            if path == "/admin/questions/label" and addons.on("questions"):
+                tool, arg = str(form.get("tool", "")), str(form.get("arg", ""))
+                project, how = str(form.get("project", "")), str(form.get("how", ""))
+                who = admin_name(session["user"])
+                if how == "clear":
+                    USAGE.unlabel(tool, arg, project)
+                    note = "Label cleared."
+                elif USAGE.label(tool, arg, project, expected=str(form.get("expected", "")),
+                                 no_answer=how == "no_answer", skip=how == "skip", by=who):
+                    note = "Saved."
+                else:
+                    note = "Not saved: give the path or symbol, or choose \"No answer\" or \"Skip\"."
+                _audit(who, "label question", f"{tool} {how} {arg[:60]}")
+                self._send_page(200, admin.questions_page(base, session["csrf"], USAGE, note))
+                return
             self._send(404, {"error": "not found"})
             return
         if path == "/admin":
@@ -468,6 +483,10 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/admin/audit" and addons.on("audit"):
             q = {k: v[0] for k, v in urllib.parse.parse_qs(self.path.partition("?")[2]).items()}
             self._send_page(200, admin.audit_page(base, session["csrf"], USAGE, q))
+        elif path == "/admin/questions" and addons.on("questions"):
+            self._send_page(200, admin.questions_page(base, session["csrf"], USAGE))
+        elif path == "/admin/questions.json" and addons.on("questions"):
+            self._send(200, {"questions": USAGE.golden() if USAGE else []})
         elif path == "/admin/clients":
             self._send_page(200, admin.clients_page(base, session["csrf"], self.oauth.clients))
         elif path == "/admin/index":
@@ -659,6 +678,7 @@ def make_server(host: str = HOST, port: int = PORT, auth: Authenticator | None =
                 admins: set | None = None) -> ThreadingHTTPServer:
     global USAGE
     USAGE = usage
+    admin.set_badge_source(lambda: USAGE.unlabelled() if USAGE is not None and hasattr(USAGE, "unlabelled") else 0)
     auth = auth or Authenticator()
     env = login_env() if oauth_env is None else oauth_env
 

@@ -28,6 +28,8 @@ ADDONS = {
     "metrics": "GET /metrics for Prometheus, Grafana or PMM",
     "admin": "/admin pages with status, charts, usage and sign-in clients",
     "audit": "/admin/audit: sign-ins, admin actions and every tool call with user and argument",
+    "questions": "/admin/questions: the questions people asked, a label with the right answer for each, "
+                 "and the labelled ones as a golden set",
 }
 TOOLS = {"run_code": "code-mode", "batch": "tool-multicall"}  # tool -> the add-on that brings it
 

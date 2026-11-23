@@ -212,7 +212,9 @@ a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
 header{background:var(--top);border-bottom:1px solid var(--line);height:52px;padding:0 24px;display:flex;align-items:center;gap:28px}
 header .brand{font-weight:700;font-size:16px;color:var(--ink)}header nav{display:flex;gap:22px;height:100%}
 header nav a{color:var(--ink2);display:flex;align-items:center;border-bottom:2px solid transparent;padding-top:2px}
-header nav a.on{color:var(--ink);font-weight:600;border-bottom-color:var(--accent)}header nav a:hover{text-decoration:none;color:var(--ink)}
+header nav a.on{color:var(--ink);font-weight:600;border-bottom-color:var(--accent)}
+.wait{display:inline-block;min-width:18px;padding:0 5px;margin-left:4px;border-radius:9px;background:#f2c200;color:#1c1917;
+font-size:11px;font-weight:600;line-height:18px;text-align:center}header nav a:hover{text-decoration:none;color:var(--ink)}
 header .right{margin-left:auto;display:flex;gap:8px;align-items:center}
 main{padding:20px 24px 32px;max-width:1440px;margin:0 auto}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:3px;margin-bottom:16px;min-width:0}
@@ -254,13 +256,37 @@ def esc(x) -> str:
     return html.escape(str(x))
 
 
+# How many asked questions wait for a label: the yellow mark beside the Questions tab on every page.
+# The server sets the source once (`set_badge_source`); without one there is no mark.
+_badge_source = None
+
+
+def set_badge_source(fn) -> None:
+    global _badge_source
+    _badge_source = fn
+
+
+def _waiting() -> int:
+    try:
+        return int(_badge_source()) if _badge_source else 0
+    except Exception:  # noqa: BLE001 - a broken counter must not break every admin page
+        return 0
+
+
 def page(title: str, body: str, base: str = "", tab: str = "", csrf: str = "", right: str = "") -> bytes:
     nav = ""
     if csrf:
-        tabs = [("Status", ""), ("Index", "/index"), ("Usage", "/usage"), ("Audit", "/audit"), ("Clients", "/clients")]
+        tabs = [("Status", ""), ("Index", "/index"), ("Usage", "/usage"), ("Questions", "/questions"),
+                ("Audit", "/audit"), ("Clients", "/clients")]
         if not addons.on("audit"):
             tabs.remove(("Audit", "/audit"))
-        links = "".join(f'<a href="{base}/admin{p}" class="{"on" if tab == t else ""}">{t}</a>' for t, p in tabs)
+        if not addons.on("questions"):
+            tabs.remove(("Questions", "/questions"))
+        waiting = _waiting() if addons.on("questions") else 0
+        mark = (f' <span class="wait" title="{waiting} question{"s" if waiting != 1 else ""} without a label">'
+                f'{waiting}</span>') if waiting else ""
+        links = "".join(f'<a href="{base}/admin{p}" class="{"on" if tab == t else ""}">{t}'
+                        f'{mark if t == "Questions" else ""}</a>' for t, p in tabs)
         nav = (f'<header><span class="brand">KB admin</span><nav>{links}</nav><div class="right">{right}'
                f'<form method="post" action="{base}/admin/logout"><input type="hidden" name="csrf" '
                f'value="{esc(csrf)}"><button>Sign out</button></form></div></header>')
@@ -389,6 +415,58 @@ def clients_page(base: str, csrf: str, clients: dict, note: str = "") -> bytes:
 # numbers also as text. One series per chart, so one hue and no legend; a failed build is drawn as a
 # red outline with the word "failed" (status color + label, never color alone). Colors are CSS
 # variables, so the same SVG follows the light and the dark theme.
+def questions_page(base: str, csrf: str, usage, note: str = "") -> bytes:
+    """The questions people asked, and what the right answer is. An admin gives each question a label:
+    the document or symbol that must be found, "the corpus has no answer", or "skip". The labelled
+    questions are the golden set from real use (`/admin/questions.json`)."""
+    if usage is None or not hasattr(usage, "questions"):
+        return page("KB admin · questions", '<main>' + panel("Questions", '<p class="muted">usage counting is off</p>')
+                    + '</main>', base, "Questions", csrf)
+    rows = usage.questions(300)
+    todo = [r for r in rows if not r.get("labelled")]
+    done = [r for r in rows if r.get("labelled")]
+
+    def hidden(r: dict) -> str:
+        return (f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+                f'<input type="hidden" name="tool" value="{esc(r["tool"])}">'
+                f'<input type="hidden" name="arg" value="{esc(r["arg"])}">'
+                f'<input type="hidden" name="project" value="{esc(r["project"])}">')
+
+    def when(ts: float) -> str:
+        return time.strftime("%Y-%m-%d", time.localtime(ts))
+
+    todo_rows = "".join(
+        f'<tr><td>{esc(r["tool"])}</td><td class="mono">{esc(r["arg"])}</td><td>{esc(r["project"])}</td>'
+        f'<td class="n">{r["count"]}</td><td>{when(r["last"])}</td><td>{esc(r["users"])}</td>'
+        f'<td><form method="post" action="{base}/admin/questions/label" class="label">{hidden(r)}'
+        f'<input name="expected" placeholder="path or symbol that must be found" size="34">'
+        f'<button name="how" value="expected">Save</button>'
+        f'<button name="how" value="no_answer">No answer in the corpus</button>'
+        f'<button name="how" value="skip">Skip</button></form></td></tr>' for r in todo)
+    done_rows = "".join(
+        f'<tr><td>{esc(r["tool"])}</td><td class="mono">{esc(r["arg"])}</td><td>{esc(r["project"])}</td>'
+        f'<td class="mono">{"<i>no answer in the corpus</i>" if r["no_answer"] else "<i>skipped</i>" if r["skip"] else esc(r["expected"])}</td>'
+        f'<td>{esc(r["by"])}</td>'
+        f'<td><form method="post" action="{base}/admin/questions/label">{hidden(r)}'
+        f'<button name="how" value="clear">Clear</button></form></td></tr>' for r in done)
+    head = (f'<p class="muted">{len(todo)} without a label, {len(done)} labelled. '
+            f'<a href="{base}/admin/questions.json">Download the labelled questions</a> as a golden set.</p>'
+            + (f'<p>{esc(note)}</p>' if note else ""))
+    body = ('<main><div class="stack">' + head
+            + panel("Without a label",
+                    '<table><tr><th>Tool</th><th>Question</th><th>Projects</th><th class="n">Asked</th><th>Last</th>'
+                    '<th>Users</th><th>The right answer</th></tr>'
+                    + (todo_rows or '<tr><td colspan="7" class="muted">nothing waits</td></tr>') + '</table>',
+                    "calls of search, contracts_search and code_grep; the argument is kept to 120 characters")
+            + panel("Labelled",
+                    '<table><tr><th>Tool</th><th>Question</th><th>Projects</th><th>The right answer</th><th>By</th>'
+                    '<th></th></tr>'
+                    + (done_rows or '<tr><td colspan="6" class="muted">none yet</td></tr>') + '</table>',
+                    "kept after the calls themselves are deleted")
+            + '</div></main>')
+    return page("KB admin · questions", body, base, "Questions", csrf)
+
+
 def nice(top: float) -> float:
     """A round axis maximum at or above `top` (1, 2, 2.5, 5 x 10^n)."""
     import math

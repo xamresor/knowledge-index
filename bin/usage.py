@@ -39,7 +39,16 @@ CREATE TABLE IF NOT EXISTS legacy (snapshot TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS events (
   ts REAL NOT NULL, user TEXT NOT NULL, action TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS events_ts ON events (ts);
+CREATE TABLE IF NOT EXISTS labels (
+  tool TEXT NOT NULL, arg TEXT NOT NULL, project TEXT NOT NULL,
+  expected TEXT NOT NULL DEFAULT '', no_answer INTEGER NOT NULL DEFAULT 0, skip INTEGER NOT NULL DEFAULT 0,
+  by TEXT NOT NULL DEFAULT '', ts REAL NOT NULL,
+  PRIMARY KEY (tool, arg, project));
 """
+
+# The tools whose main argument is a question with one right answer: the calls of these tools are the
+# questions an admin labels on the Questions page, and the labelled ones are the golden set from real use.
+QUESTION_TOOLS = ("search", "contracts_search", "code_grep")
 
 
 def _log(msg: str) -> None:
@@ -141,6 +150,61 @@ class Usage:
         params.append(limit)
         return [(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts)), u, t, p, bool(ok), s, a)
                 for ts, u, t, p, ok, s, a in self._rows(sql, tuple(params))]
+
+    # ------------------------------------------------------------------ questions and their labels
+    def questions(self, limit: int = 200) -> list[dict]:
+        """The questions people asked (calls of QUESTION_TOOLS with an argument), one row per question:
+        how often, when last, by whom, and the label an admin gave it. Not labelled first, then the newest.
+        A labelled question stays in the list after its calls are deleted (calls are kept USAGE_DAYS)."""
+        marks = ",".join("?" * len(QUESTION_TOOLS))
+        asked = self._rows(
+            f"SELECT tool, arg, project, COUNT(*), MAX(ts), GROUP_CONCAT(DISTINCT user) FROM calls "
+            f"WHERE tool IN ({marks}) AND arg != '' GROUP BY tool, arg, project", QUESTION_TOOLS)
+        labels = {(t, a, p): (e, bool(n), bool(k), by, ts) for t, a, p, e, n, k, by, ts in self._rows(
+            "SELECT tool, arg, project, expected, no_answer, skip, by, ts FROM labels")}
+        rows = {(t, a, p): {"tool": t, "arg": a, "project": p, "count": n, "last": ts, "users": u or ""}
+                for t, a, p, n, ts, u in asked}
+        for key, (expected, no_answer, skip, by, ts) in labels.items():
+            row = rows.setdefault(key, {"tool": key[0], "arg": key[1], "project": key[2], "count": 0,
+                                        "last": ts, "users": ""})
+            row.update(expected=expected, no_answer=no_answer, skip=skip, by=by, labelled=True)
+        out = sorted(rows.values(), key=lambda r: (bool(r.get("labelled")), -r["last"]))
+        return out[:limit]
+
+    def unlabelled(self) -> int:
+        """How many asked questions have no label yet: the number beside the Questions tab."""
+        marks = ",".join("?" * len(QUESTION_TOOLS))
+        return self._rows(
+            f"SELECT COUNT(*) FROM (SELECT DISTINCT tool, arg, project FROM calls WHERE tool IN ({marks}) "
+            f"AND arg != '') c WHERE NOT EXISTS (SELECT 1 FROM labels l WHERE l.tool = c.tool AND l.arg = c.arg "
+            f"AND l.project = c.project)", QUESTION_TOOLS)[0][0]
+
+    def label(self, tool: str, arg: str, project: str, expected: str = "", no_answer: bool = False,
+              skip: bool = False, by: str = "") -> bool:
+        """Save the label of one question: the document or symbol that must be found, or "the corpus
+        has no answer", or "not a question, skip". False when nothing of the three is given."""
+        expected = " ".join(expected.split())[:300]
+        if tool not in QUESTION_TOOLS or not arg or not (expected or no_answer or skip):
+            return False
+        with self._lock:
+            self.db.execute(
+                "INSERT INTO labels (tool, arg, project, expected, no_answer, skip, by, ts) VALUES (?,?,?,?,?,?,?,?) "
+                "ON CONFLICT (tool, arg, project) DO UPDATE SET expected = excluded.expected, "
+                "no_answer = excluded.no_answer, skip = excluded.skip, by = excluded.by, ts = excluded.ts",
+                (tool, arg, project or "all", "" if (no_answer or skip) else expected, 1 if no_answer else 0,
+                 1 if skip else 0, by, time.time()))
+        return True
+
+    def unlabel(self, tool: str, arg: str, project: str) -> None:
+        with self._lock:
+            self.db.execute("DELETE FROM labels WHERE tool = ? AND arg = ? AND project = ?",
+                            (tool, arg, project or "all"))
+
+    def golden(self) -> list[dict]:
+        """The labelled questions as a golden set: skipped ones are left out."""
+        return [{"tool": t, "question": a, "project": p, "expected": e, "no_answer": bool(n)}
+                for t, a, p, e, n in self._rows(
+                    "SELECT tool, arg, project, expected, no_answer FROM labels WHERE skip = 0 ORDER BY ts")]
 
     # ------------------------------------------------------------------ reading
     def _rows(self, sql: str, params: tuple = ()) -> list[tuple]:
