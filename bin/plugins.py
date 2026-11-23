@@ -14,6 +14,30 @@ A `plugin.py` defines:
   def call(name, args, allowed, core) -> str     # answer one of its tools; `core` is kb_core
   def build(core) -> None                        # optional: run at the end of `kb update`
 
+An access plugin also defines both of these, and kb-http then answers the two webhooks of the access
+protocol (docs/access-protocol.md) from it, at `/local/login` and `/local/permissions`:
+
+  def login(body, core) -> (status, body) or (status, body, headers)
+  def permissions(token, projects, core) -> (status, body)
+
+It may bring pages to `/admin` as well (the plugin `contrib/users` does: users, rights, tokens):
+
+  TABS = [("Users", "/users", "admin"), ("My tokens", "/me", "member")]   # label, path, who may open it
+  TOKENS = True                              # people make tokens on its pages: the how-to says so
+  def role(token, core) -> "admin" | "member" | None      # who may sign in to the pages with this token
+  def page(req, core) -> (status, title, body) or ("redirect", "login")
+
+  PUBLIC = ["/forgot", "/reset"]             # pages under /admin that need no session
+  def public_page(req, core) -> (status, title, body)     # req: method, path, form, query, base, now, ip
+  SIGN_IN_HINT = "your password"             # what the how-to tells a person to enter at the sign-in
+
+The core checks the session, the csrf value of a form and the `who` of the tab before it calls `page`.
+A public page has no session: the plugin owns its safety. A `"/forgot"` in PUBLIC puts a link on the
+sign-in page.
+`req` has `method`, `path` (under /admin), `form`, `base`, `csrf`, `user`, `admin`, `now` and three calls:
+`forget()` drops the cached token verdicts, `drop_sessions(name)` ends the page sessions of a user,
+`audit(action, detail)` writes the admin log. A "member" opens only the tabs marked `member`.
+
 `allowed` is the caller's project set (None = everything): a plugin must answer only from those
 projects, like every core tool. Paging, cursors, usage counting and access checks of arguments are the
 core's, so a plugin returns plain text.
@@ -73,6 +97,14 @@ def active(enabled: set[str]) -> list:
         except Exception as e:  # noqa: BLE001
             sys.stderr.write(f"kb: plugin {name} failed to load: {type(e).__name__}: {e}\n")
     return mods
+
+
+def access(enabled: set[str]):
+    """The active plugin that answers the two access webhooks (the first by name), or None."""
+    for mod in active(enabled):
+        if callable(getattr(mod, "login", None)) and callable(getattr(mod, "permissions", None)):
+            return mod
+    return None
 
 
 def build_all() -> None:

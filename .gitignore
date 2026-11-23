@@ -55,3 +55,11 @@ sandbox/node_modules/
 /node_modules/
 /docs/.vitepress/dist/
 /docs/.vitepress/cache/
+
+# The users plugin (contrib/users): token hashes of real people. Never in git.
+/users.json
+/users.json.tmp
+# Admin names of one server (KB_ADMINS file).
+/admins.txt
+# Mail settings of the users plugin: holds the SMTP password. Never in git.
+/smtp.env

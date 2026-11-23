@@ -146,6 +146,11 @@ class Authenticator:
         self._lock = threading.Lock()
         self.upstream_calls = 0  # for tests and logs
 
+    def forget(self) -> None:
+        """Drop every cached verdict: an admin changed a user, and the change must hold at once."""
+        with self._lock:
+            self._cache.clear()
+
     @staticmethod
     def token_from_header(header: str | None) -> str:
         parts = (header or "").strip().split(None, 1)
@@ -311,12 +316,17 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     auth: Authenticator  # set on the subclass by make_server()
     admins: set = set()
+    access = None  # an access plugin (bin/plugins.py): it answers the two webhooks, and may bring pages
     sessions = admin.Sessions()
     logins = admin.Logins()
     oauth: "oauth.Server | None" = None
 
     def log_message(self, fmt: str, *args) -> None:  # request line only, never headers
-        log(f"{self.address_string()} {fmt % args}")
+        line = fmt % args
+        if "/admin/" in line and "?" in line:  # a page link can carry a one-time value: never log it
+            import re
+            line = re.sub(r"(/admin/[^ ?\"]*)\?[^ \"]*", r"\1?…", line)
+        log(f"{self.address_string()} {line}")
 
     def _send(self, status: int, body: dict | list | None, headers: dict | None = None) -> None:
         data = b"" if body is None else json.dumps(body).encode()
@@ -416,7 +426,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _admin(self, method: str, path: str) -> None:
         import addons
-        if not self.admins or self.oauth is None or not addons.on("admin"):
+        with_roles = callable(getattr(self.access, "role", None))  # the access plugin names its own admins
+        if not (self.admins or with_roles) or self.oauth is None or not addons.on("admin"):
             self._send(404, {"error": "not found"})
             return
         base = self._base()
@@ -428,8 +439,24 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._admin_login(base)
             return
+        if path[len("/admin"):] in (getattr(self.access, "PUBLIC", None) or []) \
+                and callable(getattr(self.access, "public_page", None)):
+            self._plugin_public(base, method, path)
+            return
         if session is None:
             self._redirect(f"{base}/admin/login")
+            return
+        # A person whom the access plugin lets in but who is no admin: the tabs the plugin opens to
+        # every member and the how-to, nothing else.
+        tab = self._plugin_tab(path) if callable(getattr(self.access, "page", None)) else None
+        member = not session.get("admin", True)
+        if member and not (path in ("/admin/logout", "/admin/howto") or (tab is not None and tab[2] == "member")):
+            home = self._member_home()
+            if method == "GET" and path == "/admin" and home:
+                self._redirect(f"{base}/admin{home}")
+                return
+            self._send_page(403, admin.page("KB admin", "<main><section>This page is for the admins of this "
+                                            "server.</section></main>", base, "", session["csrf"], member=True))
             return
         if method == "POST":
             form = self._form() or {}
@@ -450,6 +477,9 @@ class Handler(BaseHTTPRequestHandler):
                 _audit(admin_name(session["user"]), "rebuild")
                 self._send_page(200, admin.status_page(base, session["csrf"], admin.status(self.oauth),
                                                        session["user"], admin.rebuild()))
+                return
+            if tab is not None:
+                self._plugin_page(base, session, sid, "POST", path, form, tab)
                 return
             if path == "/admin/clients/revoke":
                 cid = str(form.get("client_id", ""))
@@ -491,8 +521,88 @@ class Handler(BaseHTTPRequestHandler):
             self._send_page(200, admin.clients_page(base, session["csrf"], self.oauth.clients))
         elif path == "/admin/index":
             self._send_page(200, admin.index_page(base, session["csrf"], USAGE))
+        elif tab is not None:
+            self._plugin_page(base, session, sid, "GET", path, {}, tab)
+        elif path == "/admin/howto":
+            self._send_page(200, admin.howto_page(base, session["csrf"], os.environ.get("KB_PUBLIC_LOGIN_URL", ""),
+                                                  member))
         else:
             self._send(404, {"error": "not found"})
+
+    def _plugin_tab(self, path: str) -> tuple[str, str, str] | None:
+        """The tab of the access plugin that owns an /admin path: (label, path under /admin, who)."""
+        for label, tab, who in getattr(self.access, "TABS", None) or []:
+            if path == f"/admin{tab}" or path.startswith(f"/admin{tab}/"):
+                return label, tab, who
+        return None
+
+    def _plugin_public(self, base: str, method: str, path: str) -> None:
+        """A page of the access plugin that needs no session ("forgot password"). The plugin owns its
+        safety: there is no session and so no csrf value."""
+        form = (self._form() or {}) if method == "POST" else {}
+        query = {k: v[0] for k, v in urllib.parse.parse_qs(self.path.partition("?")[2]).items()}
+        ip = (self.headers.get("X-Forwarded-For") or self.client_address[0]).split(",")[0].strip()
+        req = {"method": method, "path": path[len("/admin"):], "form": form, "query": query, "base": base,
+               "now": time.time(), "ip": ip, "audit": lambda action, detail="": _audit("?", action, detail)}
+        try:
+            status, title, body = self.access.public_page(req, kb_core)
+        except Exception as e:  # noqa: BLE001 — a broken plugin page never takes the server down
+            log(f"access plugin public page failed: {type(e).__name__}")
+            status, title, body = 503, "KB", "<main class=login><section>This page is not available.</section></main>"
+        self._send_page(int(status), admin.page(title, body))
+
+    def _member_home(self) -> str | None:
+        """The first tab of the access plugin that a person who is no admin may open."""
+        return next((tab for _, tab, who in getattr(self.access, "TABS", None) or [] if who == "member"), None)
+
+    def _plugin_page(self, base: str, session: dict, sid: str | None, method: str, path: str, form: dict,
+                     tab: tuple[str, str, str]) -> None:
+        """A page of the access plugin (bin/plugins.py). The core has checked the session, the csrf value
+        of a form and who may open the tab; the plugin answers with a title and a body."""
+        user = admin_name(session["user"]).lower()
+
+        def audit(action: str, detail: str = "") -> None:
+            log(f"{getattr(self.access, 'NAME', 'plugin')}: {action} {detail} by {user}".replace("  ", " "))
+            _audit(user, action, detail)
+
+        req = {"method": method, "path": path[len("/admin"):], "form": form, "base": base, "csrf": session["csrf"],
+               "user": user, "admin": bool(session.get("admin", True)), "now": time.time(),
+               "forget": self.auth.forget, "drop_sessions": self.sessions.drop_user, "audit": audit}
+        try:
+            out = self.access.page(req, kb_core)
+        except Exception as e:  # noqa: BLE001 — a broken plugin page never takes the server down
+            log(f"access plugin page failed: {type(e).__name__}")
+            out = (503, "KB admin", "<main><section>This page is not available.</section></main>")
+        if out[0] == "redirect":
+            self.sessions.drop(sid)
+            self._redirect(f"{base}/admin/login")
+            return
+        status, title, body = out
+        self._send_page(int(status), admin.page(title, body, base, tab[0], session["csrf"], member=not req["admin"]))
+
+    def _local_hook(self, path: str) -> None:
+        """The two webhooks of access protocol v1, answered inside this server by the access plugin
+        (bin/plugins.py)."""
+        form = self._form()
+        if form is None:
+            self._send(400, {"message": "unreadable body"})
+            return
+        try:
+            if path == "/local/login":
+                status, body, *rest = self.access.login(form, kb_core)
+                self._send(int(status), body, rest[0] if rest else None)
+                return
+            try:
+                token = Authenticator.token_from_header(self.headers.get("Authorization"))
+            except AuthError:
+                self._send(401, {"message": "missing bearer token"})
+                return
+            asked = form.get("projects")
+            status, body = self.access.permissions(token, asked if isinstance(asked, list) else [], kb_core)
+            self._send(int(status), body)
+        except Exception as e:  # noqa: BLE001 — a broken plugin is an outage, never an open door
+            log(f"access plugin failed: {type(e).__name__}")
+            self._send(503, {"message": "the access plugin is not available"})
 
     def _admin_login(self, base: str) -> None:
         form = self._form() or {}
@@ -522,16 +632,25 @@ class Handler(BaseHTTPRequestHandler):
             _audit(str(form.get("username", "")) or "?", "admin sign-in refused", str(e)[:200])
             self._send_page(200, admin.login_page(base, error=str(e)))
             return
-        if not admin.is_admin(ident.user, self.admins):
+        role = None
+        if callable(getattr(self.access, "role", None)):
+            try:
+                role = self.access.role(token, kb_core)
+            except Exception as e:  # noqa: BLE001 — a broken plugin gives nobody a role
+                log(f"access plugin role failed: {type(e).__name__}")
+        is_admin = admin.is_admin(ident.user, self.admins) or role == "admin"
+        member_home = self._member_home() if role == "member" else None
+        if not is_admin and not member_home:
             log(f"admin: {admin_name(ident.user)} is not an admin")
             _audit(admin_name(ident.user), "admin sign-in refused", "not an admin")
             self._send_page(403, admin.login_page(base, error="This account is not a KB admin."))
             return
-        sid = self.sessions.create(ident.user, token)
-        log(f"admin: signed in {admin_name(ident.user)}")
-        _audit(admin_name(ident.user), "admin sign-in")
+        sid = self.sessions.create(ident.user, token, admin=is_admin)
+        log(f"admin: signed in {admin_name(ident.user)}{'' if is_admin else ' (member pages only)'}")
+        _audit(admin_name(ident.user), "admin sign-in" if is_admin else "sign-in")
         self.send_response(302)
-        for k, v in {**self._set_cookie(sid, admin.SESSION_TTL), "Location": f"{base}/admin"}.items():
+        home = f"{base}/admin" if is_admin else f"{base}/admin{member_home}"
+        for k, v in {**self._set_cookie(sid, admin.SESSION_TTL), "Location": home}.items():
             self.send_header(k, v)
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -627,6 +746,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.oauth is not None and path in ("/register", "/token", "/authorize"):
             self._oauth_post(path)
             return
+        if self.access is not None and path in ("/local/login", "/local/permissions"):
+            self._local_hook(path)
+            return
         if path != "/mcp":
             self._send(404, {"error": "not found"})
             return
@@ -675,7 +797,7 @@ def admin_name(user: dict) -> str:
 
 def make_server(host: str = HOST, port: int = PORT, auth: Authenticator | None = None,
                 usage: Usage | None = None, oauth_env: dict | None = None,
-                admins: set | None = None) -> ThreadingHTTPServer:
+                admins: set | None = None, access=None) -> ThreadingHTTPServer:
     global USAGE
     USAGE = usage
     admin.set_badge_source(lambda: USAGE.unlabelled() if USAGE is not None and hasattr(USAGE, "unlabelled") else 0)
@@ -689,7 +811,12 @@ def make_server(host: str = HOST, port: int = PORT, auth: Authenticator | None =
         if env else None
     if srv_oauth is not None:
         srv_oauth.on_event = _audit
+    if access is None:  # False: no access plugin, whatever is installed
+        import addons
+        import plugins
+        access = plugins.access(addons.enabled())
     handler = type("KbHandler", (Handler,), {"auth": auth, "oauth": srv_oauth,
+                                              "access": access or None,
                                               "admins": admin.admins() if admins is None else admins,
                                               "sessions": admin.Sessions(), "logins": admin.Logins()})
     srv = ThreadingHTTPServer((host, port), handler)
@@ -712,6 +839,15 @@ def main() -> int:
     if sys.argv[1:] == ["usage"]:
         print(Usage(USAGE_FILE).report(with_users=True))
         return 0
+    import addons
+    import plugins
+    if plugins.access(addons.enabled()) is not None:
+        # An access plugin: both webhooks are this server, unless the unit says otherwise.
+        global PERMISSION_URL
+        me = f"http://{'127.0.0.1' if HOST in ('', '0.0.0.0', '::') else HOST}:{PORT}"
+        os.environ.setdefault("KB_PERMISSION_URL", f"{me}/local/permissions")
+        os.environ.setdefault("KB_LOGIN_URL", f"{me}/local/login")
+        PERMISSION_URL = os.environ["KB_PERMISSION_URL"]
     reason = refuse_reason()
     if reason:
         print(reason, file=sys.stderr)

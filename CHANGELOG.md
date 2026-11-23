@@ -14,6 +14,33 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+- **Access plugins.** The core still keeps no users. A plugin that defines `login()` and `permissions()`
+  answers the two webhooks inside `kb-http`, at `/local/login` and `/local/permissions`, so a system of your
+  own needs no separate webhook service; `kb-http` uses these addresses by default while such a plugin is
+  on. The plugin may bring pages to `/admin` (`TABS`, `role()`, `page()`): the core checks the session, the
+  csrf value and who may open a tab. See `bin/plugins.py`.
+- **Plugin `contrib/users`: the KB's own users, rights and tokens.** An admin adds a person on the Users tab,
+  chooses the projects and gives a first key. With it the person signs in to the pages and opens
+  "My tokens": the own tokens, one per computer, made and removed by the person. A token
+  has the rights of its owner. A person who is no admin reaches only that page and the how-to. The Users tab shows
+  who is online; a person who is no admin does not see that list. A key or
+  token shows once; `users.json` keeps only its SHA-256. It lives until it is removed, and a change holds
+  at once. The first admin: `python3 contrib/users/plugin.py add <name> --admin`. Nobody can remove the own
+  last token or the own admin right.
+- **Plugin `contrib/users`: passwords and "reset password" by mail.** A user name is the e-mail of the person.
+  A new person gets a mail with a link and chooses a password; "Forgot the password?" on the sign-in page,
+  "Reset password" of an admin and "Send me a link" on "My tokens" send the same mail. A link works once
+  (one hour; three days for the first mail), and a mail is built only from `KB_PUBLIC_URL`. A password is
+  kept as scrypt with its own salt; five wrong passwords lock the sign-in of a name for 15 minutes. The
+  password also works at the browser sign-in of an agent: each sign-in makes a sign-in token, which ends
+  after 30 days without a request or with a new password. Mail settings: `<data>/smtp.env` or `KB_SMTP_*`.
+  Without mail an admin gives a first key, as before.
+- **Access plugins: pages without a session.** `PUBLIC` and `public_page()` (`bin/plugins.py`). The request
+  log no longer holds the query string of an `/admin/` page.
+- **Admin pages: a "How to" tab** (`/admin/howto`). It gives the address of the server and the commands that
+  connect Claude Code: browser sign-in through `/mcp`, or `kb-login` in the terminal. `KB_PUBLIC_LOGIN_URL`
+  is the address of the login webhook that a person can reach; the page shows it in the `kb-login` command.
+
 - **Added: the Questions page of the admin** (`/admin/questions`, add-on `questions`, off by default). It lists
   the questions people asked (calls of `search`, `contracts_search`, `code_grep`); an admin labels each one with
   the path or symbol that must be found, "no answer in the corpus" or "skip". A yellow mark beside the tab counts

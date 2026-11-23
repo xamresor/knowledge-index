@@ -30,6 +30,7 @@ other refusal is 403, an unreachable webhook is 503 (never cached). Verdicts are
 | `KB_SERVER` | `off` | must be `on` |
 | `KB_PERMISSION_URL` | — | permission webhook (required) |
 | `KB_LOGIN_URL` | — | login webhook: browser sign-in, admin pages, `kb-login` |
+| `KB_PUBLIC_LOGIN_URL` | — | the address of the login webhook that a person can reach; the "How to" admin page shows it in the `kb-login` command |
 | `KB_HOOK_HEADERS` | — | extra headers for both webhooks, a JSON object |
 | `KB_HTTP_HOST` / `KB_HTTP_PORT` | `127.0.0.1` / `8790` | bind address; put a TLS proxy in front |
 | `KB_DOCS_MODE` | `light` | no reranker (~650 MB RAM); `full` adds an LLM reranker (1-2 min per search on a CPU); `bm25` = keywords only (~70 MB) |
@@ -51,6 +52,31 @@ parsed graph in memory (~0.3-1.6 s on that graph; then milliseconds). A helper t
 
 **Locally:** `make serve` (`bin/kb-api` on 127.0.0.1:8899) also answers MCP over HTTP at `/mcp` and shows
 the same admin pages at `/admin`, without sign-in: loopback without a token is the trust boundary.
+
+**The KB's own users (the plugin `contrib/users`).** Without a system of your own to answer the two webhooks, let the
+server keep the users: `kb addon install contrib/users`, then `python3 contrib/users/plugin.py add <name> --admin` prints the
+key of the first admin. That admin adds the other people on the Users tab: a name, the projects (a checkbox per project of the server, or "all" for
+all) and the admin right, and gives each person the first key. With it the person signs in to the pages
+and opens "My tokens" with the own tokens. The Users tab of an admin also shows who is online (a request
+in the last 15 minutes). The person makes one token for each computer or agent and removes a token there. A person who is no
+admin reaches only "My tokens" and "How to". An agent sends a token as `Authorization: Bearer <token>`,
+or the person signs in with the user name and a token in the password field of the browser sign-in or of
+`kb-login`. A key or token shows once; `<data>/users.json` (owner only) keeps its SHA-256. It lives until
+its owner or an admin removes it, or an admin disables or removes the user. With the add-on on,
+`KB_PERMISSION_URL` and `KB_LOGIN_URL` default to the server itself (`/local/permissions`,
+`/local/login`); set them only to use another system.
+
+With mail set up (`<data>/smtp.env`, owner only: `KB_SMTP_HOST`, `KB_SMTP_PORT`, `KB_SMTP_USER`,
+`KB_SMTP_PASSWORD`, `KB_SMTP_FROM`, `KB_SMTP_TLS`, and `KB_PUBLIC_URL`, the address of the server that goes
+into a mail), a user name is the e-mail of the person and nobody hands a key over: a new person gets a mail
+with a link and chooses a password. "Forgot the password?" on the sign-in page and "Reset password" on the
+Users tab send the same mail. The password signs the person in to the pages and at the browser sign-in of
+an agent; tokens stay the way for a header.
+
+**An access plugin.** The users above are a plugin, and so can be a system of your own: a `plugin.py` with
+`login(body, core)` and `permissions(token, projects, core)` answers the two webhooks inside the server,
+with no webhook service. It may bring its own tabs to the admin pages. The contract is in `bin/plugins.py`.
+One server has one access plugin: the first by name answers.
 
 **Admin pages (`/admin`).** For the users named in `KB_ADMINS` (comma-separated) or in `<data>/admins.txt`
 (one per line), matched against the `uname`, `username`, `name`, `id` or `uid` the permission webhook

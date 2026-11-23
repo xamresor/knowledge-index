@@ -97,11 +97,20 @@ class Admin(unittest.TestCase):
         self.assertIn("HttpOnly", headers["Set-Cookie"])
         self.assertIn("SameSite=Strict", headers["Set-Cookie"])
         for path, word in (("", "Knowledge base"), ("/index", "Storage"), ("/usage", "Usage"),
-                           ("/clients", "Sign-in clients")):
+                           ("/clients", "Sign-in clients"), ("/howto", "Connect an agent")):
             status, headers, page = self.req(c, "GET", f"{self.base}/admin{path}")
             self.assertEqual(status, 200, path)
             self.assertIn(word, page)
             self.assertNotIn("<script", page)
+
+    def test_howto_page_gives_the_address_of_this_server(self):
+        c = self.client()
+        self.sign_in(c, self.base)
+        _, _, page = self.req(c, "GET", f"{self.base}/admin/howto")
+        self.assertIn(f"{self.base}/mcp", page)                 # the address to paste, not a placeholder
+        self.assertIn("claude mcp add --transport http kb", page)
+        self.assertIn("kb-login", page)
+        self.assertIn('class="on">How to<', page)
 
     def test_wrong_code_and_non_admin(self):
         status, _, page = self.sign_in(self.client(), self.base, code="000000")

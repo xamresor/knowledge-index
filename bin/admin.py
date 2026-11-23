@@ -63,11 +63,12 @@ class Sessions:
         self.items: dict[str, dict] = {}
         self.lock = threading.Lock()
 
-    def create(self, user: dict, token: str) -> str:
+    def create(self, user: dict, token: str, admin: bool = True) -> str:
+        """`admin` False: a person of the KB's own users who may open only the own tokens page."""
         sid = secrets.token_urlsafe(32)
         with self.lock:
             self._expire()
-            self.items[sid] = {"user": user, "token": token, "csrf": secrets.token_urlsafe(24),
+            self.items[sid] = {"user": user, "token": token, "csrf": secrets.token_urlsafe(24), "admin": admin,
                                "exp": time.monotonic() + self.ttl}
         return sid
 
@@ -81,6 +82,14 @@ class Sessions:
     def drop(self, sid: str | None) -> None:
         with self.lock:
             self.items.pop(sid or "", None)
+
+    def drop_user(self, name: str) -> None:
+        """End every session of a user whose key or rights an admin has just changed."""
+        name = name.strip().lower()
+        with self.lock:
+            for sid in [k for k, v in self.items.items()
+                        if any(str(v["user"].get(f, "")).strip().lower() == name for f in ID_FIELDS)]:
+                del self.items[sid]
 
     def _expire(self) -> None:
         now = time.monotonic()
@@ -235,6 +244,7 @@ td.n,th.n{text-align:right;white-space:nowrap}tr.total td{font-weight:600}
 .ratio{height:3px;background:var(--track);border-radius:2px;margin-top:4px}.ratio i{display:block;height:3px;background:var(--accent);border-radius:2px}
 .ratio.bad i{background:var(--crit)}
 .bad{color:var(--crit)}.ok{color:var(--good)}.muted{color:var(--ink3)}code{font-size:12px}
+pre{background:var(--panel2);border:1px solid var(--line);border-radius:3px;padding:10px 12px;margin:8px 0;overflow-x:auto;font-size:12px}.steps{margin:8px 0;padding-left:20px}.steps li{margin:4px 0}
 button,.btn{font:inherit;padding:6px 12px;border:1px solid var(--line);border-radius:3px;background:var(--panel);color:var(--ink);cursor:pointer}
 button.primary{background:var(--btn);color:var(--btn-ink);border-color:var(--btn)}
 .note{background:var(--accent-soft);border-left:3px solid var(--accent);padding:8px 12px;margin-bottom:16px}
@@ -273,15 +283,23 @@ def _waiting() -> int:
         return 0
 
 
-def page(title: str, body: str, base: str = "", tab: str = "", csrf: str = "", right: str = "") -> bytes:
+def page(title: str, body: str, base: str = "", tab: str = "", csrf: str = "", right: str = "",
+         member: bool = False) -> bytes:
+    """`member`: the signed-in person is no admin and sees only the own tokens and the how-to."""
     nav = ""
     if csrf:
         tabs = [("Status", ""), ("Index", "/index"), ("Usage", "/usage"), ("Questions", "/questions"),
-                ("Audit", "/audit"), ("Clients", "/clients")]
+                ("Audit", "/audit"), ("Clients", "/clients"), ("How to", "/howto")]
         if not addons.on("audit"):
             tabs.remove(("Audit", "/audit"))
         if not addons.on("questions"):
             tabs.remove(("Questions", "/questions"))
+        import plugins
+        extra = getattr(plugins.access(addons.enabled()), "TABS", None) or []  # the access plugin's own pages
+        for label, path, _who in extra:
+            tabs.insert(-1, (label, path))
+        if member:
+            tabs = [(label, path) for label, path, who in extra if who == "member"] + [("How to", "/howto")]
         waiting = _waiting() if addons.on("questions") else 0
         mark = (f' <span class="wait" title="{waiting} question{"s" if waiting != 1 else ""} without a label">'
                 f'{waiting}</span>') if waiting else ""
@@ -310,8 +328,11 @@ def login_page(base: str, step: str = "password", lid: str = "", error: str = ""
         fields = ('<label for="u">User name</label><input id="u" name="username" autocomplete="username" autofocus required>'
                   '<label for="p">Password</label><input id="p" name="password" type="password" '
                   'autocomplete="current-password" required>')
+    import plugins
+    forgot = (f'<p><a href="{base}/admin/forgot">Forgot the password?</a></p>'
+              if "/forgot" in (getattr(plugins.access(addons.enabled()), "PUBLIC", None) or []) else "")
     body = (f'<main class="login">' + panel("KB admin · sign in", f'{err}<form method="post" action="{base}/admin/login">'
-            f'{fields}<p><button class="primary">Sign in</button></p></form>') + '</main>')
+            f'{fields}<p><button class="primary">Sign in</button></p></form>{forgot}') + '</main>')
     return page("KB admin · sign in", body)
 
 
@@ -391,6 +412,69 @@ def client_users(c: dict) -> str:
         return "—"
     return "<br>".join(f"{esc(u)} <small>({esc(time.strftime('%Y-%m-%d %H:%M', time.localtime(t)))})</small>"
                        for u, t in sorted(users.items(), key=lambda kv: -kv[1]))
+
+
+def howto_page(base: str, csrf: str, login_url: str = "", member: bool = False) -> bytes:
+    """How a person connects an agent to this server. The addresses come from the request, so the
+    commands on the page work when pasted. `login_url` is the public address of the login webhook
+    (KB_PUBLIC_LOGIN_URL): the server itself often reaches the webhook on a loopback address."""
+    mcp = f"{base}/mcp"
+    import plugins
+    access = plugins.access(addons.enabled())  # an access plugin answers the login at this server itself
+    own = bool(getattr(access, "TOKENS", False))  # ... and people hold tokens that they make on its pages
+    login_url = login_url or (f"{base}/local/login" if access is not None else "")
+    secret = getattr(access, "SIGN_IN_HINT", "") or "the password"
+    header = panel("Claude Code: a token in a header",
+                   "<p>The shortest way on this server. Sign in to these pages, open \"My tokens\" and make a token "
+                   "for this computer. A token lives until you remove it, so there is no sign-in to repeat. Keep "
+                   "it out of a file that is in git.</p>"
+                   f'<pre>claude mcp add --transport http kb {esc(mcp)} --scope user --header "Authorization: Bearer &lt;token&gt;"</pre>'
+                   ) if own else ""
+    entry = json.dumps({"mcpServers": {"kb": {"type": "http", "url": mcp}}}, indent=2)
+    login = login_url or "<login address>"
+    ask = "" if login_url else ("<p class=muted>Ask the administrator of this server for the login address: "
+                                "KB_PUBLIC_LOGIN_URL is not set.</p>")
+    body = (
+        "<main>"
+        + panel("Connect an agent", f"<p>The address of this knowledge base for an MCP client:</p><pre>{esc(mcp)}</pre>"
+                "<p>Every person signs in with the own account. The server keeps no passwords: your system "
+                "checks the account and says which projects the person may search.</p>")
+        + panel("Claude Code: sign-in through the browser",
+                "<ol class=steps><li>Register the server once. For yourself, in every project:"
+                f"<pre>claude mcp add --transport http kb {esc(mcp)} --scope user</pre>"
+                "Or for a whole team, in the <code>.mcp.json</code> of the repository:"
+                f"<pre>{esc(entry)}</pre></li>"
+                "<li>Start Claude Code, type <code>/mcp</code>, choose <code>kb</code>, then <b>Authenticate</b>. "
+                "The browser opens the sign-in page of this server.</li>"
+                f"<li>Enter the user name and {secret}, then the code when asked. The tools of the server "
+                "appear in the session.</li></ol>"
+                "<p>Start the sign-in from <code>/mcp</code>, not from a link in the chat. Claude Code waits for the "
+                "answer on a local port for a short time only. If the browser ends on "
+                "<code>http://localhost:…/callback</code> with \"This site can\u2019t be reached\", the wait is over: "
+                "start again from <code>/mcp</code>.</p>")
+        + header
+        + panel("Claude Code: sign-in in the terminal, no browser",
+                "<p><code>kb-login</code> from the source of this server asks for the user name, the password and the "
+                "code, keeps the token in <code>~/.claude/kb/token</code> (owner only) and registers the server so "
+                "that Claude Code sends the token by itself.</p>"
+                f"<pre>bin/kb-login --login-url {esc(login)} --kb-url {esc(mcp)} --add-to-claude</pre>{ask}"
+                "<p>When the token ends, run the same command without <code>--add-to-claude</code>.</p>")
+        + panel("Other MCP clients",
+                "<p>Any client that speaks MCP over HTTP works. A client with browser sign-in (OAuth) needs only "
+                "the address above. A client without it sends the token of <code>kb-login</code> in the header "
+                "<code>Authorization: Bearer &lt;token&gt;</code>.</p>")
+        + panel("When it does not work",
+                "<table><tr><th>What you see</th><th>Cause and fix</th></tr>"
+                "<tr><td>401, or the client asks to sign in again</td><td>No token, or the token ended. Your system "
+                "decides how long a token lives. Sign in again.</td></tr>"
+                "<tr><td>403</td><td>The account may search no project of this server. Ask for access in your system.</td></tr>"
+                "<tr><td>503</td><td>The server cannot reach your system to check the token. Try again later.</td></tr>"
+                "<tr><td>Slow answers, a slow Status page</td><td>A build is running: see Status, \"Builds\". "
+                "Wait until it ends.</td></tr>"
+                "<tr><td>An answer that does not match the code</td><td>The index is as old as the last build on the "
+                "Status page. Check the claim against the file.</td></tr></table>")
+        + "</main>")
+    return page("KB admin · how to", body, base, "How to", csrf, member=member)
 
 
 def clients_page(base: str, csrf: str, clients: dict, note: str = "") -> bytes:
