@@ -34,6 +34,7 @@ import math
 import os
 import secrets
 import subprocess
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -262,7 +263,16 @@ def building(lock_file: str | None = None) -> bool:
 
 
 REFRESH_BUSY = 75     # the exit code of `kb-refresh --force` when another build holds the lock
-REBUILD_WAIT = 3.0    # seconds to see whether the started build took the lock or exited at once
+REBUILD_WAIT = 3.0    # seconds to wait for the started build to confirm that it took the lock
+
+
+def _acked(ack: str, pid: int) -> bool:
+    """True when kb-refresh wrote its own pid into the ack file: it holds the lock and builds."""
+    try:
+        with open(ack, encoding="utf-8") as f:
+            return f.read().strip() == str(pid)
+    except OSError:
+        return False
 
 
 def rebuild(script: str | None = None) -> str:
@@ -270,25 +280,44 @@ def rebuild(script: str | None = None) -> str:
     the start, and the last started process counts as running until it ends: kb-refresh takes the flock
     a moment after it starts, and a second click in that moment must not start a second build.
 
-    A build of cron can take the lock between the check and the start. So the page waits up to
-    REBUILD_WAIT seconds: the build takes the lock (started), or kb-refresh exits at once (75: another
-    build runs; another code: it stopped)."""
+    A build of cron can take the lock between the check and the start, so a held lock says nothing
+    about this child. The child itself confirms: kb-refresh writes its pid into the file
+    KB_REFRESH_ACK once it holds the lock and starts the build. The page waits up to REBUILD_WAIT
+    seconds for that line, or for the child to exit (75: another build runs; another code: it stopped)."""
     global _rebuild_proc
     with _rebuild_lock:
         if building() or (_rebuild_proc is not None and _rebuild_proc.poll() is None):
             return "A build is already running."
         script = script or os.path.join(os.path.dirname(os.path.abspath(__file__)), "kb-refresh")
-        proc = _rebuild_proc = subprocess.Popen([script, "--force"], cwd=kb_core.KB, stdout=subprocess.DEVNULL,
-                                                stderr=subprocess.DEVNULL, start_new_session=True)
-        end = time.monotonic() + REBUILD_WAIT
-        while time.monotonic() < end and proc.poll() is None and not building():
-            time.sleep(0.05)
+        logs = os.path.join(kb_core.KB, "logs")
+        fd, ack = tempfile.mkstemp(prefix=".rebuild-ack.", dir=logs if os.path.isdir(logs) else None)
+        os.close(fd)
+        try:
+            proc = _rebuild_proc = subprocess.Popen(
+                [script, "--force"], cwd=kb_core.KB, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True, env={**os.environ, "KB_REFRESH_ACK": ack})
+            end = time.monotonic() + REBUILD_WAIT
+            started = False
+            while time.monotonic() < end and proc.poll() is None:
+                if _acked(ack, proc.pid):
+                    started = True
+                    break
+                time.sleep(0.05)
+            started = started or _acked(ack, proc.pid)
+        finally:
+            try:
+                os.unlink(ack)
+            except OSError:
+                pass
     code = proc.poll()
+    if started:
+        return "Rebuild started. It takes a few minutes; the status page shows it in the build log."
     if code == REFRESH_BUSY:
         return "A build is already running."
-    if code not in (None, 0):
+    if code is not None:
         return f"The rebuild stopped at once (exit code {code}). The status page shows the build log."
-    return "Rebuild started. It takes a few minutes; the status page shows it in the build log."
+    return (f"The rebuild did not confirm its start within {REBUILD_WAIT:g} s. "
+            "The status page shows whether it runs.")
 
 
 # ---------------------------------------------------------------------------------- facts

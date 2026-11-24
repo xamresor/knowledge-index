@@ -369,7 +369,13 @@ class HttpTest(unittest.TestCase):
         self.addCleanup(lambda: setattr(type(self), "cfg", {}))
         del self.mails[:]
 
+    def wait_for_mail(self):
+        """"Forgot" mails go from a background worker: wait until it handled every request."""
+        if users._MAIL_QUEUE is not None:
+            users._MAIL_QUEUE.join()
+
     def link(self, to):
+        self.wait_for_mail()
         (text,) = [t for name, t in self.mails if name == to][-1:]
         # The value is in the fragment: a browser never sends it, the page script puts it into the form.
         url = re.search(r"https://kb\.public\.test/kb(/admin/reset#t=[A-Za-z0-9_-]+)", text).group(1)
@@ -421,6 +427,7 @@ class HttpTest(unittest.TestCase):
             with anon.open(r, timeout=10) as resp:
                 answers.append(re.sub(r"\s+", " ", resp.read().decode()))
         self.assertEqual(answers[0], answers[1])                           # the same page for both names
+        self.wait_for_mail()
         self.assertEqual([to for to, _ in self.mails], ["lena@example.com"])
         self.assertNotIn("evil.test", self.mails[0][1])
         self.assertIn("https://kb.public.test/kb/admin/reset#t=", self.mails[0][1])

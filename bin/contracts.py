@@ -23,6 +23,7 @@ CLI (used by bin/kb):
     contracts.py connections <contracts.json> <out.json> <project>=<docs dir>...
     contracts.py problems    <connections.json> <out.json> docs:<p>=<dir> routes:<p>=<routes.json>
                              calls:<p>=<serves>=<dir,...>...
+    contracts.py stage-contracts <stage dir> <project>=<docs dir>...
 """
 from __future__ import annotations
 
@@ -33,6 +34,7 @@ import sys
 import threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import graph  # noqa: E402
 import paths  # noqa: E402
 
 OUT = str(paths.out_dir())
@@ -40,6 +42,9 @@ CONTRACTS = f"{OUT}/contracts.json"
 CONNECTIONS = f"{OUT}/connections.json"
 PROBLEMS = f"{OUT}/problems.json"
 COLLECTION = os.environ.get("KB_COLLECTION", "kb")
+# The contract docs of each project are also a qmd collection of their own, `<COLLECTION>_contracts-<p>`
+# (bin/kb build_kb, stage_contracts): what a caller limited to some projects may read of the others.
+CONTRACT_COLLECTION = f"{COLLECTION}_contracts-"
 # Contract docs live in <project docs>/contracts/*.md, one connection per file.
 CONTRACT_DOCS_DIR = "contracts"
 CONTRACT_KEYS = ("from", "to", "protocol", "summary")
@@ -51,9 +56,15 @@ class NotBuilt(LookupError):
     """An index file is missing (not built yet). The core turns it into a ToolError."""
 
 
+def contract_collection(project: str) -> str:
+    """The qmd collection that holds only the contract docs of `project`."""
+    return f"{CONTRACT_COLLECTION}{project}"
+
+
 def doc_uri(project: str, rel: str) -> str:
-    """qmd path of a staged doc: one collection per project, `<COLLECTION>-<project>`."""
-    return f"qmd://{COLLECTION}-{project}/{rel}"
+    """qmd path of a contract doc: in the contract collection of its project, which every caller who
+    may see the contract can read (bin/access.py doc_allowed)."""
+    return f"qmd://{contract_collection(project)}/{rel}"
 
 
 # --------------------------------------------------------------------------- shared helpers
@@ -139,6 +150,47 @@ def _contract_files(root: str):
             real = os.path.realpath(os.path.join(cdir, fn))
             if _inside(real, real_root) and os.path.isfile(real):
                 yield fn, real
+
+
+# --------------------------------------------------------------------------- contract docs in qmd
+def stage_contracts(stage: str, roots: dict[str, str]) -> int:
+    """Copy the contract docs of every project (`_contract_files`) into `<stage>/<project>/contracts/`.
+
+    Each project's copy is its own qmd collection (`contract_collection`), and nothing else is in it:
+    a caller limited to some projects reads the contract docs of the others only there, never in their
+    doc collections. So no file name can make another doc look like a contract doc. A folder for every
+    project, also one without contract docs: kb_core can name the collection of every docs project.
+
+    The new copy is built next to the old one and swapped in whole, so a removed or replaced contract
+    doc does not stay. Read like a source file (graph.read_source): a regular file inside the docs root,
+    at most graph.MAX_SOURCE_BYTES (a longer doc is left out). -> the number of docs copied."""
+    import shutil  # noqa: PLC0415
+    new, old = f"{stage}.new", f"{stage}.old"
+    for d in (new, old):
+        shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(new)
+    copied = 0
+    for project, root in sorted(roots.items()):
+        dest = os.path.join(new, project, CONTRACT_DOCS_DIR)
+        os.makedirs(dest)
+        for fn, fp in _contract_files(root) if os.path.isdir(root) else ():
+            # One byte over the limit tells a long doc from one that fits: a cut copy would read as
+            # the whole contract, so a doc over the limit is left out, with a warning.
+            text = graph.read_source(fp, root, graph.MAX_SOURCE_BYTES + 1)
+            if text is None:
+                continue
+            if len(text.encode("utf-8")) > graph.MAX_SOURCE_BYTES:
+                print(f"  warning: {fp} is over {graph.MAX_SOURCE_BYTES} bytes; "
+                      "it is not shared as a contract doc", file=sys.stderr)
+                continue
+            with open(os.path.join(dest, fn), "w", encoding="utf-8") as f:
+                f.write(text)
+            copied += 1
+    if os.path.isdir(stage):
+        os.rename(stage, old)
+    os.rename(new, stage)
+    shutil.rmtree(old, ignore_errors=True)
+    return copied
 
 
 _JSON_CACHE: dict[str, tuple[float, list[dict]]] = {}
@@ -403,11 +455,10 @@ def build_problems(docs: dict[str, str], calls: dict[str, tuple[str, list[str]]]
                 f"in {CONTRACT_DOCS_DIR}/<from>-<to>.md (front matter: from, to, protocol, summary).")
             continue
         for fn, fp in _contract_files(root):
-            try:
-                with open(fp, encoding="utf-8", errors="replace") as f:
-                    fm = frontmatter(f.read(8192))
-            except OSError:
+            head = graph.read_source(fp, root, 8192)   # a regular file inside the docs root only
+            if head is None:
                 continue
+            fm = frontmatter(head)
             missing = [k for k in CONTRACT_KEYS if not fm.get(k)]
             if missing:
                 add(project, "bad-contract", f"{CONTRACT_DOCS_DIR}/{fn}",
@@ -445,12 +496,12 @@ def build_problems(docs: dict[str, str], calls: dict[str, tuple[str, list[str]]]
                     if not fn.endswith(lang.FRONTEND):
                         continue
                     fp = os.path.join(dp, fn)
-                    try:
-                        with open(fp, encoding="utf-8", errors="ignore") as f:
-                            lines = f.read().splitlines()
-                    except OSError:
+                    # The same read as link_http.py: not a device or a pipe, not a link out of the
+                    # calls folder, at most graph.MAX_SOURCE_BYTES. The build holds update.lock here.
+                    text = graph.read_source(fp, root)
+                    if text is None:
                         continue
-                    for i, verb, raw in js_ts.iter_calls(lines):
+                    for i, verb, raw in js_ts.iter_calls(text.splitlines()):
                         uri = norm_uri(raw)
                         # A call that starts with a variable (`${base}/...`) names no route; a
                         # literal ending in `/` is glued to a variable (`'v1/items/' + id`).
@@ -604,10 +655,17 @@ def _main_problems(argv: list[str]) -> int:
     return 0
 
 
+def _main_stage_contracts(argv: list[str]) -> int:
+    stage, *specs = argv
+    n = stage_contracts(stage, dict(spec.partition("=")[::2] for spec in specs))
+    print(f"{n} contract docs staged")
+    return 0
+
+
 if __name__ == "__main__":
     cmds = {"contracts": _main_contracts, "connections": _main_connections,
-            "problems": _main_problems}
-    if len(sys.argv) >= 4 and sys.argv[1] in cmds:
+            "problems": _main_problems, "stage-contracts": _main_stage_contracts}
+    if len(sys.argv) >= 3 and sys.argv[1] in cmds:
         sys.exit(cmds[sys.argv[1]](sys.argv[2:]))
     print(__doc__.split("CLI (used by bin/kb):")[1], file=sys.stderr)
     sys.exit(2)

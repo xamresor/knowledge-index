@@ -19,6 +19,7 @@ CFG="$KB_CONFIG/kb.projects.toml"
 KB_VERSION="$(cat "$KB_PACKAGE/VERSION" 2>/dev/null || echo '0+unknown')"
 OUT="$KB_OUT"
 DOCS_STAGE="$KB_DATA/.docs"      # aggregated docs root for qmd (one collection = one path); gitignored
+CONTRACT_STAGE="$KB_DATA/.docs-contracts"   # the contract docs alone, one qmd collection per project; gitignored
 COLLECTION="${KB_COLLECTION:-kb}"
 CONTRACT_DIR="contracts"          # <project docs>/contracts/*.md = contract docs (bin/contracts.py)
 SELF_DOCS="${KB_SELF_DOCS_NAME:-kb}"  # project name for the KB checkout's own docs/, if present
@@ -687,6 +688,14 @@ build_kb() {
     [ -d "$d" ] || continue
     [[ " ${keep[*]} " == *" $(basename "$d") "* ]] || rm -rf "$d"
   done
+  # The contract docs of every project, copied alone into $CONTRACT_STAGE/<project>/contracts/: one qmd
+  # collection per project ($COLLECTION_contracts-<project>, below) with nothing else in it. A caller
+  # limited to some projects reads the contracts of the others there (bin/access.py), never in their
+  # doc collections. The copy is built aside and swapped in whole: no old file stays.
+  local cspecs=()
+  for root in "${roots[@]}"; do cspecs+=("${root%%|*}=${root#*|}"); done
+  "$PY" "$KB/bin/contracts.py" stage-contracts "$CONTRACT_STAGE" "${cspecs[@]}" >/dev/null \
+    || echo "  warning: staging the contract docs failed; the contract collections keep their last copy" >&2
   [ "$staged" = 1 ] || { echo "  (no docs configured)"; return; }
   # One qmd collection per project ($COLLECTION-<project>), so a search can be scoped to one project
   # and the rest of the network stays out of its results. Searching all projects = all collections.
@@ -694,9 +703,12 @@ build_kb() {
   # the config are removed here.
   local want=() n have
   for n in "$DOCS_STAGE"/*/; do want+=("$COLLECTION-$(basename "$n")"); done
+  for n in "$CONTRACT_STAGE"/*/; do
+    if [ -d "$n" ]; then want+=("${COLLECTION}_contracts-$(basename "$n")"); fi
+  done
   # Each qmd call starts a process (~1 s). When qmd already has exactly the wanted collections, the
   # remove/show/add round below is skipped; one `collection list` is enough to know.
-  have=$(qmd collection list 2>/dev/null | awk -v p="$COLLECTION" '$1==p || index($1,p"-")==1{print $1}' | LC_ALL=C sort | tr '\n' ' ')
+  have=$(qmd collection list 2>/dev/null | awk -v p="$COLLECTION" '$1==p || index($1,p"-")==1 || index($1,p"_contracts-")==1{print $1}' | LC_ALL=C sort | tr '\n' ' ')
   if [ "$have" = "$(printf '%s\n' "${want[@]}" | LC_ALL=C sort | tr '\n' ' ')" ] \
       && [ -f "$DOCS_STAGE/.kb-collections" ] && [ "$(cat "$DOCS_STAGE/.kb-collections")" = "$have" ]; then
     want=()
@@ -704,7 +716,7 @@ build_kb() {
   [ "${#want[@]}" -gt 0 ] && qmd collection remove "$COLLECTION" >/dev/null 2>&1 || true
   [ "${#want[@]}" -gt 0 ] && while read -r n; do
     [[ " ${want[*]} " == *" $n "* ]] || qmd collection remove "$n" >/dev/null 2>&1 || true
-  done < <(qmd collection list 2>/dev/null | awk -v p="$COLLECTION-" 'index($1,p)==1{print $1}')
+  done < <(qmd collection list 2>/dev/null | awk -v p="$COLLECTION" 'index($1,p"-")==1 || index($1,p"_contracts-")==1{print $1}')
   [ "${#want[@]}" -gt 0 ] && for n in "$DOCS_STAGE"/*/; do
     n="$(basename "$n")"
     local cur; cur="$(qmd collection show "$COLLECTION-$n" 2>/dev/null | awk -F': *' '/Path:/{print $2; exit}' || true)"
@@ -713,8 +725,22 @@ build_kb() {
       qmd collection add "$DOCS_STAGE/$n" --name "$COLLECTION-$n" >/dev/null 2>&1 || true
     fi
   done
-  qmd collection list 2>/dev/null | awk -v p="$COLLECTION" 'index($1,p"-")==1{print $1}' | LC_ALL=C sort \
-    | tr '\n' ' ' > "$DOCS_STAGE/.kb-collections"
+  # The contract collections: out of qmd's default search (a local search reads the doc collections,
+  # which hold the same files). kb_core names them for a limited caller.
+  local cur cpath
+  [ "${#want[@]}" -gt 0 ] && for cpath in "$CONTRACT_STAGE"/*/; do
+    [ -d "$cpath" ] || continue
+    cpath="${cpath%/}"
+    n="${COLLECTION}_contracts-$(basename "$cpath")"
+    cur="$(qmd collection show "$n" 2>/dev/null | awk -F': *' '/Path:/{print $2; exit}' || true)"
+    if [ "$cur" != "$cpath" ]; then
+      qmd collection remove "$n" >/dev/null 2>&1 || true
+      qmd collection add "$cpath" --name "$n" >/dev/null 2>&1 || true
+    fi
+    qmd collection exclude "$n" >/dev/null 2>&1 || true
+  done
+  qmd collection list 2>/dev/null | awk -v p="$COLLECTION" 'index($1,p"-")==1 || index($1,p"_contracts-")==1{print $1}' \
+    | LC_ALL=C sort | tr '\n' ' ' > "$DOCS_STAGE/.kb-collections"
   qmd update 2>/dev/null || true
   qmd_embed
   [ "${BUILD_KIND:-}" = "update" ] || qmd status || true   # `kb update` discards this output anyway

@@ -220,14 +220,15 @@ class _Settings(unittest.TestCase):
 
 
 class OnlyContractDocsOpen(_Settings):
-    """3: under `contracts: all` a hidden project's contracts/README.md and sub-folders stay closed."""
+    """3: under `contracts: all` a hidden project's doc collection stays closed; only its contract
+    collection opens (its README and sub-folders are never staged there, test_audit5)."""
 
     def test_doc_allowed(self):
-        ok = ["qmd://kb-sw/contracts/sw-vraa.md", "qmd://kb-sw/contracts/sw-vraa.md  #c3",
-              "qmd://kb-sw/contracts/sw-vraa.md:12"]
-        closed = ["qmd://kb-sw/contracts/README.md", "qmd://kb-sw/contracts/readme.md",
-                  "qmd://kb-sw/contracts/drafts/x.md", "qmd://kb-sw/contracts/archive/a/b.md",
-                  "qmd://kb-sw/contracts/../secret.md", "qmd://kb-sw/contracts/notes.txt"]
+        ok = ["qmd://kb_contracts-sw/contracts/sw-vraa.md", "qmd://kb_contracts-sw/contracts/sw-vraa.md  #c3",
+              "qmd://kb_contracts-sw/contracts/sw-vraa.md:12"]
+        closed = ["qmd://kb-sw/contracts/sw-vraa.md", "qmd://kb-sw/contracts/README.md",
+                  "qmd://kb-sw/contracts/drafts/x.md", "qmd://kb-sw/secret.md", "qmd://kb_contracts/x.md",
+                  "qmd://kb_contracts-/x.md"]
         for p in ok:
             self.assertTrue(access.doc_allowed(p, {"web"}), p)
         for p in closed:
@@ -240,18 +241,21 @@ class OnlyContractDocsOpen(_Settings):
         con.execute("CREATE TABLE documents (id INTEGER PRIMARY KEY, collection TEXT, path TEXT, "
                     "active INTEGER NOT NULL DEFAULT 1)")
         con.execute("CREATE VIRTUAL TABLE documents_fts USING fts5(filepath, title, body)")
-        docs = [("kb-web", "a.md"), ("kb-sw", "contracts/sw-web.md"), ("kb-sw", "contracts/README.md"),
-                ("kb-sw", "contracts/drafts/x.md"), ("kb-sw", "secret.md")]
+        docs = [("kb-web", "a.md"), ("kb_contracts-sw", "contracts/sw-web.md"), ("kb-sw", "contracts/sw-web.md"),
+                ("kb-sw", "contracts/README.md"), ("kb-sw", "secret.md")]
         for i, (c, p) in enumerate(docs, 1):
             con.execute("INSERT INTO documents (id, collection, path) VALUES (?, ?, ?)", (i, c, p))
             con.execute("INSERT INTO documents_fts (rowid, filepath, title, body) VALUES (?, ?, ?, ?)",
                         (i, p, p, "word"))
         con.commit()
         con.close()
-        idx = docs_grade.Index(path, ["kb-web"], "kb-")
+        idx = docs_grade.Index(path, ["kb-web", "kb_contracts-sw"])
         self.addCleanup(idx.close)
         self.assertEqual(idx.size(), 2)
         self.assertEqual(idx.df('"word"'), 2)
+        local = docs_grade.Index(path, None, "kb_contracts-")   # a local caller: no copies counted twice
+        self.addCleanup(local.close)
+        self.assertEqual(local.size(), 4)
 
 
 class HideOnlyNameSlots(unittest.TestCase):

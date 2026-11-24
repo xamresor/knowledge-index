@@ -100,33 +100,25 @@ def first_hit(out: str) -> tuple[str, str] | None:
     return (m.group(1), m.group(2)) if m else None
 
 
-CONTRACTS_DIR = "contracts/"   # contract docs: open to every caller (bin/access.py)
-
-
 class Index:
     """Read-only questions to qmd's keyword index: how many documents hold a word, does one doc.
 
-    `collections` limits the counts to the documents a caller may see: those collections, plus the
-    contract docs of every collection whose name starts with `contract_prefix`. None = the whole
-    index (a local caller). Without the limit the counts would tell a limited caller which words
-    the docs of hidden projects hold."""
+    `collections` limits the counts to the documents a caller may see: its own doc collections and
+    the contract collections it may read (bin/kb_core.py `_visible_collections`). None = the whole
+    index (a local caller), less the collections whose name starts with `skip_prefix`: the contract
+    collections, copies that a local search does not read. Without the limit the counts would tell a
+    limited caller which words the docs of hidden projects hold."""
 
-    def __init__(self, path: str, collections: list[str] | None = None, contract_prefix: str | None = None):
+    def __init__(self, path: str, collections: list[str] | None = None, skip_prefix: str = ""):
         self.con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2)
         self.scope, self.params = "", ()
         if collections is not None:
             marks = ",".join("?" * len(collections)) or "NULL"
-            self.scope = f" AND (d.collection IN ({marks})"
+            self.scope = f" AND d.collection IN ({marks})"
             self.params = tuple(collections)
-            if contract_prefix:
-                # the contract docs only (bin/access.py doc_allowed): a *.md file directly in
-                # contracts/, not its README and not a sub-folder
-                self.scope += (" OR (substr(d.path, 1, ?) = ? AND substr(d.collection, 1, ?) = ?"
-                               " AND instr(substr(d.path, ?), '/') = 0 AND lower(d.path) LIKE '%.md'"
-                               " AND lower(d.path) != ?)")
-                self.params += (len(CONTRACTS_DIR), CONTRACTS_DIR, len(contract_prefix), contract_prefix,
-                                len(CONTRACTS_DIR) + 1, CONTRACTS_DIR + "readme.md")
-            self.scope += ")"
+        elif skip_prefix:
+            self.scope = " AND substr(d.collection, 1, ?) != ?"
+            self.params = (len(skip_prefix), skip_prefix)
 
     def close(self) -> None:
         self.con.close()
@@ -183,13 +175,12 @@ def grade(query: str, out: str, index: Index | None) -> Grade:
     return Grade(coverage(terms, df, held, n) if hit else 0.0, missing, absent)
 
 
-def open_index(kb: str, collections: list[str] | None = None,
-               contract_prefix: str | None = None) -> Index | None:
-    """qmd's index, its counts limited to `collections` (+ contract docs) when given (see Index)."""
+def open_index(kb: str, collections: list[str] | None = None, skip_prefix: str = "") -> Index | None:
+    """qmd's index, its counts limited to `collections` when given (see Index)."""
     path = index_path(kb)
     if not path:
         return None
     try:
-        return Index(path, collections, contract_prefix)
+        return Index(path, collections, skip_prefix)
     except sqlite3.Error:
         return None

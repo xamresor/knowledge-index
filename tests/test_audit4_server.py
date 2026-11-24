@@ -225,7 +225,7 @@ class RebuildBusy(unittest.TestCase):
 
     def test_a_build_that_takes_the_lock_is_started(self):
         lock = os.path.join(self.tmp.name, "logs", "update.lock")
-        msg = admin.rebuild(self._script(f'exec 8>"{lock}"; flock -n 8 || exit 75; sleep 1'))
+        msg = admin.rebuild(self._script(f'exec 8>"{lock}"; flock -n 8 || exit 75; echo $$ >"$KB_REFRESH_ACK"; sleep 1'))
         self.assertIn("Rebuild started", msg)
         admin._rebuild_proc.wait(5)
 

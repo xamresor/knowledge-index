@@ -380,12 +380,18 @@ class Server:
             raise kb_login.LoginError("the API answered without a token")
         with self.lock:
             txn = self.txns.pop(txn_id, None)
-            if not txn:
-                raise OAuthError(400, "invalid_request", "the sign-in took too long: start it again")
-            code = secrets.token_urlsafe(32)
-            self.codes[code] = {"token": token, "client_id": txn["client_id"],
-                                "redirect_uri": txn["redirect_uri"], "challenge": txn["challenge"],
-                                "exp": self.now() + CODE_TTL, "user": txn.get("user", "")}
+            if txn:
+                code = secrets.token_urlsafe(32)
+                self.codes[code] = {"token": token, "client_id": txn["client_id"],
+                                    "redirect_uri": txn["redirect_uri"], "challenge": txn["challenge"],
+                                    "exp": self.now() + CODE_TTL, "user": txn.get("user", "")}
+            else:
+                # The transaction ended (it expired, or a second submit of the same form took it), but
+                # the API already gave this sign-in a token. Nothing holds it: end it upstream.
+                self._dropped.append(token)
+        if not txn:
+            self._end_dropped()
+            raise OAuthError(400, "invalid_request", "the sign-in took too long: start it again")
         self._seen(txn["client_id"], txn.get("user", ""))
         client = self.clients.get(txn["client_id"], {})
         self._event(txn.get("user", "?"), "browser sign-in", str(client.get("client_name") or txn["client_id"])[:80])

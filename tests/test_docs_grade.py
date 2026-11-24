@@ -135,7 +135,7 @@ class RefusalTest(IndexCase):
 
     def setUp(self):
         super().setUp()
-        mock.patch.object(docs_grade, "open_index", side_effect=lambda kb: docs_grade.Index(self.path)).start()
+        mock.patch.object(docs_grade, "open_index", side_effect=lambda kb, *a, **k: docs_grade.Index(self.path)).start()
         mock.patch.object(kb_core, "DOCS_MODE", "light").start()
         mock.patch.object(kb_core, "ALIASES", []).start()
         self.addCleanup(mock.patch.stopall)

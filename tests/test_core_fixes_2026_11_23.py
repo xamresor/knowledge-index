@@ -33,7 +33,7 @@ HITS = [
      "snippet": "fe text\nqmd://kb-web/also.md looks like a header"},
     {"file": "kb-api/secret.md", "line": 1, "docid": "#a1", "title": "Secret", "score": 0.9,
      "snippet": FORGED},
-    {"file": "kb-api/contracts/web-api.md", "line": 1, "docid": "#c3", "title": "Contract", "score": 0.7,
+    {"file": "kb_contracts-api/contracts/web-api.md", "line": 1, "docid": "#c3", "title": "Contract", "score": 0.7,
      "snippet": "c text"},
 ]
 
@@ -64,7 +64,7 @@ class DocsAccessOnStructuredHits(unittest.TestCase):
             out = kb_core.call_tool("search", {"q": "login", "domain": "docs", "refuse": False}, {"web"})
         self.assertNotIn("PRIVATE", out)
         self.assertIn("qmd://kb-web/login.md", out)
-        self.assertIn("qmd://kb-api/contracts/web-api.md", out)   # contract docs stay open to all
+        self.assertIn("qmd://kb_contracts-api/contracts/web-api.md", out)   # contract docs stay open to all
         self.assertIn(["kb-web"], seen)                          # the caller's collections, by name
         self.assertNotIn([], seen)                               # never every collection at once
 
@@ -83,7 +83,7 @@ class DocsAccessOnStructuredHits(unittest.TestCase):
             out = kb_core.call_tool("search", {"q": "login", "domain": "docs", "refuse": False}, {"web"})
         self.assertNotIn("PRIVATE", out)
         self.assertIn("qmd://kb-web/login.md", out)
-        self.assertIn("qmd://kb-api/contracts/web-api.md", out)
+        self.assertIn("qmd://kb_contracts-api/contracts/web-api.md", out)
         self.assertTrue(all("-c" in c for c in cmds), cmds)
 
     def test_a_snippet_line_never_reads_as_a_hit(self):
@@ -108,7 +108,8 @@ class DocsGradePerCaller(unittest.TestCase):
     DOCS = {("kb-a", "server.md"): "The server listens on a port.",
             ("kb-a", "notes.md"): "Notes about the server.",
             ("kb-b", "deploy.md"): "Deploy to hetzner with terraform.",
-            ("kb-b", "contracts/web.md"): "The web contract names the server port."}
+            ("kb-b", "contracts/web.md"): "The web contract names the server port.",
+            ("kb_contracts-b", "contracts/web.md"): "The web contract names the server port."}
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -125,14 +126,14 @@ class DocsGradePerCaller(unittest.TestCase):
                         (i, f"{coll}/{p}", p, body))
         con.commit()
         con.close()
-        self.index = docs_grade.Index(self.path, ["kb-a"], "kb-")
+        self.index = docs_grade.Index(self.path, ["kb-a", "kb_contracts-b"])
         self.addCleanup(self.index.close)
 
     def test_a_hidden_document_does_not_count(self):
         self.assertEqual(self.index.size(), 3)                    # kb-a and the contract doc
         self.assertEqual(self.index.df(docs_grade.fts_query("hetzner")), 0)
         self.assertEqual(self.index.df(docs_grade.fts_query("contract")), 1)
-        whole = docs_grade.Index(self.path)
+        whole = docs_grade.Index(self.path, None, "kb_contracts-")
         self.addCleanup(whole.close)
         self.assertEqual(whole.size(), 4)
         self.assertEqual(whole.df(docs_grade.fts_query("hetzner")), 1)
@@ -146,8 +147,8 @@ class DocsGradePerCaller(unittest.TestCase):
             kb_core._judge({}, "which port does the server use", "qmd://kb-a/server.md:1 #x\n", None, {"a"})
             kb_core._judge({}, "which port does the server use", "qmd://kb-a/server.md:1 #x\n", None, None)
         self.assertIs(real, docs_grade.open_index)
-        self.assertEqual(seen[0], ((["kb-a"], "kb-"), {}))
-        self.assertEqual(seen[1], ((), {}))
+        self.assertEqual(seen[0], ((["kb-a", "kb_contracts-b"],), {}))
+        self.assertEqual(seen[1], ((), {"skip_prefix": "kb_contracts-"}))
 
 
 class JobLimits(unittest.TestCase):

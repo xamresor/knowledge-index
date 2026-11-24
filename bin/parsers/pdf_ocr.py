@@ -19,7 +19,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from . import OCR, ExtractError, run_tool
+from . import OCR, ExtractError, ToolFailed, run_tool
 
 EXTENSIONS = (".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff")
 REQUIRES = ("tesseract",)
@@ -57,8 +57,14 @@ def extract(path: Path) -> str:
         prefix = Path(tmp) / "page"
         # One page at a time: pdftoppm stops with no image after the last page.
         for number in range(1, limit + 2):
-            run_tool(["pdftoppm", "-f", str(number), "-l", str(number), "-scale-to", str(SCALE_TO),
-                      "-png", str(path), str(prefix)], timeout=300)
+            try:
+                run_tool(["pdftoppm", "-f", str(number), "-l", str(number), "-scale-to", str(SCALE_TO),
+                          "-png", str(path), str(prefix)], timeout=300)
+            except ToolFailed as exc:
+                # A page after the last one: pdftoppm says "Wrong page range" and stops. That is the
+                # end of the document. Any other failure is an error, not a short document.
+                if number == 1 or "page range" not in exc.stderr.lower():
+                    raise
             images = sorted(Path(tmp).glob("page-*.png"))
             if not images:
                 break

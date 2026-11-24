@@ -243,9 +243,10 @@ class RebuildLock(unittest.TestCase):
 
     def test_a_lock_file_without_a_flock_is_no_build(self):
         self.assertFalse(admin.building(self.lock))
-        with mock.patch.object(admin.subprocess, "Popen") as popen:
+        with mock.patch.object(admin.subprocess, "Popen") as popen, \
+                mock.patch.object(admin, "REBUILD_WAIT", 0.1):
             popen.return_value.poll.return_value = None
-            self.assertIn("started", admin.rebuild())
+            self.assertNotIn("already running", admin.rebuild())  # started (no ack from a mock)
             self.assertIn("already running", admin.rebuild())  # the first one runs: no second
         self.assertEqual(popen.call_count, 1)
 

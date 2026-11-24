@@ -84,6 +84,16 @@ def staged_root(path: str, repos_dir: str) -> str:
 MAX_SOURCE_BYTES = 4 * 1024 * 1024
 
 
+def _opened_inside(fd: int, base: str) -> bool:
+    """Is the open file `fd` inside `base`? Linux names the opened file in /proc; elsewhere only the
+    path check of read_source holds."""
+    try:
+        opened = os.readlink(f"/proc/self/fd/{fd}")
+    except OSError:
+        return True
+    return opened == base or opened.startswith(base + os.sep)
+
+
 def read_source(path: str, root: str | None = None, limit: int = MAX_SOURCE_BYTES) -> str | None:
     """The text of a source file, or None when it is not safe to read: not a regular file (a device,
     a pipe), or, with `root`, a real path outside `root`. At most `limit` bytes are read."""
@@ -94,10 +104,13 @@ def read_source(path: str, root: str | None = None, limit: int = MAX_SOURCE_BYTE
             if real != base and not real.startswith(base + os.sep):
                 return None
         # O_NONBLOCK: opening a pipe must not wait for a writer; the fstat below refuses it.
-        fd = os.open(real, os.O_RDONLY | os.O_NONBLOCK)
+        # O_NOFOLLOW: a link swapped in after the check above is refused, not followed.
+        fd = os.open(real, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
         with os.fdopen(fd, "rb") as fh:
             if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
                 return None
+            if root is not None and not _opened_inside(fh.fileno(), base):
+                return None   # a folder on the way became a link between the check and the open
             return fh.read(limit).decode("utf-8", errors="ignore")
     except (OSError, ValueError):
         return None

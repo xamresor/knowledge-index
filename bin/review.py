@@ -154,13 +154,16 @@ def analyze(graph: dict, changes: dict[str, set[int]], routes: list[dict] | None
     keys_of: dict[str, list[tuple[str, str]]] = defaultdict(list)
     for key in by_file:
         keys_of[key[1]].append(key)
+    # A suffix with more segments than the deepest graph file cannot match: the lookup tries at most
+    # that many suffixes, so a path of many thousand segments costs its length, not its length squared.
+    depth = max((k.count("/") + 1 for k in keys_of), default=0)
 
     def find(path: str) -> list[tuple[str, str]]:
         """Graph files for a diff path: the same path, or the diff path ends with it (a monorepo
         or a project whose code root is a sub-folder). The longest match wins. A lookup per
         suffix of the path, not a scan of every graph file per path."""
         parts = path.split("/")
-        for i in range(len(parts)):
+        for i in range(max(0, len(parts) - depth), len(parts)):
             keys = keys_of.get("/".join(parts[i:]))
             if keys:
                 return sorted(keys)

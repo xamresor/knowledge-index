@@ -1301,6 +1301,15 @@ def _doc_collections(names) -> list[str]:
     return [f"{COLLECTION}-{n}" for n in sorted(names) if n in DOC_PROJECTS]
 
 
+def _contract_collections(allowed: set[str]) -> list[str]:
+    """The contract collections (bin/contracts.py `contract_collection`) a limited caller reads beside
+    its own doc collections: those of the other docs projects under `contracts: all`, none under
+    `own`. Not those of its own projects: their contract docs are in its doc collections already."""
+    if not access.contracts_open():
+        return []
+    return [contracts.contract_collection(n) for n in sorted(set(DOC_PROJECTS) - allowed)]
+
+
 def _docs_scoped(args: dict, q: str, allowed: set[str] | None) -> tuple[str, str]:
     """(the `[projects: ...]` header, the hits) of one docs search inside the caller's projects."""
     if allowed is not None:
@@ -1319,9 +1328,9 @@ def _docs_scoped(args: dict, q: str, allowed: set[str] | None) -> tuple[str, str
         if own:
             groups.append((own, want))
         shared = access.contracts_open()
-        hidden = _doc_collections(set(DOC_PROJECTS) - allowed) if shared else []
-        if hidden:   # only their contract docs pass the check; ask for more, few of them are contracts
-            groups.append((hidden, want * 5))
+        others = _contract_collections(allowed)   # nothing but contract docs is in them
+        if others:
+            groups.append((others, want))
         return (f"[projects: {', '.join(sorted(allowed))}{' + contract docs' if shared else ''}]\n\n",
                 _docs_allowed(scoped, q, allowed, groups, want))
     out = _docs_once(args, q)
@@ -1346,13 +1355,14 @@ def _judge(args: dict, q: str, out: str, rerun, allowed: set[str] | None = None)
     weak: the grade is a heuristic and turns away some answerable questions (docs/design.md, "Docs search: an honest not found"),
     so the caller can still open them, but it cannot mistake them for a confident answer.
 
-    For a limited caller the word counts come from its own collections and (under `contracts: all`)
-    the contract docs only, so the grade (and its "in no document" list) says nothing about the docs of hidden projects."""
+    For a limited caller the word counts come from the collections it searches: its own and (under
+    `contracts: all`) the contract collections of the others, so the grade (and its "in no document"
+    list) says nothing about the docs of hidden projects. A local caller: every collection but the
+    contract collections, which a local search does not read either."""
     if docs_grade.first_hit(out) is None:
         return out
-    index = (docs_grade.open_index(KB) if allowed is None
-             else docs_grade.open_index(KB, _doc_collections(allowed),
-                                        f"{COLLECTION}-" if access.contracts_open() else None))
+    index = (docs_grade.open_index(KB, skip_prefix=contracts.CONTRACT_COLLECTION) if allowed is None
+             else docs_grade.open_index(KB, _doc_collections(allowed) + _contract_collections(allowed)))
     try:
         grade = docs_grade.grade(q, out, index)
         if not grade.weak:
@@ -1487,10 +1497,13 @@ def _docs_hits(args: dict, q: str) -> tuple[list[dict] | None, str, str]:
 
 
 def _docs_once(args: dict, q: str) -> str:
-    """The text of one docs search for a caller who may see everything."""
+    """The text of one docs search for a caller who may see everything. The contract collections hold
+    copies of docs that are in the doc collections too: their hits are dropped (bin/kb also excludes
+    them from qmd's default search)."""
     hits, note, raw = _docs_hits(args, q)
     if hits is None:
         return note + raw
+    hits = [h for h in hits if access.contract_project(warm.hit_path(h)) is None]
     return (note + warm.format_hits(hits))[:MAX_OUT]
 
 

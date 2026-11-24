@@ -6,6 +6,7 @@
 
 # Aggregated docs staging for qmd (rsynced from each project; regenerable)
 /.docs/
+/.docs-contracts/
 
 # Generated route tables (regenerable via php artisan route:list)
 /routes.*.json

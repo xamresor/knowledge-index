@@ -10,6 +10,8 @@
 #   blocks a --force that starts at the same minute.
 # - --force while a build runs (or while KB_REFRESH_WAIT_LOCK is held): exit 75, "busy: ..." on stderr
 #   and one line in refresh.log. The admin "Rebuild" button reads this exit code.
+# - KB_REFRESH_ACK=<file>: once this run holds the lock and starts the build, it writes its pid into
+#   that file. The admin "Rebuild" button waits for it: a lock held by cron is not its own build.
 # - KB_REFRESH_WAIT_LOCK=<file>: when set and readable, a tick exits while another process holds
 #   that lock (e.g. your deploy script resetting the checkouts). The next tick builds. Unset = no wait.
 # - The HEADs of the last build, a hash of the config, kb.hubs.txt and VERSION, and the route tables
@@ -85,11 +87,19 @@ inputs() {
     if [ -f "$f" ]; then echo "file $f $(sha256sum <"$f" | cut -d' ' -f1)"; fi
   done
   if [ -n "${KB_ROUTES_DIR:-}" ] && [ -d "$KB_ROUTES_DIR" ]; then
-    find "$KB_ROUTES_DIR" -maxdepth 1 -name '*.json' -printf 'routes %f %s %T@\n' 2>/dev/null | LC_ALL=C sort
+    find "$KB_ROUTES_DIR" -maxdepth 1 -name '*.json' -printf 'routes %f %s %i %T@\n' 2>/dev/null | LC_ALL=C sort
   fi
-  # a `routes` that names a ready .json table, anywhere (the git checkouts above skip a file)
+  # a `routes` that names a ready .json table, anywhere (the git checkouts above skip a file). Its
+  # content hash: size and mtime miss two versions of one size written in one second. A table over
+  # 64 MB is not hashed every minute: size, inode and the mtime in nanoseconds.
   printf '%s\n' "$paths" | while read -r f; do
-    if [ "${f%.json}" != "$f" ] && [ -f "$f" ]; then echo "routes $f $(stat -c '%s %Y' "$f")"; fi
+    if [ "${f%.json}" != "$f" ] && [ -f "$f" ]; then
+      if [ "$(stat -c '%s' "$f")" -le 67108864 ]; then
+        echo "routes $f $(sha256sum <"$f" | cut -d' ' -f1)"
+      else
+        echo "routes $f $(find "$f" -maxdepth 0 -printf '%s %i %T@')"
+      fi
+    fi
   done
 }
 
@@ -142,6 +152,8 @@ fi
 
 start=$(date +%s)
 status=0
+# This run holds the lock and builds now: confirm it to the admin "Rebuild" button.
+if [ -n "${KB_REFRESH_ACK:-}" ]; then echo "$$" >"$KB_REFRESH_ACK" 2>/dev/null || true; fi
 # --force rebuilds every project and the merged graph (KB_FORCE=1): the nightly forced build and the
 # admin "Rebuild now" must not stop at the "unchanged" checks of `kb update`.
 if [ "$FORCE" = 1 ]; then export KB_FORCE=1; fi

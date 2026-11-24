@@ -14,6 +14,35 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+Review of the fourth round (2026-11-24). Each fix has a test (`tests/test_audit5.py`).
+
+- **Security: contract docs live in collections of their own.** qmd writes `contracts___private.md`,
+  `contracts_/private.md` and `contracts/---/private.md` all as `contracts/private.md`, so a path check let
+  such a file of a hidden project through `search` and `docs_get`. The build now copies only the real
+  contract files (`<docs>/contracts/*.md`, not the README, regular files inside the docs root) into
+  `<data>/.docs-contracts/<project>/`, swapped in whole, and indexes each project as the qmd collection
+  `<collection>_contracts-<project>`, out of qmd's default search. A limited caller reads the other
+  projects only there under `contracts: all`, and not at all under `own`; their doc collections are closed
+  as a whole. Contract doc links (`connections`, `contracts_search`) point into these collections. The
+  search grade counts the collections the caller searches.
+- **The problem scanner reads call sites like link_http.** It skips a pipe, a device and a link out of the
+  calls folder, and reads at most `graph.MAX_SOURCE_BYTES`. A FIFO no longer stops the build under the lock.
+- **`review_context` with a path of many segments.** The suffix lookup tries only as many segments as the
+  deepest graph file has: linear, not quadratic, in the path length.
+- **A failed extraction tool is an error.** `run_tool` checks the exit code: output before a crash (for
+  example at the memory cap) is not kept as the document. Only the cut at the output cap keeps its text,
+  with its note. OCR still ends at the last page of a PDF.
+- **Security: a sign-in token that loses its transaction is ended.** The second submit of one sign-in form
+  hands its new upstream token to `on_drop`, so orphan tokens do not fill the token quota of the user.
+- **The Rebuild button waits for its own build.** `kb-refresh` writes its pid into `KB_REFRESH_ACK` when it
+  holds the lock and starts the build; a lock of cron no longer reads as "Rebuild started".
+- **kb-refresh sees every change of an outside route table.** A `routes` file counts by its content hash (over
+  64 MB: size, inode and the mtime in nanoseconds); `KB_ROUTES_DIR` adds the inode.
+- **Security: a source read cannot be redirected between check and open.** `graph.read_source` opens with
+  `O_NOFOLLOW` and, on Linux, checks the opened file itself against the root.
+- **A contract doc over 4 MB is left out of the shared copy, with a warning,** instead of a cut copy that reads
+  as the whole contract.
+
 Fourth audit round (2026-11-24). Each fix has a test.
 
 - **Security: contract docs under `contracts: all`.** A limited caller sees only the contract docs of other

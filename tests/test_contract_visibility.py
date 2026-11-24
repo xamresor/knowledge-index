@@ -191,7 +191,7 @@ class ConnectionsVisibility(ContractIndexes):
         with own():
             out = self.call("connections", {}, {"web"})
         self.assertIn("web -> api | http | Web uses the API", out)     # its own contract doc
-        self.assertIn("qmd://kb-web/contracts/web-api.md", out)
+        self.assertIn("qmd://kb_contracts-web/contracts/web-api.md", out)
         self.assertIn("web -> (hidden) | http", out)                  # its call to sw, the other side cut
         for secret in ("sw", "vraa", "Secret", "payments", "admin", "kb-api", "Pushes"):
             self.assertNotIn(secret, out)
@@ -215,7 +215,7 @@ class ConnectionsVisibility(ContractIndexes):
 class DocsVisibility(Isolated):
     HITS = [{"file": "qmd://kb-web/login.md", "line": 3, "docid": "#b2", "title": "Login", "score": 0.8,
              "snippet": "fe text"},
-            {"file": "qmd://kb-sw/contracts/sw-vraa.md", "line": 1, "docid": "#c3", "title": "Contract",
+            {"file": "qmd://kb_contracts-sw/contracts/sw-vraa.md", "line": 1, "docid": "#c3", "title": "Contract",
              "score": 0.7, "snippet": "Secret SOAP"}]
 
     def setUp(self):
@@ -236,9 +236,11 @@ class DocsVisibility(Isolated):
 
     def test_doc_allowed(self):
         with everything():
-            self.assertTrue(access.doc_allowed("qmd://kb-sw/contracts/x.md", {"web"}))
+            self.assertTrue(access.doc_allowed("qmd://kb_contracts-sw/contracts/x.md", {"web"}))
+            self.assertFalse(access.doc_allowed("qmd://kb-sw/contracts/x.md", {"web"}))  # its doc collection
         with own():
-            self.assertFalse(access.doc_allowed("qmd://kb-sw/contracts/x.md", {"web"}))
+            self.assertFalse(access.doc_allowed("qmd://kb_contracts-sw/contracts/x.md", {"web"}))
+            self.assertTrue(access.doc_allowed("qmd://kb_contracts-web/contracts/x.md", {"web"}))
             self.assertTrue(access.doc_allowed("qmd://kb-web/contracts/x.md", {"web"}))
 
     def test_own_search_asks_only_the_own_collections(self):
@@ -253,11 +255,11 @@ class DocsVisibility(Isolated):
         cmds = []
         with everything(), mock.patch.object(kb_core, "run", self.qmd(cmds)):
             out = kb_core.call_tool("search", {"q": "login", "domain": "docs", "refuse": False}, {"web"})
-        self.assertIn("qmd://kb-sw/contracts/sw-vraa.md", out)
+        self.assertIn("qmd://kb_contracts-sw/contracts/sw-vraa.md", out)
 
     def test_own_docs_get_refuses_a_hidden_contract_doc(self):
         with own(), mock.patch.object(kb_core, "run",
-                                      lambda cmd, **kw: "qmd://kb-sw/contracts/sw-vraa.md  #c3\n---\nSecret"):
+                                      lambda cmd, **kw: "qmd://kb_contracts-sw/contracts/sw-vraa.md  #c3\n---\nSecret"):
             self.assertIn("not found in your projects",
                           kb_core.call_tool("docs_get", {"path": "#c3"}, {"web"}))
             self.assertIn("Secret", kb_core.call_tool("docs_get", {"path": "#c3"}))   # local mode
@@ -265,8 +267,8 @@ class DocsVisibility(Isolated):
     def test_own_grade_counts_no_contract_docs_of_other_projects(self):
         seen = []
 
-        def open_index(kb, collections=None, contract_prefix=None):
-            seen.append(contract_prefix)
+        def open_index(kb, collections=None, skip_prefix=""):
+            seen.append(collections)
             return None
         with mock.patch.object(docs_grade, "open_index", open_index), \
                 mock.patch.object(docs_grade, "first_hit", lambda out: "x"), \
@@ -275,7 +277,7 @@ class DocsVisibility(Isolated):
                 kb_core._judge({}, "q", "qmd://kb-web/a.md", lambda extra: "", {"web"})
             with everything():
                 kb_core._judge({}, "q", "qmd://kb-web/a.md", lambda extra: "", {"web"})
-        self.assertEqual(seen, [None, "kb-"])
+        self.assertEqual(seen, [["kb-web"], ["kb-web", "kb_contracts-sw"]])
 
 
 # ------------------------------------------------------------------------------------------ graph

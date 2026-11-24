@@ -277,7 +277,7 @@ class DocsFilterTests(unittest.TestCase):
              "snippet": "api text"},
             {"file": "qmd://kb-web/login.md", "line": 3, "docid": "#b2", "title": "Login", "score": 0.8,
              "snippet": "fe text"},
-            {"file": "qmd://kb-api/contracts/web-api.md", "line": 1, "docid": "#c3", "title": "Contract",
+            {"file": "qmd://kb_contracts-api/contracts/web-api.md", "line": 1, "docid": "#c3", "title": "Contract",
              "score": 0.7, "snippet": "c text"},
             {"file": "qmd://other/web/x.md", "line": 1, "docid": "#d4", "title": "Other collection",
              "score": 0.6, "snippet": "x"}]
@@ -303,14 +303,14 @@ class DocsFilterTests(unittest.TestCase):
         with mock.patch.object(kb_core, "run", self.qmd(cmds)):
             out = kb_core.call_tool("search", {"q": "login", "domain": "docs"}, {"web"})
         self.assertIn("qmd://kb-web/login.md", out)
-        self.assertIn("qmd://kb-api/contracts/web-api.md", out)  # contracts are open to all
+        self.assertIn("qmd://kb_contracts-api/contracts/web-api.md", out)  # contracts are open to all
         self.assertNotIn("qmd://kb-api/auth.md", out)
         self.assertNotIn("Other collection", out)
         own, other = cmds[0], cmds[1]
         self.assertEqual(own[own.index("-c") + 1], "kb-web")    # the caller's collections, by name
         self.assertEqual(own[own.index("-n") + 1], "5")
-        self.assertEqual(other[other.index("-c") + 1], "kb-api")  # the others, for their contract docs
-        self.assertEqual(other[other.index("-n") + 1], "25")
+        self.assertEqual(other[other.index("-c") + 1], "kb_contracts-api")  # their contract collections
+        self.assertEqual(other[other.index("-n") + 1], "5")
 
     def test_nothing_allowed(self):
         with mock.patch.object(kb_core, "run", self.qmd([])):
@@ -328,7 +328,8 @@ class DocsFilterTests(unittest.TestCase):
             self.assertIn("not found in your projects", kb_core.call_tool("docs_get", {"path": "x"}, {"api"}))
 
     def test_doc_allowed(self):
-        self.assertTrue(access.doc_allowed("qmd://kb-api/contracts/x.md", {"web"}))
+        self.assertTrue(access.doc_allowed("qmd://kb_contracts-api/contracts/x.md", {"web"}))
+        self.assertFalse(access.doc_allowed("qmd://kb-api/contracts/x.md", {"web"}))
         self.assertFalse(access.doc_allowed("qmd://kb-api/auth.md", {"web"}))
         self.assertTrue(access.doc_allowed("qmd://kb-shop-api/a.md", {"shop-api"}))
         self.assertFalse(access.doc_allowed("qmd://other/contracts/x.md", {"web"}))
@@ -416,7 +417,7 @@ class ContractTests(unittest.TestCase):
         with open(conn, "w") as f:
             json.dump(contracts.build_connections({"api": os.path.join(self.tmp.name, "api")}, []), f)
         out = contracts.contracts_search("users.show", self.path, conn_path=conn)
-        self.assertIn("callers (contracts): media — qmd://kb-api/contracts/media-api.md", out)
+        self.assertIn("callers (contracts): media — qmd://kb_contracts-api/contracts/media-api.md", out)
         self.assertNotIn("none found", out)
         self.assertNotIn("media", contracts.contracts_search("users.store", self.path, conn_path=conn))
 
@@ -459,7 +460,7 @@ class ConnectionTests(unittest.TestCase):
     def test_all_connections(self):
         out = contracts.connections("", self.path)
         self.assertIn("api -> payments | https soap | Sends invoices to the payment provider\n"
-                      "    doc: qmd://kb-api/contracts/payments.md", out)
+                      "    doc: qmd://kb_contracts-api/contracts/payments.md", out)
         self.assertIn("web -> api | http | 1 endpoints", out)
         self.assertIn("admin -> api | http | 1 endpoints", out)
         self.assertNotIn("x -> y", out)  # README is not a contract

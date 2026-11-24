@@ -39,11 +39,13 @@ A few rules that hold for every tool:
 - **Names defined twice.** `graph_explain` and `graph_affected` answer each node that carries the
   name exactly as typed (two `.create()` methods, a function and a template), up to 3.
 - **Docs and access.** A caller limited to some projects searches its own collections by name. With
-  the setting `contracts: all` (the default) it also searches the other collections for their
-  contract docs only: the `*.md` files directly in `contracts/`, not its README and not a
-  sub-folder (`drafts/`, `archive/`). With `contracts: own` it does not ([the shared server](server.md#who-sees-the-contracts)).
+  the setting `contracts: all` (the default) it also searches the contract collections of the
+  other projects (`<collection>_contracts-<project>`). The build copies into them only the contract
+  docs: the `*.md` files directly in `contracts/`, not its README and not a sub-folder (`drafts/`,
+  `archive/`). The doc collections of the other projects stay closed as a whole. With
+  `contracts: own` it reads no collection of another project ([the shared server](server.md#who-sees-the-contracts)).
   Each hit is checked by the path in qmd's own result before it becomes text. The grade of a docs
-  answer counts words in the caller's collections and the contract docs it may see.
+  answer counts words in the collections the caller searches.
 - **`search` with `domain: both`** on a project without docs searches the code and says so.
 - **`repo_map` with `unused`** lists candidates of the mapped project, but counts the uses from
   every project the caller may see. The scan for their names in the files keeps a candidate alive

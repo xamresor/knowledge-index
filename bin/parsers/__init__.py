@@ -29,7 +29,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-__all__ = ["ExtractError", "TransientError", "for_path", "runnable", "available", "extract", "with_provenance",
+__all__ = ["ExtractError", "TransientError", "ToolFailed", "for_path", "runnable", "available", "extract", "with_provenance",
            "run_tool", "MISSING_TOOLS"]
 
 EXTRACTED = "EXTRACTED"   # a real text layer: the characters came from the file
@@ -44,6 +44,15 @@ class ExtractError(RuntimeError):
 
 class TransientError(ExtractError):
     """The tool did not finish this time (a timeout, an OS error): try again on the next build."""
+
+
+class ToolFailed(ExtractError):
+    """The tool exited with an error (also a crash at the memory cap): its output is not the document."""
+
+    def __init__(self, message: str, returncode: int, stderr: str):
+        super().__init__(message)
+        self.returncode = returncode
+        self.stderr = stderr
 
 
 DEFAULT_MAX_OUTPUT_MB = 20   # KB_EXTRACT_MAX_OUTPUT_MB: text that one tool run may produce
@@ -64,8 +73,10 @@ def run_tool(cmd: list[str], timeout: float) -> tuple[str, str]:
     A small file can expand without limit: a .docx is a zip, a PNG can have 50 000 x 50 000 pixels.
     So the tool runs with a memory cap (RLIMIT_DATA, KB_EXTRACT_MAX_MEM_MB) and a cap on every file it
     writes (RLIMIT_FSIZE, KB_EXTRACT_MAX_OUTPUT_MB). Its stdout goes to a temp file, not to memory.
-    Output over the cap is cut, and the text says so; stderr is kept up to 4 KB. A tool that runs out of memory fails, and the
-    caller reports the file. A timeout or an OS error is transient: the next build tries again.
+    Output over the cap is cut, and the text says so; stderr is kept up to 4 KB. A tool that exits with
+    an error (also one that runs out of memory) raises ToolFailed: the text it wrote before is not the
+    whole document. The only failure that keeps its output is the cut at the output cap, with the note.
+    A timeout or an OS error is transient: the next build tries again.
     """
     out_cap = _mb("KB_EXTRACT_MAX_OUTPUT_MB", DEFAULT_MAX_OUTPUT_MB)
     mem_cap = _mb("KB_EXTRACT_MAX_MEM_MB", DEFAULT_MAX_MEM_MB)
@@ -76,18 +87,25 @@ def run_tool(cmd: list[str], timeout: float) -> tuple[str, str]:
 
     try:
         with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
-            subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=err, timeout=timeout,
-                           preexec_fn=limits)
+            proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=err, timeout=timeout,
+                                  preexec_fn=limits)
             out.seek(0)
             data = out.read(out_cap + 1)
             err.seek(0)
             errors = err.read(4096)
     except (OSError, subprocess.SubprocessError) as exc:
         raise TransientError(f"{cmd[0]} failed: {exc}") from exc
+    cut = len(data) > out_cap
+    stderr = errors.decode("utf-8", errors="replace")
+    # Over the output cap, the tool gets SIGXFSZ (or an error) on its next write: that failure is the
+    # cut itself. Any other failure means the output is incomplete or wrong.
+    if proc.returncode != 0 and not cut:
+        why = stderr.strip().splitlines()[-1][:160] if stderr.strip() else "no message"
+        raise ToolFailed(f"{cmd[0]} failed (exit {proc.returncode}): {why}", proc.returncode, stderr)
     text = data[:out_cap].decode("utf-8", errors="replace")
-    if len(data) > out_cap:
+    if cut:
         text += f"\n\n<!-- output cut at {out_cap / 2**20:g} MB (KB_EXTRACT_MAX_OUTPUT_MB) -->"
-    return text, errors.decode("utf-8", errors="replace")
+    return text, stderr
 
 
 def _modules():

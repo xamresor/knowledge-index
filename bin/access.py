@@ -14,7 +14,11 @@ never by parsing their text output:
   * **docs** are checked by their resolved qmd path: one collection per project
     (`<COLLECTION>-<project>`), so the project is in the path.
   * **contract docs** (`<project docs>/contracts/*.md`) and the cross-repo `http_request` edges are
-    the interfaces between services. The setting `contracts` (bin/settings.py, env KB_CONTRACTS)
+    the interfaces between services. The build copies the contract docs of each project into a qmd
+    collection of their own, `<COLLECTION>_contracts-<project>` (bin/contracts.py `stage_contracts`),
+    and nothing else goes there. The doc collection of a hidden project stays closed as a whole: no
+    rule on a path name opens a file of it (qmd normalises names, so a path proves nothing).
+    The setting `contracts` (bin/settings.py, env KB_CONTRACTS)
     decides who sees them: `all` (the default) shows them to every caller, whatever the filter;
     `own` shows only the contract docs of allowed projects and keeps no node of another project.
     `KB_CONTRACT_EDGES=0` hides the edges to other projects under `all` as well (`own` hides them
@@ -40,13 +44,13 @@ import tempfile
 import threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import contracts  # noqa: E402
 import paths  # noqa: E402
 import settings  # noqa: E402
 
 GRAPH = str(paths.graph_path())
 FILTERED_DIR = str(paths.out_dir() / "filtered")
 COLLECTION = os.environ.get("KB_COLLECTION", "kb")
-CONTRACT_DOCS_DIR = "contracts"
 KEEP_CONTRACTS = os.environ.get("KB_CONTRACT_EDGES", "1") != "0"
 # Node `repo` values that are not projects: domain anchors and db tables.
 PSEUDO_REPOS = {"domain", "db"}
@@ -76,19 +80,23 @@ def doc_project(path: str) -> str | None:
     return m.group(1)[len(prefix):] or None
 
 
+def contract_project(path: str) -> str | None:
+    """Project of a qmd path in a contract collection `qmd://<COLLECTION>_contracts-<project>/...`."""
+    m = re.match(r"qmd://([^/\s]+)/", path.strip())
+    prefix = contracts.CONTRACT_COLLECTION
+    if not m or not m.group(1).startswith(prefix):
+        return None
+    return m.group(1)[len(prefix):] or None
+
+
 def doc_allowed(path: str, allowed: set[str]) -> bool:
-    """A doc of an allowed project, or (with `contracts: all`) a contract doc of any project."""
+    """A doc of an allowed project, or a doc of a contract collection: of any project under
+    `contracts: all`, of an allowed project under `own`. Any other doc of a hidden project is closed."""
     project = doc_project(path)
-    if project is None:
-        return False
-    if project in allowed:
-        return True
-    # Only the contract docs themselves (bin/contracts.py `_contract_files`): a `*.md` file directly
-    # in contracts/, not its README and not a sub-folder (drafts/, archive/). qmd indexes the whole
-    # docs tree, so those other files are in the index too.
-    m = re.match(rf"qmd://[^/\s]+/{CONTRACT_DOCS_DIR}/([^/\s:#]+\.md)(?=$|[\s:#])", path.strip(),
-                 re.IGNORECASE)
-    return contracts_open() and m is not None and m.group(1).lower() != "readme.md"
+    if project is not None:
+        return project in allowed
+    owner = contract_project(path)
+    return owner is not None and (owner in allowed or contracts_open())
 
 
 # --------------------------------------------------------------------------- graph
