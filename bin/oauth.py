@@ -143,6 +143,12 @@ class Server:
         # (url, body, headers, ip) -> answer dict, or LoginError: the call of the login webhook. kb-http sets
         # it to call its access plugin in-process when the webhook is this server; else kb_login.post.
         self.login_post = None
+        # token -> None: an upstream sign-in token that no code, refresh or access token of this server
+        # holds any more (a code nobody exchanged, a revoked client, an ended refresh token). kb-http ends
+        # it in the access plugin, so unfinished sign-ins do not push out the real tokens of the person.
+        self.on_drop = None
+        self._dropped: list[str] = []          # upstream tokens of removed entries, checked by _end_dropped
+        self._inflight: dict[str, int] = {}    # upstream tokens of a /token call between pop and issue
 
     def clients_snapshot(self) -> dict:
         """A deep copy of the registered clients, taken under the lock: a page that iterates it never meets
@@ -182,7 +188,23 @@ class Server:
         t = self.now()
         for table in (self.txns, self.codes, self.refresh, self.access):
             for k in [k for k, v in table.items() if v.get("exp", float("inf")) < t]:
+                self._dropped.extend([table[k]["token"]] if table[k].get("token") else [])
                 del table[k]
+
+    def _end_dropped(self) -> None:
+        """Hand the upstream tokens that nothing holds any more to on_drop. Takes the lock itself; the
+        callback runs without it."""
+        with self.lock:
+            dropped, self._dropped = set(self._dropped), []
+            if not dropped or self.on_drop is None:
+                return
+            live = {v["token"] for table in (self.codes, self.refresh, self.access) for v in table.values()}
+            gone = [t for t in dropped if t not in live and not self._inflight.get(t)]
+        for token in gone:
+            try:
+                self.on_drop(token)
+            except Exception:  # noqa: BLE001 — cleanup never breaks a sign-in
+                pass
 
     def _prune_clients(self) -> bool:
         """Drop the clients that registered more than CLIENT_DAYS ago and never had a sign-in. -> changed"""
@@ -280,6 +302,7 @@ class Server:
             self.txns[txn] = {"client_id": client["client_id"], "redirect_uri": redirect,
                               "state": q.get("state", ""), "challenge": q["code_challenge"], "ip": ip,
                               "created": now, "exp": now + CODE_TTL, "api_challenge": None}
+        self._end_dropped()
         return txn
 
     def _make_room(self, keys: list[str], ip: str) -> bool:
@@ -347,6 +370,7 @@ class Server:
         with self.lock:
             self._expire()
             txn = self.txns.get(txn_id)
+        self._end_dropped()
         if not txn:
             raise OAuthError(400, "invalid_request", "the sign-in took too long: start it again")
         return txn
@@ -402,13 +426,11 @@ class Server:
             del self.clients[client_id]
             for txn in [t for t, v in self.txns.items() if v["client_id"] == client_id]:
                 del self.txns[txn]
-            for rt in [rt for rt, v in self.refresh.items() if v["client_id"] == client_id]:
-                del self.refresh[rt]
-            for code in [c for c, v in self.codes.items() if v["client_id"] == client_id]:
-                del self.codes[code]
-            for at in [at for at, v in self.access.items() if v["client_id"] == client_id]:
-                del self.access[at]
+            for table in (self.refresh, self.codes, self.access):
+                for k in [k for k, v in table.items() if v["client_id"] == client_id]:
+                    self._dropped.append(table.pop(k)["token"])
             self._save_clients()
+        self._end_dropped()
         return True
 
     # ------------------------------------------------------------------ token
@@ -424,6 +446,26 @@ class Server:
                 raise OAuthError(401, "invalid_client", "unknown client_id: register again")
 
     def token(self, form: dict) -> dict:
+        held: list[str] = []
+        try:
+            return self._token(form, held)
+        finally:
+            with self.lock:
+                for t in held:   # issued, put back, or dropped: _end_dropped tells which
+                    self._inflight[t] -= 1
+                    if not self._inflight[t]:
+                        del self._inflight[t]
+                    self._dropped.append(t)
+            self._end_dropped()
+
+    def _hold(self, entry: dict | None, held: list[str]) -> None:
+        """Count the upstream token of a popped code or refresh token as in use until token() ends. The
+        caller holds the lock."""
+        if entry and entry.get("token"):
+            self._inflight[entry["token"]] = self._inflight.get(entry["token"], 0) + 1
+            held.append(entry["token"])
+
+    def _token(self, form: dict, held: list[str]) -> dict:
         grant = form.get("grant_type")
         if grant in ("authorization_code", "refresh_token"):
             self._known_client(form)
@@ -431,6 +473,7 @@ class Server:
             with self.lock:
                 self._expire()
                 entry = self.codes.pop(form.get("code", ""), None)  # single use, even on failure
+                self._hold(entry, held)
             if not entry:
                 raise OAuthError(400, "invalid_grant", "unknown or expired code")
             if form.get("client_id") and form["client_id"] != entry["client_id"]:
@@ -445,6 +488,7 @@ class Server:
             with self.lock:
                 self._expire()
                 entry = self.refresh.pop(rt, None)  # rotated on use
+                self._hold(entry, held)
             if not entry:
                 raise OAuthError(400, "invalid_grant", "unknown refresh token")
             if form.get("client_id") and form["client_id"] != entry["client_id"]:
@@ -483,7 +527,7 @@ class Server:
             for table in (self.access, self.refresh):
                 mine = sorted((v["exp"], k) for k, v in table.items() if v["client_id"] == client_id)
                 for _, k in mine[:max(0, len(mine) - TOKENS_PER_CLIENT + 1)]:
-                    del table[k]
+                    self._dropped.append(table.pop(k)["token"])
             self.refresh[rt] = {"token": token, "client_id": client_id, "user": user, "at": _sha(at),
                                 "exp": now + REFRESH_DAYS * 86400}
             self.access[_sha(at)] = {"token": token, "client_id": client_id, "exp": now + TOKEN_TTL}

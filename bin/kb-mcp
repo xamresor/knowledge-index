@@ -33,7 +33,13 @@ def main() -> None:
     warm.enable()  # long-lived graphify and qmd: no cold start per call (bin/warm.py)
     from usage import Usage  # count local calls for the admin pages (kb-api /admin)
     kb_core.LOCAL_USAGE = Usage(os.path.join(kb_core.KB, "logs", "usage-local.json"))
-    for line in sys.stdin:
+    serve(sys.stdin)
+
+
+def serve(lines) -> None:
+    """Answer each JSON-RPC line. Nothing that goes wrong in one message stops the loop: the agent
+    would lose every KB tool for the rest of its session."""
+    for line in lines:
         line = line.strip()
         if not line:
             continue
@@ -41,34 +47,50 @@ def main() -> None:
             req = json.loads(line)
         except json.JSONDecodeError:
             continue
-        method, mid = req.get("method"), req.get("id")
-        if method == "initialize":
-            kb_core.warm_qmd()  # preload the embedding model so the first doc search isn't cold
-            send({"jsonrpc": "2.0", "id": mid, "result": {
-                "protocolVersion": req.get("params", {}).get("protocolVersion", PROTO),
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "kb", "version": kb_core.VERSION,
-                               "apiContract": kb_core.API_CONTRACT},
-                "instructions": kb_core.instructions()}})
-        elif method == "tools/list":
-            send({"jsonrpc": "2.0", "id": mid, "result": {"tools": kb_core.tools()}})
-        elif method == "tools/call":
-            p = req.get("params", {})
-            try:
-                text, err = kb_core.call_tool(p.get("name", ""), p.get("arguments", {}) or {}), False
-            except kb_core.ToolError as e:
-                # A bad call is the caller's bug: report it as tool output (an agent can read and
-                # retry) rather than as a protocol error it cannot see; isError marks it as such.
-                text, err = f"(bad request: {e})", True
-            send({"jsonrpc": "2.0", "id": mid,
-                  "result": {"content": [{"type": "text", "text": text}], "isError": err}})
-        elif method == "ping":
-            send({"jsonrpc": "2.0", "id": mid, "result": {}})
-        elif mid is not None:  # unknown request -> respond so the client isn't left hanging
-            send({"jsonrpc": "2.0", "id": mid,
-                  "error": {"code": -32601, "message": f"method not found: {method}"}})
-        # notifications (no id), incl. notifications/initialized: ignore
+        if not isinstance(req, dict):
+            continue
+        try:
+            answer = handle(req)
+        except Exception as e:  # noqa: BLE001 — a fault in one message is an error answer
+            sys.stderr.write(f"kb-mcp: internal error {type(e).__name__}: {str(e)[:200]}\n")
+            answer = None if req.get("id") is None else {
+                "jsonrpc": "2.0", "id": req.get("id"), "error": {"code": -32603, "message": "internal error"}}
+        if answer is not None:
+            send(answer)
 
+
+def handle(req: dict) -> dict | None:
+    method, mid = req.get("method"), req.get("id")
+    if method == "initialize":
+        kb_core.warm_qmd()  # preload the embedding model so the first doc search isn't cold
+        return {"jsonrpc": "2.0", "id": mid, "result": {
+            "protocolVersion": req.get("params", {}).get("protocolVersion", PROTO),
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "kb", "version": kb_core.VERSION,
+                           "apiContract": kb_core.API_CONTRACT},
+            "instructions": kb_core.instructions()}}
+    if method == "tools/list":
+        return {"jsonrpc": "2.0", "id": mid, "result": {"tools": kb_core.tools()}}
+    if method == "tools/call":
+        p = req.get("params")
+        if not isinstance(p, dict):
+            return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32602, "message": "params must be an object"}}
+        try:
+            text, err = kb_core.call_tool(p.get("name", ""), p.get("arguments", {}) or {}), False
+        except kb_core.ToolError as e:
+            # A bad call is the caller's bug: report it as tool output (an agent can read and
+            # retry) rather than as a protocol error it cannot see; isError marks it as such.
+            text, err = f"(bad request: {e})", True
+        except Exception as e:  # noqa: BLE001 — a fault inside a tool: an error answer, the server lives on
+            sys.stderr.write(f"kb-mcp: tool failed: {type(e).__name__}: {str(e)[:200]}\n")
+            text, err = f"(error: the tool failed inside the server: {type(e).__name__})", True
+        return {"jsonrpc": "2.0", "id": mid,
+                "result": {"content": [{"type": "text", "text": text}], "isError": err}}
+    if method == "ping":
+        return {"jsonrpc": "2.0", "id": mid, "result": {}}
+    if mid is not None:  # unknown request -> respond so the client isn't left hanging
+        return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": f"method not found: {method}"}}
+    return None  # notifications (no id), incl. notifications/initialized: ignore
 
 if __name__ == "__main__":
     main()

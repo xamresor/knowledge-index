@@ -5,11 +5,15 @@
 # Usage: bin/kb-refresh [--force]
 #
 # - The git checkouts come from the absolute paths in kb.projects.toml.
-# - One build at a time: a flock on <data>/logs/update.lock. A tick during a build exits at once.
+# - One build at a time: a flock on <data>/logs/update.lock (bin/kb takes the same lock). A tick during a
+#   build exits 0 at once. A tick that finds no change exits before it takes the lock, so it never
+#   blocks a --force that starts at the same minute.
+# - --force while a build runs (or while KB_REFRESH_WAIT_LOCK is held): exit 75, "busy: ..." on stderr
+#   and one line in refresh.log. The admin "Rebuild" button reads this exit code.
 # - KB_REFRESH_WAIT_LOCK=<file>: when set and readable, a tick exits while another process holds
 #   that lock (e.g. your deploy script resetting the checkouts). The next tick builds. Unset = no wait.
-# - The HEADs of the last build, a hash of the config and the KB_ROUTES_DIR/*.json tables go to
-#   logs/heads.txt, also after a failed build: a broken build does not repeat every minute; the next
+# - The HEADs of the last build, a hash of the config, kb.hubs.txt and VERSION, and the route tables
+#   (KB_ROUTES_DIR/*.json and a `routes` that names a .json file) go to logs/heads.txt, also after a failed build: a broken build does not repeat every minute; the next
 #   commit, config change or --force retries it. No heads.txt yet = build.
 # - --force runs `KB_FORCE=1 kb update`: every project and the merged graph are built again.
 # - logs/update.log holds the output of the last build; logs/refresh.log one line per build.
@@ -25,18 +29,16 @@ CFG="$KB_CONFIG/kb.projects.toml"
 STAMP="$KB_DATA/logs/heads.txt"
 WAIT_LOCK="${KB_REFRESH_WAIT_LOCK:-}"
 
-# The lock is the flock(2) on <data>/logs/update.lock, not the file. The file stays after a build and
-# its presence means nothing: a build runs while a process holds the flock (fd 8, released when this
-# script exits, also on a crash). To ask "is a build running?", try the lock, for example
-# `flock -n <data>/logs/update.lock true` (exit 1 = running), never test whether the file exists.
-exec 8>"$KB_DATA/logs/update.lock"
-flock -n 8 || exit 0
+FORCE=0
+if [ "${1:-}" = "--force" ]; then FORCE=1; fi
 
-if [ -n "$WAIT_LOCK" ] && [ -r "$WAIT_LOCK" ]; then
-  exec 7<"$WAIT_LOCK"
-  flock -n -s 7 || exit 0
-  exec 7<&-  # release at once: holding it would make the other process skip its own ticks
-fi
+# A forced build that cannot start says so: exit 75 and "busy" on stderr (the admin button reads the
+# code), and a line in refresh.log, so a skipped nightly build is visible.
+busy() {
+  echo "kb-refresh: busy: $1; the forced build did not start" >&2
+  echo "$(date '+%F %T') exit=75 busy: $1, forced build skipped" >>logs/refresh.log
+  exit 75
+}
 
 # Every path of kb.projects.toml (code, docs, routes, calls), read with tomllib like bin/kb does.
 # A missing or broken file prints one line "error: ..." on stderr and exits 1, no traceback.
@@ -58,17 +60,8 @@ for p in projects:
 PY
 }
 
-# A broken config: one line in update.log (the admin's Rebuild view) and in refresh.log, and a
-# non-zero exit. Nothing on stdout or stderr: cron would mail it every minute. The same error goes
-# into refresh.log once, not on every tick.
-if ! paths=$(config_paths 2>&1); then
-  msg="exit=1 config error: $(tail -1 <<<"$paths")"
-  echo "$(date '+%F %T') $msg" >logs/update.log
-  if [ "$(tail -1 logs/refresh.log 2>/dev/null | cut -d' ' -f3-)" != "$msg" ]; then
-    echo "$(date '+%F %T') $msg" >>logs/refresh.log
-  fi
-  exit 1
-fi
+# Every path of the config: set by the check before the lock, and again by the config check after it.
+paths=""
 
 heads() {
   local p top
@@ -83,17 +76,67 @@ heads() {
 
 # What the last build saw: the git HEADs, the config and the ready route tables. A KB without any git
 # checkout still rebuilds when its config or a route table changes.
+# The curated hubs (bin/declutter.py) and the KB version are inputs too: a new KB release on a server
+# without git builds at the next tick, not at the next commit.
 inputs() {
   echo "config $(sha256sum <"$CFG" | cut -d' ' -f1)"
+  local f
+  for f in "$KB_CONFIG/kb.hubs.txt" "$KB_PACKAGE/kb.hubs.txt" "$KB_PACKAGE/VERSION"; do
+    if [ -f "$f" ]; then echo "file $f $(sha256sum <"$f" | cut -d' ' -f1)"; fi
+  done
   if [ -n "${KB_ROUTES_DIR:-}" ] && [ -d "$KB_ROUTES_DIR" ]; then
     find "$KB_ROUTES_DIR" -maxdepth 1 -name '*.json' -printf 'routes %f %s %T@\n' 2>/dev/null | LC_ALL=C sort
   fi
+  # a `routes` that names a ready .json table, anywhere (the git checkouts above skip a file)
+  printf '%s\n' "$paths" | while read -r f; do
+    if [ "${f%.json}" != "$f" ] && [ -f "$f" ]; then echo "routes $f $(stat -c '%s %Y' "$f")"; fi
+  done
 }
+
+# A plain tick without a change exits here, before it takes the lock. A tick that held the lock for its
+# check made a --force of the same minute exit busy. A broken config goes on to the locked part, which
+# logs it.
+if [ "$FORCE" = 0 ] && [ -f "$STAMP" ] && paths=$(config_paths 2>/dev/null) \
+    && [ "$(printf '%s\n%s' "$(heads)" "$(inputs)")" = "$(cat "$STAMP")" ]; then
+  exit 0
+fi
+
+# The lock is the flock(2) on <data>/logs/update.lock, not the file. The file stays after a build and
+# its presence means nothing: a build runs while a process holds the flock (fd 8, released when this
+# script exits, also on a crash). To ask "is a build running?", try the lock, for example
+# `flock -n <data>/logs/update.lock true` (exit 1 = running), never test whether the file exists.
+# bin/kb sees that it runs under this lock (fd 8, inherited) and does not take it again.
+exec 8>"$KB_DATA/logs/update.lock"
+if ! flock -n 8; then
+  [ "$FORCE" = 1 ] && busy "a build is running"
+  exit 0
+fi
+
+if [ -n "$WAIT_LOCK" ] && [ -r "$WAIT_LOCK" ]; then
+  exec 7<"$WAIT_LOCK"
+  if ! flock -n -s 7; then
+    [ "$FORCE" = 1 ] && busy "$WAIT_LOCK is held"
+    exit 0
+  fi
+  exec 7<&-  # release at once: holding it would make the other process skip its own ticks
+fi
+
+# A broken config: one line in update.log (the admin's Rebuild view) and in refresh.log, and a
+# non-zero exit. Nothing on stdout or stderr: cron would mail it every minute. The same error goes
+# into refresh.log once, not on every tick.
+if ! paths=$(config_paths 2>&1); then
+  msg="exit=1 config error: $(tail -1 <<<"$paths")"
+  echo "$(date '+%F %T') $msg" >logs/update.log
+  if [ "$(tail -1 logs/refresh.log 2>/dev/null | cut -d' ' -f3-)" != "$msg" ]; then
+    echo "$(date '+%F %T') $msg" >>logs/refresh.log
+  fi
+  exit 1
+fi
 
 git_heads=$(heads)
 now=$(printf '%s\n%s' "$git_heads" "$(inputs)")
-# No stamp yet = never built: build.
-if [ "${1:-}" != "--force" ] && [ -f "$STAMP" ] && [ "$now" = "$(cat "$STAMP")" ]; then
+# No stamp yet = never built: build. Checked again under the lock: a build that just ended wrote it.
+if [ "$FORCE" = 0 ] && [ -f "$STAMP" ] && [ "$now" = "$(cat "$STAMP")" ]; then
   exit 0
 fi
 
@@ -101,7 +144,7 @@ start=$(date +%s)
 status=0
 # --force rebuilds every project and the merged graph (KB_FORCE=1): the nightly forced build and the
 # admin "Rebuild now" must not stop at the "unchanged" checks of `kb update`.
-if [ "${1:-}" = "--force" ]; then export KB_FORCE=1; fi
+if [ "$FORCE" = 1 ]; then export KB_FORCE=1; fi
 # nice 19: qmd embed takes every core; whatever else runs on the server goes first.
 { date; echo "$now"; nice -n 19 "$BIN/kb" update; } >logs/update.log 2>&1 || status=$?
 echo "$now" >"$STAMP"

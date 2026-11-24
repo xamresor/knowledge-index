@@ -74,8 +74,9 @@ Content-Type: application/json
 | `403`, another `4xx`, or `200` with an empty list | the person may not use the KB (`403`) |
 | unreachable, a `5xx` answer, or a body of another shape | an outage: `503`, not cached. The admin pages show "not available", and a refresh of the browser sign-in keeps its refresh token for the next try |
 
-`user` may hold any fields; the KB shows the first of `name`, `uname`, `username`, `id`, `uid` in its
-logs and admin pages. It matches `KB_ADMINS` only against `uname`, `username`, `id` and `uid`: stable,
+`user` may hold any fields. The admin pages show the first of `uname`, `username`, `name`, `id`, `uid`.
+The usage counts, the `usage` tool ("your own questions") and the call log key a caller by the first of
+`uname`, `username`, `id`, `uid`, then `name`: two people with the same display name stay apart. It matches `KB_ADMINS` only against `uname`, `username`, `id` and `uid`: stable,
 unique identifiers. The display `name` never makes an admin.
 
 ## The smallest implementation

@@ -20,13 +20,17 @@ from __future__ import annotations
 
 import datetime
 import importlib
+import os
 import pkgutil
 import re
+import resource
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
-__all__ = ["ExtractError", "TransientError", "for_path", "runnable", "available", "extract", "with_provenance", "MISSING_TOOLS"]
+__all__ = ["ExtractError", "TransientError", "for_path", "runnable", "available", "extract", "with_provenance",
+           "run_tool", "MISSING_TOOLS"]
 
 EXTRACTED = "EXTRACTED"   # a real text layer: the characters came from the file
 OCR = "OCR"               # recognised from pixels: expect noise, never quote it as authoritative
@@ -40,6 +44,50 @@ class ExtractError(RuntimeError):
 
 class TransientError(ExtractError):
     """The tool did not finish this time (a timeout, an OS error): try again on the next build."""
+
+
+DEFAULT_MAX_OUTPUT_MB = 20   # KB_EXTRACT_MAX_OUTPUT_MB: text that one tool run may produce
+DEFAULT_MAX_MEM_MB = 2048     # KB_EXTRACT_MAX_MEM_MB: memory (data segment) of one tool run
+
+
+def _mb(name: str, default: float) -> int:
+    try:
+        value = float(os.environ.get(name, default))
+    except ValueError:
+        value = default
+    return max(1, int(value * 2**20))
+
+
+def run_tool(cmd: list[str], timeout: float) -> tuple[str, str]:
+    """Run an extraction tool with caps: (stdout, stderr) as text.
+
+    A small file can expand without limit: a .docx is a zip, a PNG can have 50 000 x 50 000 pixels.
+    So the tool runs with a memory cap (RLIMIT_DATA, KB_EXTRACT_MAX_MEM_MB) and a cap on every file it
+    writes (RLIMIT_FSIZE, KB_EXTRACT_MAX_OUTPUT_MB). Its stdout goes to a temp file, not to memory.
+    Output over the cap is cut, and the text says so; stderr is kept up to 4 KB. A tool that runs out of memory fails, and the
+    caller reports the file. A timeout or an OS error is transient: the next build tries again.
+    """
+    out_cap = _mb("KB_EXTRACT_MAX_OUTPUT_MB", DEFAULT_MAX_OUTPUT_MB)
+    mem_cap = _mb("KB_EXTRACT_MAX_MEM_MB", DEFAULT_MAX_MEM_MB)
+
+    def limits() -> None:  # runs in the child, before the tool starts
+        resource.setrlimit(resource.RLIMIT_DATA, (mem_cap, mem_cap))
+        resource.setrlimit(resource.RLIMIT_FSIZE, (out_cap + 1, out_cap + 1))
+
+    try:
+        with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+            subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=err, timeout=timeout,
+                           preexec_fn=limits)
+            out.seek(0)
+            data = out.read(out_cap + 1)
+            err.seek(0)
+            errors = err.read(4096)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise TransientError(f"{cmd[0]} failed: {exc}") from exc
+    text = data[:out_cap].decode("utf-8", errors="replace")
+    if len(data) > out_cap:
+        text += f"\n\n<!-- output cut at {out_cap / 2**20:g} MB (KB_EXTRACT_MAX_OUTPUT_MB) -->"
+    return text, errors.decode("utf-8", errors="replace")
 
 
 def _modules():

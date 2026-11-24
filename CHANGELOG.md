@@ -14,6 +14,44 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+Fourth audit round (2026-11-24). Each fix has a test.
+
+- **Security: contract docs under `contracts: all`.** A limited caller sees only the contract docs of other
+  projects (`*.md` directly in `contracts/`), not their README or the files in sub-folders. The search grade
+  counts the same set.
+- **Security: "Forgot the password?" answers at once.** The mail goes from a background worker, so the answer
+  time no longer shows whether a name exists.
+- **The build lock covers every build.** `bin/kb` build commands take `logs/update.lock`, the lock of
+  kb-refresh. A second build exits 75 with `busy`. `kb-refresh --force` during a build exits 75 and writes a
+  refresh.log line; a tick without changes no longer takes the lock, so the nightly forced build is not
+  skipped silently. The admin Rebuild button says "A build is already running" in that case.
+- **The graph is published whole.** Post-processing runs in `<data>/.build/graphify-out`; each file moves in
+  with one rename, `graph.json` last. `graph.json.prev` is gone.
+- **kb-mcp survives a fault inside a tool** (for example a missing `node`, or `kb()` arguments that are not an
+  object): it answers with a tool error and keeps serving. `batch` and `run_code` report the fault of one
+  nested call in its place. A slow nested call no longer throws away the output of a `run_code` program.
+- **Limits.** `review_context` refuses a diff of more than 1000 files and looks paths up by suffix
+  (60 000 files x 1000 paths: 2 s to 0.06 s). The filtered graph copy is cut in a graph job slot.
+  Ready route tables must be regular files of at most 64 MB. Extraction tools run with a memory cap
+  (`KB_EXTRACT_MAX_MEM_MB`, 2048) and an output cap (`KB_EXTRACT_MAX_OUTPUT_MB`, 20).
+- **kb-http reads `KB_PUBLIC_URL` and `KB_PUBLIC_LOGIN_URL` from `<data>/smtp.env`** when the environment has
+  none. It refuses to start when `KB_PERMISSION_URL` points to a `/local/permissions` that is not this server.
+- **Breaking: usage counts key a caller by the stable login id** (`uname`, `username`, `id`, `uid`) before the
+  display `name`. Old usage rows keyed by the display name stay apart.
+- **An admin without a project signs in.** A users-plugin admin whose projects are all gone from
+  `kb.projects.toml`, or who has none, gets into the admin pages to fix it. MCP still refuses a token without
+  a project; a member without a project stays out.
+- **Security: a daily cap of password mails.** One user gets at most `KB_RESET_PER_DAY` (3) "forgot" or reset
+  mails in 24 hours, on top of one per 5 minutes. Over the cap no mail goes; the answer stays the same.
+- **Sign-in fixes.** A browser sign-in that never reached `/token`, a revoked client and an ended refresh token
+  end their upstream token. A reload of the password-link page asks to open the link again. An unreadable
+  users file gives 503 at sign-in. A users change whose save fails does not stay in memory.
+- **Fewer rebuild misses and wrong labels.** kb-refresh rebuilds when `kb.hubs.txt`, `VERSION` or an outside
+  `routes` table changes; the post-build signature includes the `calls` folders. `link_http` reads call
+  sites only inside their `calls` folder. A controller directly in `Controllers/` no longer puts its file
+  name into a label. The dashboard no longer counts `db` and `domain` as projects. `problems` under
+  `contracts: own` hides only the project names, not paths that hold the same word.
+
 Audit of 2026-11-23 (four reviews: security, query tools, build, server). Each fix has a test.
 
 - **Security: docs results are authorized on qmd's own hits.** A document line that looked like a result

@@ -25,6 +25,7 @@ every tool (see bin/access.py). `allowed=None` means everything: the local stdio
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import fnmatch
 import json
 import os
@@ -743,6 +744,7 @@ def instructions(projects: list[str] | None = None) -> str:
 BATCH_MAX = int(os.environ.get("KB_BATCH_MAX", "10"))
 RUN_CALLS = int(os.environ.get("KB_RUN_CALLS", "30"))
 RUN_SECONDS = int(os.environ.get("KB_RUN_SECONDS", "20"))
+RUN_SLACK = 15   # seconds past RUN_SECONDS before a silent sandbox is stopped (see _run_sandbox)
 # run_code's sandbox: installed by `kb addon install sandbox` into the data folder (a tool install keeps
 # its package read-only); a checkout may also have it in place (`npm ci` in sandbox/).
 _SANDBOX_PKG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sandbox")
@@ -864,7 +866,8 @@ TOOLS = [
                     "`declare function print(...values: unknown[]): void`; `return` gives the result. Types "
                     "are stripped (no enums or namespaces). The program runs in a sandbox (QuickJS in "
                     "WebAssembly): no network, no files, "
-                    f"no timers; at most {RUN_CALLS} kb() calls and {RUN_SECONDS} s. The tools answer with "
+                    f"no timers; at most {RUN_CALLS} kb() calls and {RUN_SECONDS} s, the time of the kb() calls included "
+                    "(a call that runs finishes first). The tools answer with "
                     "your own access. Example: `const r = kb('contracts_search', {query: 'drivers'}); "
                     "return r.split('\\n').filter(l => l.startsWith('GET')).join('\\n')`",
      "inputSchema": {"type": "object", "properties": {
@@ -1010,6 +1013,15 @@ GRAPH_VERBS = {"query", "path", "explain", "affected"}
 GRAPH_JOBS = threading.BoundedSemaphore(int(os.environ.get("KB_MAX_GRAPH_JOBS", "3")))
 DOCS_JOBS = threading.BoundedSemaphore(int(os.environ.get("KB_MAX_DOCS_JOBS", "1")))
 JOB_WAIT = float(os.environ.get("KB_JOB_WAIT", "120"))
+# A run_code program sets this to the end of its own time: its nested calls wait for a slot only
+# until then, not JOB_WAIT. A context variable, so each program (thread) has its own.
+_WAIT_UNTIL: contextvars.ContextVar[float | None] = contextvars.ContextVar("kb_wait_until", default=None)
+
+
+def _wait_left() -> float:
+    """Seconds a call may wait for a job slot or a lock: JOB_WAIT, or less inside a run_code program."""
+    until = _WAIT_UNTIL.get()
+    return JOB_WAIT if until is None else max(0.0, min(JOB_WAIT, until - time.monotonic()))
 
 
 class _Job:
@@ -1019,12 +1031,18 @@ class _Job:
         self.slots, self.kind = slots, kind
 
     def __enter__(self):
-        if not self.slots.acquire(timeout=JOB_WAIT):
+        if not self.slots.acquire(timeout=_wait_left()):
             raise ToolError(f"busy: every {self.kind} job slot is taken; try again in a minute")
         return self
 
     def __exit__(self, *exc) -> None:
         self.slots.release()
+
+
+# The filtered-copy cut of bin/access.py loads the whole graph in a Python process: it takes a
+# graph slot like graphify does, and waits for its lock no longer than a slot.
+access.job_slot = lambda: _Job(GRAPH_JOBS, "graph")
+access.wait_seconds = _wait_left
 
 
 def _slots(cmd: list[str]) -> _Job | None:
@@ -1549,8 +1567,9 @@ def search(args: dict, allowed: set[str] | None = None) -> str:
         return f"=== docs ===\n{skipped}\n\n=== code ===\n{search_code(args, allowed)}"
     # The halves are independent subprocesses (qmd, graphify): run them side by side, not in turn.
     with ThreadPoolExecutor(max_workers=2) as pool:
-        docs = pool.submit(search_docs, args, allowed)
-        code = pool.submit(search_code, args, allowed)
+        # each half runs in a copy of this context: a run_code program's slot deadline goes along
+        docs = pool.submit(contextvars.copy_context().run, search_docs, args, allowed)
+        code = pool.submit(contextvars.copy_context().run, search_code, args, allowed)
         return f"=== docs ===\n{docs.result()}\n\n=== code ===\n{code.result()}"
 
 
@@ -1881,12 +1900,19 @@ def _run_sandbox(code: str, allowed: set[str] | None, caller: str | None) -> dic
             resource.setrlimit(resource.RLIMIT_CPU, (RUN_SECONDS + 10, RUN_SECONDS + 10))
             resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
 
-        proc = subprocess.Popen(
-            ["node", "--permission", f"--allow-fs-read={SANDBOX}", os.path.join(SANDBOX, "runner.mjs")],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=SANDBOX,
-            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "NODE_OPTIONS": ""}, preexec_fn=limits)
+        try:
+            proc = subprocess.Popen(
+                ["node", "--permission", f"--allow-fs-read={SANDBOX}", os.path.join(SANDBOX, "runner.mjs")],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=SANDBOX,
+                env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "NODE_OPTIONS": ""}, preexec_fn=limits)
+        except OSError as e:  # no `node` on the server's PATH (nvm sets it only in interactive shells)
+            raise ToolError(f"run_code: cannot start node ({e.strerror or e})") from None
         rd, wr = proc.stdout, proc.stdin
-    deadline = time.monotonic() + RUN_SECONDS + 15  # the script's own deadline + tool time
+    # A safety net for a runner that stops answering: the script's own deadline + RUN_SLACK. The
+    # time the nested kb() calls take is added to it, because the runner counts that time against
+    # the script itself and stops it ("time is up") with its output kept.
+    deadline = time.monotonic() + RUN_SECONDS + RUN_SLACK
+    token = _WAIT_UNTIL.set(time.monotonic() + RUN_SECONDS)
     try:
         assert rd and wr
         wr.write(json.dumps({"code": code, "deadline_ms": RUN_SECONDS * 1000, "max_output": RUN_MAX_VALUE,
@@ -1895,7 +1921,7 @@ def _run_sandbox(code: str, allowed: set[str] | None, caller: str | None) -> dic
         while True:
             left = deadline - time.monotonic()
             if left <= 0 or not select.select([rd], [], [], left)[0]:
-                raise ToolError(f"run_code: stopped after {RUN_SECONDS + 15} s")
+                raise ToolError(f"run_code: the sandbox did not answer for {RUN_SECONDS + RUN_SLACK:g} s")
             line = rd.readline(RUN_MAX_LINE)
             if line and not line.endswith("\n"):
                 raise ToolError("run_code: the sandbox sent a message longer than "
@@ -1903,20 +1929,32 @@ def _run_sandbox(code: str, allowed: set[str] | None, caller: str | None) -> dic
             if not line:
                 err = ((proc.stderr.read() if proc and proc.stderr else "") or "")[-400:]
                 raise ToolError(f"run_code: the sandbox stopped ({err.strip() or 'no message'})")
-            msg = json.loads(line)
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                raise ToolError("run_code: the sandbox sent a message that is not JSON") from None
+            if not isinstance(msg, dict):
+                raise ToolError("run_code: the sandbox sent a message that is not an object")
             if msg.get("done"):
                 break
             tool, args = str(msg.get("call", "")), msg.get("args") or {}
+            started = time.monotonic()
             if tool in NOT_IN_BATCH:
                 reply = {"error": f"'{tool}' cannot be called from run_code"}
+            elif not isinstance(args, dict):
+                reply = {"error": f"{tool}: the arguments must be an object"}
             else:
                 try:
                     reply = {"result": call_tool(tool, dict(args), allowed, caller, nested=True)}
                 except ToolError as e:
                     reply = {"error": str(e)}
+                except Exception as e:  # noqa: BLE001 — a fault in one tool: the program gets an error
+                    reply = {"error": f"{tool} failed inside the server: {type(e).__name__}"}
+            deadline += time.monotonic() - started
             wr.write(json.dumps(reply) + "\n")
             wr.flush()
     finally:
+        _WAIT_UNTIL.reset(token)
         if proc is not None:
             if proc.poll() is None:
                 proc.kill()
@@ -1950,6 +1988,8 @@ def batch(calls: list, allowed: set[str] | None, caller: str | None) -> str:
             return call_tool(c["tool"], dict(c.get("args") or {}), allowed, caller, nested=True)
         except ToolError as e:
             return f"(error: {e})"
+        except Exception as e:  # noqa: BLE001 — one failing call does not drop the whole batch
+            return f"(error: the tool failed inside the server: {type(e).__name__})"
     with ThreadPoolExecutor(max_workers=min(4, len(calls))) as pool:
         answers = list(pool.map(one, calls))
     return "\n\n".join(f"=== [{i}] {c['tool']} {json.dumps(c.get('args') or {}, ensure_ascii=False)} ===\n{a}"

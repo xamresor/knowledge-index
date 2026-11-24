@@ -264,8 +264,9 @@ def main() -> int:
                     continue  # a test calls its own API through the test client, not another service
                 fp = os.path.join(dp, fn)
                 rel = os.path.relpath(fp, repo_root)
-                # Not a device or a pipe; at most graph.MAX_SOURCE_BYTES.
-                text = graph.read_source(fp)
+                # Not a device or a pipe, not a link out of the calls folder; at most
+                # graph.MAX_SOURCE_BYTES.
+                text = graph.read_source(fp, root)
                 if text is None:
                     continue
                 if backend:

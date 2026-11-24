@@ -37,6 +37,7 @@ from collections import Counter, defaultdict
 
 import graph as graph_io
 import paths
+from access import PSEUDO_REPOS
 
 # node type -> vis-network shape (the legend text lives in web/app.js, next to the rendering)
 SHAPE = {
@@ -224,7 +225,8 @@ def write_status(out_dir: str, kb_root: str, g: dict, domains: list[str], counts
     """A build-time snapshot for the Status panel. Every block is stamped: a stale number that admits
     its age is useful, one that pretends to be live is not."""
     built = datetime.datetime.fromtimestamp(os.path.getmtime(graph_path)).strftime("%Y-%m-%d %H:%M")
-    projects = len({n.get("repo") for n in g["nodes"] if n.get("repo")})
+    # db and domain are the build's own node tags (db tables, domain anchors), not projects
+    projects = len({n.get("repo") for n in g["nodes"] if n.get("repo")} - PSEUDO_REPOS)
     version_file = os.path.join(kb_root, "VERSION")
     try:
         repo_version = open(version_file, encoding="utf-8").read().strip()

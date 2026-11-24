@@ -30,10 +30,11 @@ def domain(node: dict) -> str | None:
     if len(p) > 2 and p[0] == "app" and p[1] == "Components":
         return f"Components\\{p[2]}"
     # app/<Layer>/..., src/<area>/... (a package or a frontend), assets-js/<area>/... -> the second
-    # segment; Http gets one or two levels more (Http\Controllers\V2, Http\Requests).
+    # segment; Http gets one or two levels more (Http\Controllers\V2, Http\Requests). A controller
+    # directly in Controllers/ gets "Http\Controllers": the last segment is a file, not a folder.
     if p[0] in ("app", "src", "assets-js") and len(p) > 1:
         if p[1] == "Http" and len(p) > 3:
-            return f"Http\\{p[2]}\\{p[3]}" if p[2] == "Controllers" else f"Http\\{p[2]}"
+            return f"Http\\{p[2]}\\{p[3]}" if p[2] == "Controllers" and len(p) > 4 else f"Http\\{p[2]}"
         return p[1]
     return p[0]
 

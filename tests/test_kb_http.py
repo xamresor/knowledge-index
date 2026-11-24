@@ -151,7 +151,7 @@ class AuthTests(unittest.TestCase):
     def test_identity(self):
         ident = self.auth().check("Bearer fe")
         self.assertEqual(ident.projects, {"web"})
-        self.assertEqual(ident.name, "bob")
+        self.assertEqual(ident.name, "2")   # the stable id before the display name (fourth audit)
         self.assertEqual(FakeIdentity.asked[-1], {"protocol": 1, "projects": ["admin", "api", "web"]})
 
     def test_star_means_every_project_and_unknown_names_drop(self):

@@ -8,11 +8,13 @@ For a team that wants no second system behind the two webhooks of the access pro
 - **The password comes from the person.** A user name is an e-mail address. A new person gets a mail
   with a link and chooses a password; "Forgot the password?" on the sign-in page and "Reset password" of
   an admin send the same mail. The link works once and for a short time; a "forgot" link does not end a
-  pending invite, both work until one is used. The store keeps a password as scrypt with its own salt. Five
+  pending invite, both work until one is used. One user gets one such mail in 5 minutes and at most
+  KB_RESET_PER_DAY (3) in 24 hours. The store keeps a password as scrypt with its own salt. Five
   wrong passwords from one address lock the sign-in of that name from that address for 15 minutes: a
   stranger cannot lock the owner out, who signs in from another address.
-- **An admin keeps a project.** An admin cannot save the own row without a project: the permission webhook
-  would refuse every token of that admin, and the admin could not sign in to undo it.
+- **An admin keeps a project.** An admin cannot save the own row without a project: MCP refuses a token
+  without a project. An admin whose projects are gone (a project left kb.projects.toml) still signs in to
+  the admin pages to fix the row; the permission webhook gives an admin an empty grant, not 403.
 - **Tokens come from the person.** Signed in, the person opens "My tokens": the own
   tokens, one per computer or agent. A token has the rights of its owner and none of its own. A person who
   is no admin reaches only that page and the how-to.
@@ -83,11 +85,24 @@ PW_MIN, PW_MAX = 12, 200
 RESET_TTL = 3600  # "forgot the password": the link works this long
 INVITE_TTL = 3 * 86400  # the first mail to a new person
 RESET_EVERY = 300  # one mail per user in this time
+RESET_PER_DAY = 3  # "forgot" mails per user in 24 hours; KB_RESET_PER_DAY changes it
 LOCK_AFTER, LOCK_SECONDS = 5, 900  # wrong passwords from one address, then that name is shut there this long
+
+
+def reset_per_day() -> int:
+    """KB_RESET_PER_DAY, read at each mail: the "forgot" mails one user may get in 24 hours."""
+    try:
+        return max(1, int(os.environ.get("KB_RESET_PER_DAY", "") or RESET_PER_DAY))
+    except ValueError:
+        return RESET_PER_DAY
 
 
 class UserError(Exception):
     """A refusal with a text that a person may read."""
+
+
+class Unreadable(UserError):
+    """The users file cannot be read: an outage (503), never "wrong password" (401)."""
 
 
 class Busy(UserError):
@@ -167,7 +182,7 @@ class Store:
                     data = json.load(f)
                 self._users = data.get("users", {}) if isinstance(data, dict) else {}
             except (OSError, ValueError):
-                raise UserError("the users file cannot be read") from None
+                raise Unreadable("the users file cannot be read") from None
             for rec in self._users.values():  # a file of the first version: one key per user
                 if "tokens" not in rec:
                     rec["tokens"] = {}
@@ -198,7 +213,13 @@ class Store:
             self._flock_depth += 1
             try:
                 self._load()
-                yield
+                try:
+                    yield
+                except BaseException:
+                    # The change may be in memory but not in the file (a full disk, a refusal half way):
+                    # the next read takes the file again, so memory never holds what the file does not.
+                    self._stamp = None
+                    raise
             finally:
                 self._flock_depth -= 1
                 if self._flock_depth == 0 and self._flock_fd is not None:
@@ -365,6 +386,13 @@ class Store:
             last = max((rec.get(slot) or {}).get("sent", 0) for slot in ("reset", "invite"))
             if self.now() - last < RESET_EVERY:
                 raise UserError("A mail went out a moment ago. Wait a few minutes.")
+            if not invite:
+                # The send times of the last 24 hours, in the users file: a restart does not reset the cap.
+                day = [t for t in rec.get("reset_mails") or []
+                       if isinstance(t, (int, float)) and self.now() - t < 86400]
+                if len(day) >= reset_per_day():
+                    raise UserError("This user got the most password mails for one day. Try again tomorrow.")
+                rec["reset_mails"] = day + [self.now()]
             value = secrets.token_urlsafe(32)
             rec["invite" if invite else "reset"] = {"hash": _hash(value), "expires": self.now() + ttl,
                                                     "sent": self.now()}
@@ -513,6 +541,10 @@ class Store:
                         rec["tokens"][tid]["last_used"] = rec["last_used"] = now
                         self._save()
                 except OSError as e:
+                    # The failed save made the store read the file again: the time goes on the fresh record.
+                    with contextlib.suppress(UserError):
+                        hit = self._by_key(token) or hit
+                    name, rec, tid = hit
                     rec["tokens"].get(tid, {})["last_used"] = now
                     # A full disk or a read-only folder: "last used" is a convenience, the check is not. The
                     # time stays in memory, so the next try comes after TOUCH_SECONDS again.
@@ -521,8 +553,10 @@ class Store:
             if rec.get("projects") == "*":
                 return 200, {"user": {"name": name}, "projects": "*"}
             allowed = [p for p in rec.get("projects") or [] if p in set(asked or [])]
-            if not allowed:
+            if not allowed and not rec.get("admin"):
                 return 403, {"message": "no project of this server"}
+            # An admin with no project of this server gets an empty grant: kb-http lets it into the admin
+            # pages (to fix the projects) and refuses it on MCP.
             return 200, {"user": {"name": name}, "projects": allowed}
 
 
@@ -817,7 +851,10 @@ def send_link(s: Store, name: str, base: str, cfg: dict, invite: bool = False) -
         send_mail(name, "Knowledge base: choose your password", text, cfg)
     except MailError as e:
         with s._changing():  # the mail did not leave: the link must not stay open, and a retry must not wait
-            s._user(name).pop("invite" if invite else "reset", None)
+            rec = s._user(name)
+            rec.pop("invite" if invite else "reset", None)
+            if not invite and rec.get("reset_mails"):
+                rec["reset_mails"].pop()   # a mail that did not go does not count against the day
             s._save()
         raise UserError(f"The mail did not go out: {e}.") from None
 
@@ -832,6 +869,9 @@ def login(body: dict, core) -> tuple:
         return 429, {"message": str(e)}, {"Retry-After": str(e.retry)}
     except Busy as e:
         return 503, {"message": str(e)}, {"Retry-After": "5"}
+    except Unreadable as e:
+        _warn_once(f"users: {e}")
+        return 503, {"message": "The users store is not available. Tell an admin."}, {"Retry-After": "30"}
     except UserError as e:
         return 401, {"message": str(e)}
     except OSError as e:  # the sign-in token cannot be saved (a full disk, a read-only folder)
@@ -878,11 +918,7 @@ def public_page(req: dict, core) -> tuple[int, str, str]:
             return box("Forgot the password", f"<p>This server sends no mail. Ask an admin for a new key.</p>{back}")
         if req["method"] == "POST":
             name = str(req["form"].get("username", "")).strip().lower()
-            try:
-                send_link(s, name, cfg["KB_PUBLIC_URL"], cfg)
-                req["audit"]("password mail", name[:80])
-            except UserError:
-                pass  # no such user, a mail a moment ago, a mail failure: the answer is the same
+            _mail_later(s, name, cfg, req["audit"])
             return box("Forgot the password", "<p>If this account exists, a mail with a link is on its way. "
                                               f"The link works once, for one hour.</p>{back}")
         return box("Forgot the password",
@@ -897,6 +933,11 @@ def public_page(req: dict, core) -> tuple[int, str, str]:
     if req["method"] == "GET" and not value and script:
         return box("Choose a password", _reset_form(base, "", "", "") + script
                    + "<noscript><p>This page needs JavaScript to read the link.</p></noscript>")
+    if not value:
+        # A POST without the value: a reload of the page lost it (the page script takes it out of the
+        # address). The link itself may still work.
+        return box("Choose a password", "<p>This page has no link value. Open the link from the mail again.</p>"
+                                        f'<p><a href="{base}/admin/forgot">Forgot the password?</a></p>')
     name = s.reset_user(value)
     if name is None:
         return box("Choose a password", f"<p>This link does not work any more. Ask for a new mail.</p>"
@@ -920,6 +961,36 @@ def public_page(req: dict, core) -> tuple[int, str, str]:
         except UserError as e:
             error = f'<p class="bad">{esc(str(e))}</p>'
     return box("Choose a password", _reset_form(base, value, name, error))
+
+
+_MAIL_QUEUE: "queue.Queue | None" = None
+_MAIL_LOCK = threading.Lock()
+
+
+def _mail_later(s: Store, name: str, cfg: dict, audit) -> None:
+    """A "forgot" mail, sent by one background thread. The answer to the person comes at once for every
+    name: a talk with the mail server would show by its time that the name exists. A full queue (a flood)
+    drops the request; the answer is the same."""
+    global _MAIL_QUEUE
+    import queue
+    with _MAIL_LOCK:
+        if _MAIL_QUEUE is None:
+            _MAIL_QUEUE = queue.Queue(maxsize=100)
+            threading.Thread(target=_mail_worker, args=(_MAIL_QUEUE,), name="users-mail", daemon=True).start()
+    with contextlib.suppress(queue.Full):
+        _MAIL_QUEUE.put_nowait((s, name, cfg, audit))
+
+
+def _mail_worker(q) -> None:
+    while True:
+        s, name, cfg, audit = q.get()
+        try:
+            send_link(s, name, cfg["KB_PUBLIC_URL"], cfg)
+            audit("password mail", name[:80])
+        except Exception:  # noqa: BLE001 — no such user, a mail a moment ago, a mail failure: nobody waits
+            pass
+        finally:
+            q.task_done()   # q.join() waits for the mails in the queue (the tests)
 
 
 def _fragment_script() -> str:

@@ -10,15 +10,16 @@ because a wrong language model produces confident nonsense rather than an error.
 Budgets: a PDF is rendered one page at a time, each page scaled to fit SCALE_TO pixels, and the page
 image is deleted before the next one, so a compact scan of many pages never fills the temp disk.
 At most `KB_OCR_MAX_PAGES` pages (default 200) are read; the text says when it stopped early.
+An image file (PNG, JPEG, TIFF) goes to tesseract as it is: the memory cap of `run_tool`
+(`KB_EXTRACT_MAX_MEM_MB`) makes a huge-pixel image fail instead of filling the memory.
 """
 from __future__ import annotations
 
 import os
-import subprocess
 import tempfile
 from pathlib import Path
 
-from . import OCR, ExtractError, TransientError
+from . import OCR, ExtractError, run_tool
 
 EXTENSIONS = (".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff")
 REQUIRES = ("tesseract",)
@@ -36,16 +37,9 @@ def _max_pages() -> int:
         return DEFAULT_MAX_PAGES
 
 
-def _run(cmd: list[str], **kw):
-    """subprocess.run; a timeout or an OS error is transient (the next build tries again)."""
-    try:
-        return subprocess.run(cmd, capture_output=True, **kw)
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise TransientError(f"{cmd[0]} failed: {exc}") from exc
-
-
 def _ocr_image(image: Path, langs: str) -> str:
-    return _run(["tesseract", str(image), "stdout", "-l", langs], text=True, timeout=600).stdout
+    # Capped memory: an image file is not scaled, and a huge-pixel PNG must fail, not fill the memory.
+    return run_tool(["tesseract", str(image), "stdout", "-l", langs], timeout=600)[0]
 
 
 def extract(path: Path) -> str:
@@ -63,8 +57,8 @@ def extract(path: Path) -> str:
         prefix = Path(tmp) / "page"
         # One page at a time: pdftoppm stops with no image after the last page.
         for number in range(1, limit + 2):
-            _run(["pdftoppm", "-f", str(number), "-l", str(number), "-scale-to", str(SCALE_TO),
-                  "-png", str(path), str(prefix)], timeout=300)
+            run_tool(["pdftoppm", "-f", str(number), "-l", str(number), "-scale-to", str(SCALE_TO),
+                      "-png", str(path), str(prefix)], timeout=300)
             images = sorted(Path(tmp).glob("page-*.png"))
             if not images:
                 break

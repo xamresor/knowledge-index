@@ -23,6 +23,9 @@ A few rules that hold for every tool:
   way. For more documents, raise `limit` (1 to 50). `search` takes `page` 1 to 500.
 - **Calls inside `run_code` and `batch`** get the whole answer (up to 200000 characters), not page 1,
   and keep no cursor: a program never pushes its caller's own cursors out.
+- **Faults.** A tool that fails inside the server (not a bad request) gives an error answer. The
+  server keeps serving: `kb-mcp`, `kb-api` and `kb-http` alike. Inside `batch` and `run_code` the
+  error takes the place of that one call. `kb()` arguments that are not an object are an error too.
 - **`Class::method`** (or `Class.method`, `Class.method()`) names the method of that class:
   `graph_explain`, `graph_affected`, `graph_path` and `graph_routes` find it through the class's
   `method`/`contains` edge.
@@ -37,7 +40,8 @@ A few rules that hold for every tool:
   name exactly as typed (two `.create()` methods, a function and a template), up to 3.
 - **Docs and access.** A caller limited to some projects searches its own collections by name. With
   the setting `contracts: all` (the default) it also searches the other collections for their
-  contract docs only; with `contracts: own` it does not ([the shared server](server.md#who-sees-the-contracts)).
+  contract docs only: the `*.md` files directly in `contracts/`, not its README and not a
+  sub-folder (`drafts/`, `archive/`). With `contracts: own` it does not ([the shared server](server.md#who-sees-the-contracts)).
   Each hit is checked by the path in qmd's own result before it becomes text. The grade of a docs
   answer counts words in the caller's collections and the contract docs it may see.
 - **`search` with `domain: both`** on a project without docs searches the code and says so.
@@ -47,16 +51,21 @@ A few rules that hold for every tool:
   that name. The scan takes a graph job slot and at most `KB_UNUSED_SCAN_SECONDS` (20) seconds; a
   complete scan is cached per build.
 - **`review_context`** takes a diff up to 1 MB (the shared server refuses larger request bodies) or
-  `files` up to 1000 items and 200000 lines in all; a larger input is refused.
+  `files` up to 1000 items and 200000 lines in all. A diff names at most 1000 files. A larger input
+  is refused.
 - **`code_grep`** never shows `.env*` files or `bootstrap/cache/`, with ripgrep or with grep. A file
   it cannot read adds a note; the matches of the other files stay.
 - **`problems`** under `contracts: own` writes another project that the caller may not see as
-  `(hidden)`, as `connections` does.
+  `(hidden)`, as `connections` does. Only the places where a row names a project change: a path or
+  a URI that holds the same word (`src/api/users.ts`, `api/v1/users`) stays as it is.
 - **Contract docs** are indexed only from inside their project's docs root: a symlink in
   `contracts/` (or a symlinked `contracts/` folder) that leaves it is skipped.
 - **Limits.** At most `KB_MAX_GRAPH_JOBS` (3) graphify or grep processes and `KB_MAX_DOCS_JOBS` (1)
   qmd processes run at once, and `KB_MAX_RUN_JOBS` (2) `run_code` programs. A call that waits more
   than `KB_JOB_WAIT` (120) seconds for a slot gets a "busy" error. The warm workers take no slot.
+  The filtered copy of the graph for a limited caller is cut in a graph slot too, and the wait for
+  its lock ends after `KB_JOB_WAIT` with the same error. A `kb()` call of a `run_code` program waits
+  for a slot only until the program's own time (`KB_RUN_SECONDS`) is up.
   Cursors keep at most `KB_CURSOR_BYTES` (64 MB) of answers; one caller keeps at most
   `KB_CURSOR_PER_OWNER` (50) answers and an eighth of the bytes, and when the budget is full the
   caller's own oldest answers go first. A cursor ends when the caller's grant, the `contracts`

@@ -26,6 +26,7 @@ from collections import defaultdict, deque
 MAX_DIFF = 1_000_000
 # `files`: at most this many items, and this many changed lines after the ranges are expanded. The
 # line sets go to the graph worker as JSON; without a cap, 2000 items of "x:1-9999" took 1.3 GB.
+# A diff names at most MAX_FILES paths too: 1 MB of `+++ b/xN` lines gave 75 000 paths.
 MAX_FILES = 1000
 MAX_LINES = 200_000
 SYMBOL_TYPES = {"method", "function", "symbol", "class", "model", "controller", "interface", "trait",
@@ -65,6 +66,8 @@ def parse_diff(text: str) -> dict[str, set[int]]:
             new_path = _strip(line[4:])
             deleted = new_path is None
             path = new_path or old_path
+            if path and path not in out and len(out) >= MAX_FILES:
+                raise ValueError(f"the diff names more than {MAX_FILES} files: pass fewer files")
             cur = out.setdefault(path, set()) if path else None
             continue
         m = _HUNK.match(line)
@@ -148,16 +151,20 @@ def analyze(graph: dict, changes: dict[str, set[int]], routes: list[dict] | None
     for n in nodes.values():
         if n.get("source_file") and (not project or n.get("repo") == project):
             by_file[(n.get("repo", ""), n["source_file"])].append(n)
-    files = sorted({f for _, f in by_file})
+    keys_of: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for key in by_file:
+        keys_of[key[1]].append(key)
 
     def find(path: str) -> list[tuple[str, str]]:
         """Graph files for a diff path: the same path, or the diff path ends with it (a monorepo
-        or a project whose code root is a sub-folder). The longest match wins."""
-        hits = [f for f in files if path == f or path.endswith("/" + f)]
-        if not hits:
-            return []
-        best = max(len(f) for f in hits)
-        return sorted(k for k in by_file if k[1] in hits and len(k[1]) == best)
+        or a project whose code root is a sub-folder). The longest match wins. A lookup per
+        suffix of the path, not a scan of every graph file per path."""
+        parts = path.split("/")
+        for i in range(len(parts)):
+            keys = keys_of.get("/".join(parts[i:]))
+            if keys:
+                return sorted(keys)
+        return []
 
     changed: dict[str, str] = {}      # node id -> why ("changed lines" / "file changed")
     missing: list[str] = []

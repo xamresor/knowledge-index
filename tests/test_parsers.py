@@ -86,23 +86,30 @@ class ProvenanceTest(unittest.TestCase):
             self.assertEqual(parsers._tool_version("nope"), "nope")
 
 
+def tool_prints(text: str) -> mock.Mock:
+    """A stand-in for subprocess.run: parsers.run_tool reads the output from the stdout file."""
+    def run(cmd, **kw):
+        kw["stdout"].write(text.encode())
+        return mock.Mock(returncode=0)
+    return mock.Mock(side_effect=run)
+
+
 class PdfTextTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which("pdftotext"), "pdftotext not installed")
     def test_a_scan_like_pdf_is_refused_with_an_explanation(self):
         """Near-empty output means no text layer: say so instead of indexing an empty document."""
-        with mock.patch("subprocess.run", return_value=mock.Mock(stdout="  \f  ", stderr="")):
+        with mock.patch("subprocess.run", tool_prints("  \f  ")):
             with self.assertRaises(parsers.ExtractError) as ctx:
                 pdf_text.extract(Path("scan.pdf"))
         self.assertIn("scan", str(ctx.exception).lower())
 
     def test_a_real_text_layer_comes_through(self):
-        with mock.patch("subprocess.run",
-                        return_value=mock.Mock(stdout="A" * 200, stderr="")):
+        with mock.patch("subprocess.run", tool_prints("A" * 200)):
             self.assertEqual(len(pdf_text.extract(Path("deck.pdf"))), 200)
 
     def test_layout_is_preserved(self):
         """Pricing decks put figures in columns; without -layout a number loses its row."""
-        with mock.patch("subprocess.run", return_value=mock.Mock(stdout="x" * 100, stderr="")) as run:
+        with mock.patch("subprocess.run", tool_prints("x" * 100)) as run:
             pdf_text.extract(Path("deck.pdf"))
         self.assertIn("-layout", run.call_args[0][0])
 

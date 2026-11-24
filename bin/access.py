@@ -83,8 +83,12 @@ def doc_allowed(path: str, allowed: set[str]) -> bool:
         return False
     if project in allowed:
         return True
-    return contracts_open() and re.match(
-        rf"qmd://[^/\s]+/{CONTRACT_DOCS_DIR}/", path.strip()) is not None
+    # Only the contract docs themselves (bin/contracts.py `_contract_files`): a `*.md` file directly
+    # in contracts/, not its README and not a sub-folder (drafts/, archive/). qmd indexes the whole
+    # docs tree, so those other files are in the index too.
+    m = re.match(rf"qmd://[^/\s]+/{CONTRACT_DOCS_DIR}/([^/\s:#]+\.md)(?=$|[\s:#])", path.strip(),
+                 re.IGNORECASE)
+    return contracts_open() and m is not None and m.group(1).lower() != "readme.md"
 
 
 # --------------------------------------------------------------------------- graph
@@ -144,6 +148,29 @@ def filter_graph(g: dict, allowed: set[str], keep_contracts: bool | None = None)
 
 
 _filter_lock = threading.Lock()
+
+
+def job_slot():
+    """The job slot a cut runs in. kb_core sets its graph slot here (KB_MAX_GRAPH_JOBS): the cut is a
+    Python process that loads the whole graph, like a graphify process. The CLI runs without one."""
+    return contextlib.nullcontext()
+
+
+def wait_seconds() -> float:
+    """How long a caller waits for the filter lock. kb_core sets its own job wait here."""
+    return float(os.environ.get("KB_JOB_WAIT", "120"))
+
+
+@contextlib.contextmanager
+def _cut_lock():
+    """The filter lock, waited for at most wait_seconds(): a busy server answers "busy", it does not
+    keep the caller waiting without end."""
+    if not _filter_lock.acquire(timeout=wait_seconds()):
+        raise Denied("busy: another filtered copy of the graph is being made; try again in a minute")
+    try:
+        yield
+    finally:
+        _filter_lock.release()
 
 
 def _source_id(path: str) -> list[int] | None:
@@ -225,11 +252,12 @@ def graph_for(allowed: set[str] | None, known: list[str] | set[str]) -> str:
     keep = KEEP_CONTRACTS and contracts_open()
     # One copy per project set and contract view: a change of the setting never serves the other copy.
     path = f"{FILTERED_DIR}/{view_key(allowed, keep)}/graph.json"
-    with _filter_lock:
+    with _cut_lock():
         if not _fresh(path, GRAPH):
-            _cut(lambda tmp: [sys.executable, os.path.abspath(__file__), "filter",
-                              f"--contracts={'keep' if keep else 'drop'}", GRAPH, tmp, *sorted(allowed)],
-                 GRAPH, path, "graph filter")
+            with job_slot():
+                _cut(lambda tmp: [sys.executable, os.path.abspath(__file__), "filter",
+                                  f"--contracts={'keep' if keep else 'drop'}", GRAPH, tmp, *sorted(allowed)],
+                     GRAPH, path, "graph filter")
     return path
 
 
@@ -260,10 +288,11 @@ def path_graph(graph: str) -> str:
         path = f"{FILTERED_DIR}/_routes/graph.json"
     else:
         path = os.path.join(os.path.dirname(graph), "routes.json")
-    with _filter_lock:
+    with _cut_lock():
         if not _fresh(path, graph):
-            _cut(lambda tmp: [sys.executable, os.path.abspath(__file__), "routes", graph, tmp],
-                 graph, path, "path graph")
+            with job_slot():
+                _cut(lambda tmp: [sys.executable, os.path.abspath(__file__), "routes", graph, tmp],
+                     graph, path, "path graph")
     return path
 
 

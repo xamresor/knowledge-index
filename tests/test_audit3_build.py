@@ -467,7 +467,8 @@ class OcrBudget(unittest.TestCase):
                 live.append(len(os.listdir(folder)))
                 Path(f"{prefix}-{first}.png").write_bytes(b"png")
                 return mock.Mock(returncode=0, stdout=b"", stderr=b"")
-            return mock.Mock(returncode=0, stdout="words", stderr="")
+            kw["stdout"].write(b"words")      # parsers.run_tool reads the output from this file
+            return mock.Mock(returncode=0)
 
         with tempfile.TemporaryDirectory() as d, \
                 mock.patch.object(pdf_ocr, "shutil_which", return_value="/usr/bin/pdftoppm"), \

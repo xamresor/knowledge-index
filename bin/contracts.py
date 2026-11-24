@@ -475,12 +475,36 @@ def _other_ends(r: dict) -> list[str]:
 
 
 def _hide_ends(r: dict, visible: set[str]) -> dict:
-    """The row with every other project that `visible` does not hold written as "(hidden)"."""
-    hidden = [o for o in _other_ends(r) if o and o not in visible]
+    """The row with every other project that `visible` does not hold written as "(hidden)".
+
+    Only the slots where the build writes a project name change (`problems` above): the `-> X` and
+    `calls X (` / `to: X.` of a missing contract, the `but X / Y has no such route.` tail of an
+    unknown route. A name that is also a path segment or a URI part (`src/api/x.ts`, `api/v1`)
+    stays as it is."""
+    hidden = {o for o in _other_ends(r) if o and o not in visible}
     if not hidden:
         return r
-    pat = re.compile(r"(?<![\w-])(?:" + "|".join(re.escape(o) for o in hidden) + r")(?![\w-])")
-    return {**r, "where": pat.sub(HIDDEN, str(r["where"])), "message": pat.sub(HIDDEN, str(r["message"]))}
+    where, message = str(r.get("where", "")), str(r.get("message", ""))
+    if r.get("kind") == "missing-contract":
+        src, arrow, to = where.partition(" -> ")
+        if arrow and to in hidden:
+            where = f"{src} -> {HIDDEN}"
+            message = re.sub(r"^(The code calls )(\S+)( \()",
+                             lambda m: m.group(1) + (HIDDEN if m.group(2) in hidden else m.group(2)) + m.group(3),
+                             message, count=1)
+            message = re.sub(r"(, to: )(\S+)(\.)$",
+                             lambda m: m.group(1) + (HIDDEN if m.group(2) in hidden else m.group(2)) + m.group(3),
+                             message, count=1)
+        return {**r, "where": where, "message": message}
+    if r.get("kind") == "unknown-route":
+        m = re.search(r", but (.+) has no such route\.$", message)
+        if m:
+            names = " / ".join(HIDDEN if n in hidden else n for n in m.group(1).split(" / "))
+            message = message[:m.start(1)] + names + message[m.end(1):]
+        return {**r, "message": message}
+    # a row of another kind that names other projects: hide every whole-word mention
+    pat = re.compile(r"(?<![\w/-])(?:" + "|".join(re.escape(o) for o in sorted(hidden)) + r")(?![\w/-])")
+    return {**r, "where": pat.sub(HIDDEN, where), "message": pat.sub(HIDDEN, message)}
 
 
 def problems(project: str, allowed: set[str] | None, path: str | None = None,

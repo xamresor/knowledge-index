@@ -119,8 +119,13 @@ class Index:
             self.scope = f" AND (d.collection IN ({marks})"
             self.params = tuple(collections)
             if contract_prefix:
-                self.scope += " OR (substr(d.path, 1, ?) = ? AND substr(d.collection, 1, ?) = ?)"
-                self.params += (len(CONTRACTS_DIR), CONTRACTS_DIR, len(contract_prefix), contract_prefix)
+                # the contract docs only (bin/access.py doc_allowed): a *.md file directly in
+                # contracts/, not its README and not a sub-folder
+                self.scope += (" OR (substr(d.path, 1, ?) = ? AND substr(d.collection, 1, ?) = ?"
+                               " AND instr(substr(d.path, ?), '/') = 0 AND lower(d.path) LIKE '%.md'"
+                               " AND lower(d.path) != ?)")
+                self.params += (len(CONTRACTS_DIR), CONTRACTS_DIR, len(contract_prefix), contract_prefix,
+                                len(CONTRACTS_DIR) + 1, CONTRACTS_DIR + "readme.md")
             self.scope += ")"
 
     def close(self) -> None:

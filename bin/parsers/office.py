@@ -6,10 +6,9 @@ if pandoc is absent, the format is simply unsupported and the build says so.
 """
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
-from . import EXTRACTED, ExtractError, TransientError
+from . import EXTRACTED, ExtractError, run_tool
 
 EXTENSIONS = (".docx", ".odt", ".rtf", ".epub")
 REQUIRES = ("pandoc",)
@@ -18,15 +17,11 @@ PRIORITY = 20
 
 
 def extract(path: Path) -> str:
-    try:
-        out = subprocess.run(
-            ["pandoc", "--from", path.suffix.lstrip(".").lower(), "--to", "gfm",
-             "--wrap=none", str(path)],
-            capture_output=True, text=True, timeout=300)
-    except (OSError, subprocess.SubprocessError) as exc:
-        # A timeout or an OS error says nothing about the file: the next build tries again.
-        raise TransientError(f"pandoc failed on {path.name}: {exc}") from exc
-    text = out.stdout.strip()
+    # Capped output and memory (run_tool): a small .docx is a zip and can expand to gigabytes.
+    # A timeout or an OS error says nothing about the file: run_tool raises TransientError.
+    out, err = run_tool(["pandoc", "--from", path.suffix.lstrip(".").lower(), "--to", "gfm",
+                         "--wrap=none", str(path)], timeout=300)
+    text = out.strip()
     if not text:
-        raise ExtractError(f"{path.name}: pandoc produced nothing ({out.stderr.strip()[:120]})")
+        raise ExtractError(f"{path.name}: pandoc produced nothing ({err.strip()[:120]})")
     return text

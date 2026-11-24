@@ -26,8 +26,9 @@ LOCAL_CFG="$KB_DATA/.kb.local"   # persisted local choices (e.g. QMD_BACKEND); g
 [ -f "$LOCAL_CFG" ] && . "$LOCAL_CFG"
 export GRAPHIFY_VIZ_NODE_LIMIT="${GRAPHIFY_VIZ_NODE_LIMIT:-20000}"
 
-# Set while build_graph rewrites graph.json; on a failed exit the previous graph comes back.
-GRAPH_PREV=""
+# The work folder of build_graph (<data>/.build) while it post-processes the merged graph; a failed exit
+# removes it, and the served graph.json was never touched.
+GRAPH_WORK=""
 # Projects whose code could not be staged or built this run. The build goes on with their previous
 # graph and exits non-zero at the end ("Failures are loud", docs/design.md).
 BUILD_ERRORS=""
@@ -59,14 +60,29 @@ keep_graph() {
     # the same build split by step, to see where the time goes
     [ -z "$STEP_TIMES" ] || echo "$(date '+%F %T') exit=$rc $BUILD_KIND$STEP_TIMES" >>"$KB_DATA/logs/build-steps.log"
   fi
-  if [ "$rc" -ne 0 ] && [ -n "$GRAPH_PREV" ] && [ -f "$GRAPH_PREV" ]; then
-    mv -f "$GRAPH_PREV" "$OUT/graph.json"
-    touch "$OUT/graph.json"   # newer than any per-caller copy cut from the half-built graph
-    echo "error: the graph build failed — kept the previous graph" >&2
+  if [ -n "$GRAPH_WORK" ]; then
+    rm -rf -- "$GRAPH_WORK"
+    [ "$rc" -eq 0 ] || echo "error: the graph build failed — kept the previous graph" >&2
   fi
   return "$rc"
 }
 trap keep_graph EXIT
+
+# One build at a time: the flock on <data>/logs/update.lock that bin/kb-refresh takes too. Two builds at
+# once write one graph.json and the second enriches the graph of the first. A busy lock stops this run
+# with exit 75 and "busy" on stderr. kb-refresh holds the lock on fd 8 when it runs `kb update`: the
+# inherited fd is the same lock, so taking it again succeeds.
+take_build_lock() {
+  local lock="$KB_DATA/logs/update.lock"
+  mkdir -p "$KB_DATA/logs"
+  if ! { [ -e /dev/fd/8 ] && [ /dev/fd/8 -ef "$lock" ]; }; then
+    exec 8>>"$lock"
+  fi
+  if ! flock -n 8; then
+    echo "busy: another build holds $lock; try again when it ends" >&2
+    exit 75
+  fi
+}
 
 # The parsed project file (parse_projects), read once by require_cfg.
 PROJECTS=""
@@ -271,6 +287,29 @@ stage_and_build() {
   return 0
 }
 
+# Copy a ready route table: <file> <dest>. Not a regular file or over the limit: the reason on stderr and
+# exit 1. O_NONBLOCK: opening a pipe does not wait for a writer, and the fstat refuses it.
+read_route_table() {
+  "$PY" - "$1" "$2" <<'PY'
+import os, stat, sys
+src, dst, limit = sys.argv[1], sys.argv[2], 64 * 2**20
+try:
+    with os.fdopen(os.open(src, os.O_RDONLY | os.O_NONBLOCK), "rb") as fh:
+        st = os.fstat(fh.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            sys.exit(f"  {src}: not a regular file")
+        if st.st_size > limit:
+            sys.exit(f"  {src}: {st.st_size // 2**20} MB is over the 64 MB limit of a route table")
+        data = fh.read(limit + 1)
+    if len(data) > limit:
+        sys.exit(f"  {src}: over the 64 MB limit of a route table")
+    with open(dst, "wb") as out:
+        out.write(data)
+except OSError as e:
+    sys.exit(f"  {src}: {e}")
+PY
+}
+
 build_graph() {
   require_cfg
   step "Building per-project graphs"
@@ -317,7 +356,9 @@ build_graph() {
       elif [ "${routes%.json}" != "$routes" ]; then rfile="$routes"; fi
       [ -n "$rfile" ] && how="reading the route table $rfile"
       # Both ways must give a JSON list: a PHP notice on stdout must not replace the last good table.
-      if { { [ -n "$rfile" ] && cp "$rfile" "$KB_DATA/routes.$name.json.new"; } \
+      # A ready table must be a regular file of at most 64 MB: a pipe or a device would hang the build
+      # while it holds the build lock, and a huge file would fill the disk.
+      if { { [ -n "$rfile" ] && read_route_table "$rfile" "$KB_DATA/routes.$name.json.new"; } \
              || { [ -z "$rfile" ] && env -C "$routes" LOG_CHANNEL=null php artisan route:list --json >"$KB_DATA/routes.$name.json.new" 2>/dev/null; }; } \
          && "$PY" -c 'import json,sys; assert isinstance(json.load(open(sys.argv[1])), list)' "$KB_DATA/routes.$name.json.new" 2>/dev/null; then
         mv -f "$KB_DATA/routes.$name.json.new" "$KB_DATA/routes.$name.json"
@@ -376,6 +417,18 @@ build_graph() {
       for m in "${mig_dirs[@]}"; do
         echo "$m"; find "$m" -type f -name '*.php' -printf '%P %s %T@\n' 2>/dev/null | LC_ALL=C sort
       done
+      # the call sites that bin/link_http.py reads live from the `calls` folders (also a folder that is
+      # not a code folder); the same files and pruned folders as link_http (lang/js_ts.py SKIP_DIRS)
+      while IFS='|' read -r name code docs routes calls serves; do
+        [ -n "$calls" ] && [ -n "$serves" ] || continue
+        IFS=',' read -ra fe <<< "$calls"
+        for m in "${fe[@]}"; do
+          echo "calls $name=$m"
+          find "$m" -type d \( -name node_modules -o -name .next -o -name .nuxt -o -name dist -o -name build \
+            -o -name vendor \) -prune -o -type f \( -name '*.js' -o -name '*.ts' -o -name '*.tsx' -o -name '*.vue' \
+            -o -name '*.php' \) -printf '%P %s %T@\n' 2>/dev/null | LC_ALL=C sort
+        done
+      done < <(read_projects)
       find "$KB/bin" -type f \( -name '*.py' -o -name kb \) -printf '%P %s %T@\n' | LC_ALL=C sort
       # the add-ons that change the graph (scip) and its ready indexes
       echo "scip=$("$PY" -c 'import sys; sys.path.insert(0, sys.argv[1]); import addons; print(addons.on("scip"))' "$KB/bin")"
@@ -400,18 +453,25 @@ build_graph() {
   rm -f "$post_file"   # a run that dies half-way must not leave a signature that matches
 
   step "Merging into one cross-repo graph"
-  # From here on graph.json is rewritten in place, step by step. Keep the last good one aside, so a
-  # build that dies half-way does not leave a half-built graph for the tools to serve (keep_graph).
-  if [ -f "$OUT/graph.json" ]; then
-    cp -p "$OUT/graph.json" "$OUT/graph.json.prev"
-    GRAPH_PREV="$OUT/graph.json.prev"
-  fi
+  # The steps below write graph.json many times (about 40 s on a large KB). They work on a copy in
+  # <data>/.build/graphify-out, and the end of this function moves the finished files into graphify-out/
+  # with one rename each: the server never reads a half-built graph. A build that dies half-way leaves
+  # the served files as they were (keep_graph removes the work folder).
+  local work="$KB_DATA/.build/graphify-out" g
+  g="$work/graph.json"
+  rm -rf -- "$KB_DATA/.build"
+  mkdir -p "$work"
+  GRAPH_WORK="$KB_DATA/.build"
+  # The community names of the last build: clustering keeps them for the same communities.
+  for m in .graphify_labels.json .graphify_labels.json.sig; do
+    if [ -f "$OUT/$m" ]; then cp -p "$OUT/$m" "$work/$m"; fi
+  done
   if [ "${#merge_inputs[@]}" -ge 2 ]; then
-    graphify merge-graphs "${merge_inputs[@]}" --out "$OUT/graph.json" >/dev/null
+    graphify merge-graphs "${merge_inputs[@]}" --out "$g" >/dev/null
   else
     # a single-project KB is legitimate — merge-graphs needs >=2, so adopt the one graph and tag it the
     # way merge-graphs does (`repo`, ids `<repo>::<id>`): the linkers look nodes up by (repo, file).
-    "$PY" "$KB/bin/graph.py" tag-repo "${merge_inputs[0]}" "$OUT/graph.json" \
+    "$PY" "$KB/bin/graph.py" tag-repo "${merge_inputs[0]}" "$g" \
       "$(basename "$(dirname "$(dirname "${merge_inputs[0]}")")")"
   fi
 
@@ -425,58 +485,67 @@ build_graph() {
     IFS=',' read -ra apis <<< "$serves"
     for api in "${apis[@]}"; do
       # --from: the calling project, so two projects with one relative path each get their edges.
-      "$PY" "$KB/bin/link_http.py" --from "$name" "$OUT/graph.json" "$KB_DATA/routes.$api.json" "$api" "${fe[@]}"
+      "$PY" "$KB/bin/link_http.py" --from "$name" "$g" "$KB_DATA/routes.$api.json" "$api" "${fe[@]}"
     done
   done < <(read_projects)
 
   step "Canonicalizing duplicate symbol/reference nodes"
-  "$PY" "$KB/bin/dedupe.py" "$OUT/graph.json"
+  "$PY" "$KB/bin/dedupe.py" "$g"
   step "Decluttering framework god nodes (before clustering)"
-  "$PY" "$KB/bin/declutter.py" "$OUT/graph.json" "$([ -f "$KB_CONFIG/kb.hubs.txt" ] && echo "$KB_CONFIG/kb.hubs.txt" || echo "$KB/kb.hubs.txt")"
+  "$PY" "$KB/bin/declutter.py" "$g" "$([ -f "$KB_CONFIG/kb.hubs.txt" ] && echo "$KB_CONFIG/kb.hubs.txt" || echo "$KB/kb.hubs.txt")"
   step "Clustering (locks final community ids)"
-  graphify cluster-only "$KB_DATA" --no-label >/dev/null
+  # --graph: graphify writes its report, labels and graph.html beside the work graph. No dated backup
+  # folders: the served graph stays in place until the end anyway.
+  GRAPHIFY_NO_BACKUP=1 graphify cluster-only "$KB_DATA" --graph "$g" --no-label >/dev/null
   step "Labeling communities by namespace/domain"
-  "$PY" "$KB/bin/label_namespaces.py" "$OUT/graph.json" "$OUT/.graphify_labels.json" | head -1
+  "$PY" "$KB/bin/label_namespaces.py" "$g" "$work/.graphify_labels.json" | head -1
   step "Re-rendering report + full visualization with labels"
   # Clustering and labeling are mutually dependent THROUGH FILES: `cluster-only` can renumber
   # community ids, while the labels file is keyed by those ids. So this is a two-step fixpoint, not a
   # redundant call: label (ids from pass 1) -> re-render with labels (ids may shift) -> label again.
   # Keep both passes; if a third were ever needed the dependency should be expressed instead.
-  graphify cluster-only "$KB_DATA" --no-label >/dev/null
-  "$PY" "$KB/bin/label_namespaces.py" "$OUT/graph.json" "$OUT/.graphify_labels.json" >/dev/null
+  GRAPHIFY_NO_BACKUP=1 graphify cluster-only "$KB_DATA" --graph "$g" --no-label >/dev/null
+  "$PY" "$KB/bin/label_namespaces.py" "$g" "$work/.graphify_labels.json" >/dev/null
 
   step "Enriching with node types, domains, db_table nodes + domain anchors"
-  "$PY" "$KB/bin/enrich.py" "$OUT/graph.json" "$KB_DATA/repos"
+  "$PY" "$KB/bin/enrich.py" "$g" "$KB_DATA/repos"
   step "Adding data-layer links (eloquent model rels, FK table->table, SQL code->table)"
   # --migrations <dir>, once per folder: the FK edges come from there, wherever the config lives.
-  "$PY" "$KB/bin/link_data.py" "$OUT/graph.json" "$KB_DATA/repos" "${mig_args[@]}"
+  "$PY" "$KB/bin/link_data.py" "$g" "$KB_DATA/repos" "${mig_args[@]}"
   # Add-on `scip` (off by default): precise calls from a SCIP index. Before the typed-call linker,
   # so that one does not add an INFERRED copy of an edge the index proves.
-  "$PY" "$KB/bin/link_scip.py" "$OUT/graph.json" "$KB_DATA/repos" "${scip_specs[@]}"
+  "$PY" "$KB/bin/link_scip.py" "$g" "$KB_DATA/repos" "${scip_specs[@]}"
   step "Linking PHP calls through typed variables and properties"
-  "$PY" "$KB/bin/link_php_calls.py" "$OUT/graph.json" "$KB_DATA/repos"
+  "$PY" "$KB/bin/link_php_calls.py" "$g" "$KB_DATA/repos"
   # Docs as graph nodes (bin/lang/markdown.py): [[wikilink]] and relative links are EXTRACTED edges,
   # a bare symbol mention is INFERRED and capped. Runs after the code plugins — it points at their nodes.
   if [ "${#doc_roots[@]}" -gt 0 ]; then
     step "Linking docs into the graph (${#doc_roots[@]} doc roots)"
-    "$PY" "$KB/bin/link_docs.py" "$OUT/graph.json" "${doc_roots[@]}"
+    "$PY" "$KB/bin/link_docs.py" "$g" "${doc_roots[@]}"
   fi
   step "Mining rationale comments (NOTE/WHY/HACK/SECURITY -> rationale nodes)"
-  "$PY" "$KB/bin/link_rationale.py" "$OUT/graph.json" "$KB_DATA/repos"
+  "$PY" "$KB/bin/link_rationale.py" "$g" "$KB_DATA/repos"
   step "Rendering custom typed/domain visualization"
-  "$PY" "$KB/bin/render_viz.py" "$OUT/graph.json" "$OUT"
+  # The dashboard and contract files are separate files, each written whole: they go straight to $OUT.
+  "$PY" "$KB/bin/render_viz.py" "$g" "$OUT"
   rm -f "$OUT/kb-graph.html"   # 0.5.0: the shell moved to web/; drop the stale generated page
   echo "    graphify graph.html (raw upstream view) -> $OUT · shell: web/index.html"
-  build_contracts
+  build_contracts "$g"
+  # Publish: graphify's report, labels and graph.html first, graph.json last, one rename each (one file
+  # system: both folders are in <data>). graphify removes graph.html when the graph is too large for it.
+  [ -f "$work/graph.html" ] || rm -f "$OUT/graph.html"
+  find "$work" -maxdepth 1 -type f ! -name graph.json -exec mv -f -t "$OUT" {} +
+  mv -f "$g" "$OUT/graph.json"
+  rm -f "$OUT/graph.json.prev"   # older versions kept a copy aside during the build
+  rm -rf -- "$GRAPH_WORK"; GRAPH_WORK=""
   printf '%s' "$post_sig" > "$post_file"
-  rm -f "$GRAPH_PREV"; GRAPH_PREV=""
 }
 
 # The contract layer (bin/contracts.py): routes joined with their frontend call sites, the service
 # map from <docs>/contracts/*.md, and the gaps between the two. Read by contracts_search,
 # connections and problems; built after the graph because it reads its http_request edges.
 build_contracts() {
-  local specs=() docs_specs=() prob_specs=()
+  local graph="${1:-$OUT/graph.json}" specs=() docs_specs=() prob_specs=()
   while IFS='|' read -r name code docs routes calls serves; do
     [ -n "$routes" ] && [ -f "$KB_DATA/routes.$name.json" ] && specs+=("$name=$KB_DATA/routes.$name.json")
     [ -n "$docs" ] && [ -d "$docs" ] && docs_specs+=("$name=$docs") && prob_specs+=("docs:$name=$docs")
@@ -486,8 +555,8 @@ build_contracts() {
   # The KB service's own contract docs, if this checkout has any (<data>/docs/contracts/).
   [ -d "$KB_DATA/docs/$CONTRACT_DIR" ] && docs_specs+=("$SELF_DOCS=$KB_DATA/docs")
   step "Building the contract index (routes + frontend call sites)"
-  if [ -f "$OUT/graph.json" ]; then
-    "$PY" "$KB/bin/contracts.py" contracts "$OUT/graph.json" "$OUT/contracts.json" "${specs[@]}"
+  if [ -f "$graph" ]; then
+    "$PY" "$KB/bin/contracts.py" contracts "$graph" "$OUT/contracts.json" "${specs[@]}"
   else
     echo "[]" >"$OUT/contracts.json"   # no code graph (a docs-only KB): no routes and no call sites
     echo "    no graph — no contracts from code"
@@ -719,16 +788,16 @@ case "${1:-build}" in
           echo "  qmd:      $(qmd --version 2>/dev/null || echo 'not found')"
           "$PY" "$KB/bin/paths.py" | sed 's/^/  /'
           ;;
-  build)  BUILD_START=$(date +%s); BUILD_KIND=build; build_graph; build_kb; "$PY" "$KB/bin/plugins.py" build; fail_loud ;;
-  graph)  BUILD_START=$(date +%s); BUILD_KIND=graph; build_graph; fail_loud ;;
-  kb)     build_kb ;;
-  update) BUILD_START=$(date +%s); BUILD_KIND=update; build_graph; build_kb >/dev/null; "$PY" "$KB/bin/plugins.py" build
+  build)  take_build_lock; BUILD_START=$(date +%s); BUILD_KIND=build; build_graph; build_kb; "$PY" "$KB/bin/plugins.py" build; fail_loud ;;
+  graph)  take_build_lock; BUILD_START=$(date +%s); BUILD_KIND=graph; build_graph; fail_loud ;;
+  kb)     take_build_lock; build_kb ;;
+  update) take_build_lock; BUILD_START=$(date +%s); BUILD_KIND=update; build_graph; build_kb >/dev/null; "$PY" "$KB/bin/plugins.py" build
           fail_loud; echo "refreshed" ;;
   qmd-backend) rm -f "$LOCAL_CFG"; unset QMD_BACKEND; echo "qmd backend set to: $(resolve_qmd_backend)" ;;
   # `graphify cluster-only` on the finished graph would merge its parallel edges (enrich and the
   # linkers add them): relabel by running the merge and every step after it again. The projects
   # keep their graphs when their code did not change.
-  label)  BUILD_START=$(date +%s); BUILD_KIND=label; rm -f "$OUT/.kb-post-manifest"; build_graph; fail_loud
+  label)  take_build_lock; BUILD_START=$(date +%s); BUILD_KIND=label; rm -f "$OUT/.kb-post-manifest"; build_graph; fail_loud
           echo "relabeled + report regenerated" ;;
   vendor) "$PY" -c "import sys; sys.path.insert(0,'$KB/bin'); import paths; print(paths.stage_web())" >/dev/null
           W="$KB_WEB"; mkdir -p "$W/vendor"

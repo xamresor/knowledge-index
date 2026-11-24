@@ -9,10 +9,9 @@ near-empty and the registry's caller sees that; a scan is the OCR parser's job.
 """
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
-from . import EXTRACTED, ExtractError, TransientError
+from . import EXTRACTED, ExtractError, run_tool
 
 EXTENSIONS = (".pdf",)
 REQUIRES = ("pdftotext",)
@@ -21,13 +20,9 @@ PRIORITY = 10          # try the text layer before OCR
 
 
 def extract(path: Path) -> str:
-    try:
-        out = subprocess.run(["pdftotext", "-layout", str(path), "-"],
-                             capture_output=True, text=True, timeout=180)
-    except (OSError, subprocess.SubprocessError) as exc:
-        # A timeout or an OS error says nothing about the file: the next build tries again.
-        raise TransientError(f"pdftotext failed on {path.name}: {exc}") from exc
-    text = out.stdout.strip()
+    # Capped output and memory (run_tool); a timeout or an OS error is transient.
+    out, _ = run_tool(["pdftotext", "-layout", str(path), "-"], timeout=180)
+    text = out.strip()
     if len(text) < 40:
         # Almost nothing came out: most likely a scan. Say so rather than indexing an empty document.
         raise ExtractError(

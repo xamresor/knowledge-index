@@ -261,17 +261,33 @@ def building(lock_file: str | None = None) -> bool:
         os.close(fd)
 
 
-def rebuild() -> str:
+REFRESH_BUSY = 75     # the exit code of `kb-refresh --force` when another build holds the lock
+REBUILD_WAIT = 3.0    # seconds to see whether the started build took the lock or exited at once
+
+
+def rebuild(script: str | None = None) -> str:
     """Start one forced rebuild in the background; refuse while one runs. The lock covers the check and
     the start, and the last started process counts as running until it ends: kb-refresh takes the flock
-    a moment after it starts, and a second click in that moment must not start a second build."""
+    a moment after it starts, and a second click in that moment must not start a second build.
+
+    A build of cron can take the lock between the check and the start. So the page waits up to
+    REBUILD_WAIT seconds: the build takes the lock (started), or kb-refresh exits at once (75: another
+    build runs; another code: it stopped)."""
     global _rebuild_proc
     with _rebuild_lock:
         if building() or (_rebuild_proc is not None and _rebuild_proc.poll() is None):
             return "A build is already running."
-        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kb-refresh")
-        _rebuild_proc = subprocess.Popen([script, "--force"], cwd=kb_core.KB, stdout=subprocess.DEVNULL,
-                                         stderr=subprocess.DEVNULL, start_new_session=True)
+        script = script or os.path.join(os.path.dirname(os.path.abspath(__file__)), "kb-refresh")
+        proc = _rebuild_proc = subprocess.Popen([script, "--force"], cwd=kb_core.KB, stdout=subprocess.DEVNULL,
+                                                stderr=subprocess.DEVNULL, start_new_session=True)
+        end = time.monotonic() + REBUILD_WAIT
+        while time.monotonic() < end and proc.poll() is None and not building():
+            time.sleep(0.05)
+    code = proc.poll()
+    if code == REFRESH_BUSY:
+        return "A build is already running."
+    if code not in (None, 0):
+        return f"The rebuild stopped at once (exit code {code}). The status page shows the build log."
     return "Rebuild started. It takes a few minutes; the status page shows it in the build log."
 
 

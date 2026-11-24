@@ -58,12 +58,14 @@ serves = "api"
 | `KB_FORCE` | `0` | `1` rebuilds every project and every step, as `kb build` does. `kb update` otherwise skips what did not change. |
 | `KB_EXTRACT` | `1` | `0` skips text extraction from PDF, DOCX and scans, and removes the extracted files. With `1`, a file whose size and mtime did not change is not extracted again. A PDF without a text layer goes on to OCR when `tesseract` is installed. A failed file is tried again when it changes or a new parser for it is installed; a timeout is tried again on the next build. |
 | `KB_EXTRACT_MAX_MB` | `200` | A document larger than this is not extracted. |
+| `KB_EXTRACT_MAX_OUTPUT_MB` | `20` | The text that one run of an extraction tool (`pandoc`, `pdftotext`, `tesseract`) may write, and the size of every file it writes. Longer output is cut, and the extracted file says so. |
+| `KB_EXTRACT_MAX_MEM_MB` | `2048` | The memory (data segment) of one run of an extraction tool. A document that needs more (a zip bomb in a `.docx`, a PNG of huge size in pixels) fails and is reported, and the build goes on. |
 | `KB_OCR_LANGS` | `eng` | Tesseract languages for scans, e.g. `eng+lav+rus`. |
 | `KB_OCR_MAX_PAGES` | `200` | OCR reads at most this many pages of a scanned PDF, one page at a time, and says when it stopped early. |
 | `KB_QMD_BACKEND` | asked once, then remembered | Embeddings: `llama` (on device), `none` (keywords only) or `other` (your own command). |
 | `KB_QMD_EMBED_CMD` | — | With `other`: the command that computes embeddings. |
-| `KB_REFRESH_WAIT_LOCK` | — | `kb-refresh` waits while your deploy holds this lock file. `kb-refresh` builds when a git HEAD, the config or a `KB_ROUTES_DIR/*.json` table changed, or when it never built; `kb-refresh --force` runs `KB_FORCE=1 kb update`. |
-| — | `<data>/logs/update.lock` | Not a setting: `kb-refresh` holds a `flock` on this file while it builds. The file stays after the build; test the lock (`flock -n <file> true` fails while a build runs), not the file. |
+| `KB_REFRESH_WAIT_LOCK` | — | `kb-refresh` waits while your deploy holds this lock file. `kb-refresh` builds when a git HEAD, the config, `kb.hubs.txt`, the KB `VERSION` or a route table (`KB_ROUTES_DIR/*.json`, or a `routes` that names a `.json` file) changed, or when it never built; `kb-refresh --force` runs `KB_FORCE=1 kb update`. While a build runs (or the wait lock is held), `kb-refresh --force` starts nothing: it exits with code 75, writes `busy: ...` on stderr and one line in `logs/refresh.log`. |
+| — | `<data>/logs/update.lock` | Not a setting: the build lock. `kb build`, `kb update`, `kb graph`, `kb label`, `kb kb` and `kb-refresh` hold a `flock` on this file while they build, so only one build runs at a time. A second build stops at once with exit code 75 and `busy: ...` on stderr. The file stays after the build; test the lock (`flock -n <file> true` fails while a build runs), not the file. |
 | `KB_ROUTES_DIR` | — | A folder with ready route tables, `<project>.json`. A project with `routes` reads its table there instead of running `php artisan route:list`. |
 
 ## Answers
@@ -95,7 +97,7 @@ serves = "api"
 |---|---|---|
 | `KB_ADDONS` | `<data>/addons.json` | Comma-separated add-ons that are on, overriding the file; `none` switches all off. Names: `code-mode`, `tool-multicall`, `fast-routes`, `metrics`, `audit`, `questions`, `scip`, `datadict`, and installed plugins. The admin pages are core, not an add-on; an old `admin` in the file or the variable is ignored. Set, the switches of the Settings page are read-only. |
 | `KB_BATCH_MAX` | `10` | Calls in one `batch`. |
-| `KB_RUN_SECONDS` | `20` | CPU seconds a `run_code` program may use. |
+| `KB_RUN_SECONDS` | `20` | Seconds a `run_code` program may run. The time of its `kb()` calls counts; a call that is already running finishes first. |
 | `KB_RUN_CALLS` | `30` | Tool calls a `run_code` program may make. |
 | `KB_SANDBOX_SOCKET` | — | A Unix socket of the sandbox service (`sandbox/socket-server.mjs`). Set: `run_code` runs there, e.g. in a container without network ([Docker](docker.md#the-sandbox-container-code-mode)). |
 | `KB_SANDBOX_MAX` | `4` | Sandbox service only: programs that run at once. |
@@ -131,6 +133,7 @@ the registry: each setting with its choices, default, description and env variab
 | `KB_AUTH_TIMEOUT` | `10` | Timeout of a webhook call, seconds. |
 | `KB_AUTH_MAX_CHECKS` / `KB_AUTH_CHECK_WAIT` | `16` / `2` | Permission webhook calls at once; one more waits this many seconds for a slot, then gets `503`. |
 | `KB_AUTH_HINT` | a sign-in hint | Text a caller without a valid token gets. |
+| `KB_RESET_PER_DAY` | `3` | Users plugin: password mails ("Forgot the password?", "Reset password") one user gets in 24 hours, on top of one per 5 minutes. Over it: no mail, the same answer. |
 | `KB_OAUTH` | `on` | `off` turns the browser sign-in of MCP clients off: ready tokens only. The admin pages stay. |
 | `KB_OAUTH_TOKEN_TTL` | `28800` | Lifetime of an access token of the browser sign-in, seconds; `expires_in` says the same. A refresh gives a new one while the login webhook's token behind it lives. |
 | `KB_LOGIN_ENV` | `<data>/kb-login.env`, then `<data>/deploy/kb-login.env` | A KEY=VALUE file with `KB_LOGIN_URL` and `KB_HOOK_HEADERS`. |

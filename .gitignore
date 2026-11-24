@@ -17,6 +17,9 @@
 # Regenerate locally with `make update`.
 /graphify-out/
 
+# Work folder of `kb update` while it post-processes the merged graph (removed at the end of a build)
+/.build/
+
 # Local project registry (real machine paths). Use kb.projects.toml.example as a template.
 /kb.projects.toml
 

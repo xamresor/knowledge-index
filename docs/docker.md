@@ -152,7 +152,8 @@ docker compose -f compose.yml exec -T kb kb update         # always
 ```
 
 For a server, put the first line in the host crontab, once a minute, as in `examples/server/crontab.txt`.
-The server sees the new graph without a restart.
+The server sees the new graph without a restart. One build runs at a time: while another build runs,
+`kb update` stops at once with exit code 75 and `busy`. Run it again when the build ends.
 
 A new version of the KB, graphify or qmd is a new image:
 

@@ -130,8 +130,28 @@ def is_self_url(url: str) -> bool:
         return True
     host = (u.hostname or "").lower()
     public = {(urllib.parse.urlsplit(os.environ.get(k, "")).hostname or "").lower()
-              for k in ("KB_PUBLIC_URL", "KB_PUBLIC_LOGIN_URL")} - {""}
+              for k in PUBLIC_KEYS} - {""}
     return bool(host) and host in public
+
+
+PUBLIC_KEYS = ("KB_PUBLIC_URL", "KB_PUBLIC_LOGIN_URL")
+
+
+def load_public_urls(env=None) -> None:
+    """KB_PUBLIC_URL and KB_PUBLIC_LOGIN_URL from `<data>/smtp.env` into `env` (default: os.environ) when
+    the environment has no value. The users add-on reads its mail address from that file; without this
+    kb-http would not know that host as its own and would send its /local/ webhook calls over the network."""
+    env = os.environ if env is None else env
+    try:
+        with open(os.path.join(kb_core.KB, "smtp.env"), encoding="utf-8") as f:
+            lines = f.read(1 << 16).splitlines()
+    except OSError:
+        return
+    for line in lines:
+        key, sep, value = line.strip().partition("=")
+        key, value = key.strip(), value.strip().strip('"').strip("'")
+        if sep and key in PUBLIC_KEYS and value and not env.get(key):
+            env[key] = value
 
 
 def plugin_login(access, body: dict, ip: str, purpose: str = "agent") -> dict:
@@ -193,7 +213,9 @@ def login_env(env: dict | None = None, for_oauth: bool = True) -> dict:
 USAGE_FILE = os.environ.get("KB_USAGE_FILE", os.path.join(kb_core.KB, "logs", "usage.json"))
 
 IDLE_TIMEOUT = float(os.environ.get("KB_HTTP_IDLE_TIMEOUT", "60"))  # a silent connection closes after this
-NAME_FIELDS = ("name", "uname", "username", "id", "uid")
+# Who a caller is in usage, the call log and the cursor owner: a stable login id first. The display
+# `name` comes last: two people may share one, and a webhook may let a person choose it.
+NAME_FIELDS = admin.ADMIN_FIELDS + ("name",)
 
 
 def _audit(user: str, action: str, detail: str = "") -> None:
@@ -215,12 +237,18 @@ def log(msg: str) -> None:
 class Identity:
     def __init__(self, user: dict, projects: list[str], every: bool = False):
         self.user = user
+        self.every = every
         # "*" (every project) is a grant of its own: only it may use the unfiltered graph (kb_core._full).
         self.projects = kb_core.AllProjects(projects) if every else set(projects)
 
     @property
     def name(self) -> str:
         return next((str(self.user[k]) for k in NAME_FIELDS if self.user.get(k)), "?")
+
+
+def _no_project(ident: Identity) -> bool:
+    """A user the permission webhook gave no project: only an admin may use the admin pages then."""
+    return not ident.projects and not ident.every
 
 
 class AuthError(Exception):
@@ -275,9 +303,10 @@ class Authenticator:
         """A token that can be sent in a header at all: printable ASCII, no space, at most MAX_TOKEN long."""
         return 0 < len(token) <= MAX_TOKEN and all(33 <= ord(c) <= 126 for c in token)
 
-    def check(self, header: str | None) -> Identity:
+    def check(self, header: str | None, admin_pages: bool = False) -> Identity:
         """An incoming request: an access token of the browser sign-in (`kbo_…`) is swapped for the token
-        behind it, then that token is checked with the permission webhook."""
+        behind it, then that token is checked with the permission webhook. `admin_pages`: the caller is
+        the sign-in of the admin pages, which takes a user without a project too and decides by role."""
         token = self.token_from_header(header)
         if not self.well_formed(token):
             raise AuthError(401, "invalid or expired token")
@@ -286,9 +315,9 @@ class Authenticator:
             if behind is None:
                 raise AuthError(401, "invalid or expired token")
             token = behind
-        return self.check_upstream(token)
+        return self.check_upstream(token, admin_pages)
 
-    def check_upstream(self, token: str) -> Identity:
+    def check_upstream(self, token: str, admin_pages: bool = False) -> Identity:
         """A token of the login webhook, checked with the permission webhook as it is. Never swapped: an
         upstream token may start with `kbo_` too (an OAuth refresh checks the token behind the wrapper)."""
         if not self.well_formed(token):
@@ -319,6 +348,10 @@ class Authenticator:
                         self._cache[key] = (now + self.ttl, verdict)
         if isinstance(verdict, tuple):
             raise AuthError(*verdict)
+        # A user with no project gets nothing from MCP; only the admin pages may take it (an admin of the
+        # users plugin whose projects are gone must still get in to fix that).
+        if _no_project(verdict) and not admin_pages:
+            raise AuthError(403, "no KB projects for this user")
         return verdict
 
     def _ask(self, token: str) -> Identity | AuthError:
@@ -379,8 +412,7 @@ class Authenticator:
             log("auth: permission webhook answered 200 with an unexpected body")
             return AuthError(503, "auth service gave an unexpected answer")
         projects = [p for p in projects if p in known] if known else projects
-        if not projects and not every:   # "*" on a server without projects yet still signs in (admin pages)
-            return AuthError(403, "no KB projects for this user")
+        # No project left is kept as an identity: check() refuses it for MCP, the admin pages decide by role.
         return Identity(user, projects, every)
 
 
@@ -755,7 +787,7 @@ class Handler(BaseHTTPRequestHandler):
         KB_AUTH_CACHE_SECONDS): a new password, a removed token or a lost admin right ends the session
         or its admin pages at once, not after 8 hours. -> the session, None (ended) or False (503 sent)."""
         try:
-            ident = self.auth.check(f"Bearer {session['token']}")
+            ident = self.auth.check(f"Bearer {session['token']}", admin_pages=True)
         except AuthError as e:
             if e.status == 503:
                 self._send_page(503, admin.page("KB admin", "<main><section>The sign-in service is not "
@@ -765,7 +797,7 @@ class Handler(BaseHTTPRequestHandler):
             return None
         role = self._role(session["token"])
         is_admin = admin.is_admin(ident.user, self.admins) or role == "admin"
-        if not is_admin and not (role == "member" and self._member_home()):
+        if not is_admin and (_no_project(ident) or not (role == "member" and self._member_home())):
             self.sessions.drop(sid)
             return None
         session["admin"] = is_admin
@@ -893,14 +925,16 @@ class Handler(BaseHTTPRequestHandler):
             token = data.get("token")
             if not isinstance(token, str) or not token:
                 raise oauth.kb_login.LoginError("the login webhook answered without a token")
-            ident = self.auth.check(f"Bearer {token}")
+            ident = self.auth.check(f"Bearer {token}", admin_pages=True)
+            role = self._role(token)
+            is_admin = admin.is_admin(ident.user, self.admins) or role == "admin"
+            if not is_admin and _no_project(ident):   # only an admin gets in without a project
+                raise AuthError(403, "no KB projects for this user")
         except (oauth.kb_login.LoginError, AuthError) as e:
             log(f"admin: sign-in refused: {str(e)[:120]}")
             _audit(str(form.get("username", "")) or "?", "admin sign-in refused", str(e)[:200])
             self._send_page(200, admin.login_page(base, error=str(e)))
             return
-        role = self._role(token)
-        is_admin = admin.is_admin(ident.user, self.admins) or role == "admin"
         member_home = self._member_home() if role == "member" else None
         if not is_admin and not member_home:
             log(f"admin: {admin_name(ident.user)} is not an admin")
@@ -1100,6 +1134,14 @@ def make_server(host: str = HOST, port: int = PORT, auth: Authenticator | None =
             access.logout(token, kb_core)
             auth.forget()
         sessions.on_end = ended
+        if srv_oauth is not None:
+            # A browser sign-in that never finished, a revoked client, an ended refresh token: its sign-in
+            # token ends too, so it does not push out a token the person still uses. Only when the login
+            # webhook is this server: a token of another system is not the plugin's.
+            def dropped(token: str) -> None:
+                if is_self_url(env.get("KB_LOGIN_URL", "")):
+                    ended(token)
+            srv_oauth.on_drop = dropped
     handler = type("KbHandler", (Handler,), {"auth": auth, "oauth": srv_oauth, "hook_env": hook_env,
                                               "access": access,
                                               "admins": admin.admins() if admins is None else admins,
@@ -1129,6 +1171,13 @@ def refuse_reason(env: dict | None = None, access=None) -> str | None:
         return (f"kb-http: KB_PERMISSION_URL ({url}) is this server's own webhook, but no access plugin is on: "
                 "every token would get 403. Switch it on: `kb addon on users` (or the plugin you use; "
                 "`kb addon list` shows them), then start again.")
+    if access is not None and url.rstrip("/").endswith("/local/permissions") and not is_self_url(url):
+        # The call would go out over the network, and /local/permissions refuses every call that is not
+        # this server: every token would get 403.
+        return (f"kb-http: KB_PERMISSION_URL ({url}) looks like this server's own webhook, but its host is "
+                f"neither loopback on port {PORT} nor the host of KB_PUBLIC_URL / KB_PUBLIC_LOGIN_URL (the "
+                "environment or <data>/smtp.env): every token would get 403. Point it at "
+                f"http://127.0.0.1:{PORT}/local/permissions, or set KB_PUBLIC_URL.")
     return None
 
 
@@ -1143,6 +1192,7 @@ def main() -> int:
         log(f"kb-http: {len(on)} access plugins are on ({', '.join(on)}); {on[0]} answers the sign-in, the others "
             f"do nothing. Switch the others off: kb addon off <name>.")
     access = plugins.access(addons.enabled())
+    load_public_urls()
     if access is not None:
         # An access plugin: both webhooks are this server, unless the unit says otherwise.
         global PERMISSION_URL
@@ -1155,7 +1205,7 @@ def main() -> int:
         print(reason, file=sys.stderr)
         return 2
     if access is not None:
-        for key in ("KB_PERMISSION_URL", "KB_LOGIN_URL"):
+        for key in ("KB_LOGIN_URL",):   # KB_PERMISSION_URL of this kind stops the start (refuse_reason)
             url = os.environ.get(key, "")
             if url.rstrip("/").endswith(("/local/permissions", "/local/login")) and not is_self_url(url):
                 log(f"kb-http: warning: {key} ({url}) looks like this server, but its host is neither loopback "

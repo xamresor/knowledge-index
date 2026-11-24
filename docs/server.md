@@ -33,6 +33,7 @@ other 4xx refusal is 403, an unreachable webhook, a 5xx answer or a body of anot
 | `KB_PERMISSION_URL` | — | permission webhook (required) |
 | `KB_LOGIN_URL` | — | login webhook: browser sign-in, admin pages, `kb-login` |
 | `KB_PUBLIC_LOGIN_URL` | — | the address of the login webhook that a person can reach; the "How to" admin page shows it in the `kb-login` command |
+| `KB_PUBLIC_URL` | — | the public address of this server (`https://kb.example.com/kb`): the host of a webhook URL that is this server, and the address in a mail of the users add-on. kb-http reads it, and `KB_PUBLIC_LOGIN_URL`, from the environment, else from `<data>/smtp.env` |
 | `KB_HOOK_HEADERS` | — | extra headers for both webhooks, a JSON object |
 | `KB_HTTP_HOST` / `KB_HTTP_PORT` | `127.0.0.1` / `8790` | bind address; put a TLS proxy in front |
 | `KB_DOCS_MODE` | `light` | no reranker (~650 MB RAM); `full` adds an LLM reranker (1-2 min per search on a CPU); `bm25` = keywords only (~70 MB) |
@@ -90,8 +91,10 @@ its owner or an admin removes it, or an admin disables or removes the user. With
 `/local/login`); set them only to use another system. kb-http calls the plugin in-process for both, with
 no HTTP request, when the URL is this server: loopback on its own port, or the host of `KB_PUBLIC_URL` /
 `KB_PUBLIC_LOGIN_URL` with any path prefix (`https://kb.example.com/kb/local/login`). Each sign-in then counts
-under the address of the person, not of the server. At the start kb-http logs a warning for a `/local/…`
-URL it does not recognise as itself. `/local/permissions` answers only this server; from the network it is
+under the address of the person, not of the server. kb-http takes `KB_PUBLIC_URL` and `KB_PUBLIC_LOGIN_URL`
+from the environment, else from `<data>/smtp.env`. With an access plugin on, kb-http does not start when
+`KB_PERMISSION_URL` ends in `/local/permissions` but is not this server: every token would get `403`. A
+`KB_LOGIN_URL` of that kind gets a warning in the log. `/local/permissions` answers only this server; from the network it is
 `403` (an open, uncached token check would be a proxy to the plugin). `/local/login` stays public for
 `kb-login`.
 
@@ -115,9 +118,24 @@ only script of the admin pages, allowed by its hash in the CSP) puts it into the
 version (`?t=`) still works. "New key" and a save that takes nothing away keep the person signed in; a
 revoke, a removal, a disable, a lost admin right or a lost project end the sessions of the person.
 
+One user gets at most one password mail in 5 minutes and `KB_RESET_PER_DAY` (default 3) in 24 hours; the
+count lives in the users file, so a restart does not reset it, and an invite does not count. Over the cap,
+"Forgot the password?" sends nothing and answers the same as always; "Reset password" of an admin says so.
+The answer to "Forgot the password?" comes at once and is the same for every name; one background thread
+sends the mail, so the time of the answer does not tell whether a name exists. A reload of the page of a
+mail link loses the link value (the page script takes it out of the address): the page then asks to open
+the link from the mail again. A users file that cannot be read gives `503` at sign-in, not "wrong
+password". A change whose save fails (a full disk) does not stay in memory: the store reads the file again.
+A browser sign-in that never reached `/token`, a revoked sign-in client and an ended refresh token end
+their sign-in token, so they do not push out the tokens an agent still uses.
+
 Five wrong passwords from one address shut the sign-in of that name from that address for 15 minutes; the
-owner signs in from another address. An admin cannot save the own row without a project: the permission
-webhook would refuse every token of that admin, and nobody could undo it from the browser.
+owner signs in from another address. An admin cannot save the own row without a project: MCP refuses a token
+without a project. An admin whose projects are all gone (a project left `kb.projects.toml`), or who has
+none, still signs in to the admin pages (Users, Settings, Usage, Rebuild) and can fix the row: the plugin
+answers an empty grant for an admin, kb-http lets it into the admin pages and refuses it on MCP. A member
+without a project stays out. The admin right comes from the plugin's role or from `KB_ADMINS` matched on
+the stable login fields only (`uname`, `username`, `id`, `uid`).
 
 **An access plugin.** The users above are a plugin, and so can be a system of your own: a `plugin.py` with
 `login(body, core)` and `permissions(token, projects, core)` answers the two webhooks inside the server,
@@ -143,7 +161,8 @@ Sign-in goes through the login webhook with its second factor, then
 an HttpOnly, SameSite=Strict session cookie (8 hours) and a CSRF token on every form. Every request checks
 the token of the session again (cached `KB_AUTH_CACHE_SECONDS`): a removed token or a new password ends the
 session, and an admin who lost the right keeps only the pages of a member. Pages: status
-(version, graph, the last builds, warm helpers, a rebuild button), index (charts: graph make-up,
+(version, graph, the last builds, warm helpers, a rebuild button: it runs `kb-refresh --force` and says
+"A build is already running" when another build holds the lock, exit code 75), index (charts: graph make-up,
 storage per index, documents and embedded chunks per project, build times, answer time per tool,
 calls per day), usage, sign-in clients (revoke one) and settings. Plain HTML and server-drawn SVG; the only
 script is the one of a password link (above), allowed by its hash.
@@ -169,9 +188,9 @@ for a caller limited to some projects. A local session (`kb-api`, `kb-mcp`) sees
 |---|---|---|
 | `contracts_search` | every route, its action, middleware and every call site | the routes of allowed projects in full, with the call sites of allowed projects only. A route of a hidden project shows only when an allowed project calls it, as the bare endpoint (method and URI): no name, action, middleware, file or project. Its words match that endpoint only |
 | `connections` | every connection | a row whose contract doc belongs to an allowed project, as it is; any other row only when one end is an allowed project, the other end shown as `(hidden)`, without the summary and path of a hidden doc. An unknown or hidden service name lists only the services the caller sees |
-| contract docs (`search`, `docs_get`) | the contract docs of every project | the contract docs of allowed projects only |
+| contract docs (`search`, `docs_get`) | the contract docs of every project: the `*.md` files directly in `contracts/`, not its README or sub-folders | the contract docs of allowed projects only |
 | graph tools | a node of another project stays when an `http_request` edge links it to an allowed node (`KB_CONTRACT_EDGES=0` drops it) | no node of another project |
-| `problems` | the problems of allowed projects; a message may name the other service an allowed project calls | the same |
+| `problems` | the problems of allowed projects; a message may name the other service an allowed project calls | the problems of allowed projects; another project the caller may not see is written as `(hidden)` |
 
 `KB_CONTRACT_EDGES=0` still works: under `all` it hides the graph edges to other projects but keeps
 `contracts_search`, `connections` and the contract docs open. `own` closes all four.
@@ -196,7 +215,8 @@ on the admin page ends its access tokens at once. `bin/oauth.py` has the details
 Around it:
 
 - **`bin/kb-refresh`** — cron, every minute: runs `kb update` when an indexed checkout has a new HEAD.
-  `KB_REFRESH_WAIT_LOCK=<file>` makes it wait while your deploy holds that lock.
+  `KB_REFRESH_WAIT_LOCK=<file>` makes it wait while your deploy holds that lock. One build runs at a
+  time (`<data>/logs/update.lock`): `kb-refresh --force` during a build exits with code 75 and `busy`.
 - **`bin/kb-login`** — the terminal alternative to the browser sign-in: logs a developer in to *your*
   API, keeps the token in `~/.claude/kb/token` and registers the server once in Claude Code's user scope
   with a `headersHelper` (`--add-to-claude`). No default addresses: `--env-file`, or `KB_LOGIN_URL`,
