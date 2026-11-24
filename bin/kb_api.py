@@ -44,7 +44,7 @@ import json
 import os
 import sys
 import urllib.parse
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 
 import addons
 import admin
@@ -335,7 +335,8 @@ def main(argv: list[str] | None = None) -> int:
     from usage import Usage
     kb_core.LOCAL_USAGE = Usage(os.path.join(kb_core.KB, "logs", "usage-local.json"))
     kb_core.warm_qmd()
-    httpd = ThreadingHTTPServer((args.bind, args.port), make_handler(args.bind, args.token))
+    warm.start_keepalive(kb_core.KB)  # a long-lived server: keep the qmd model loaded
+    httpd = mcp_rpc.QuietServer((args.bind, args.port), make_handler(args.bind, args.token))
     auth = "token required" if args.token else "loopback only, no token"
     paths.stage_web()   # installed mode: put the shell next to the data, as `kb open` does
     print(f"kb-api {kb_core.VERSION} (contract {kb_core.API_CONTRACT}) on "

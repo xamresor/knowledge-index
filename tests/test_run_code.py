@@ -22,9 +22,9 @@ class RunCode(unittest.TestCase):
         self.seen = []
         real = kb_core.call_tool
 
-        def spy(name, args, allowed=None, caller=None):
+        def spy(name, args, allowed=None, caller=None, **kw):   # `nested=True` from run_code
             self.seen.append((name, allowed, caller))
-            return real(name, args, allowed, caller)
+            return real(name, args, allowed, caller, **kw)
         for target, name, value in ((kb_core, "call_tool", spy),
                                     (kb_core, "_index", lambda fn, *a: "GET /v2/a\nPOST /v2/b\nGET /v2/c")):
             p = mock.patch.object(target, name, value)

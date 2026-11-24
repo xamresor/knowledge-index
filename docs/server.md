@@ -51,6 +51,7 @@ other 4xx refusal is 403, an unreachable webhook, a 5xx answer or a body of anot
 | `KB_CONTRACTS` | `all` | who sees the contracts: `all` or `own`; set, it locks the value of the Settings page ([below](#who-sees-the-contracts)) |
 | `KB_USAGE_FILE` | `<data>/logs/usage.json` | tool usage: one SQLite row per call in `usage.sqlite` next to this name (an old `usage.json` is imported once); every call is written at once, rows older than 90 days go once an hour. `kb-http usage` prints the report with user names; the MCP tool `usage` without |
 | `KB_WARM` | `1` | `0` = no long-lived graphify / qmd: one process per call, as before |
+| `KB_WARM_KEEPALIVE` | `240` | seconds between the queries that keep the qmd model loaded (qmd unloads it after 5 idle minutes); `0` = off |
 | `KB_GRAPH_CACHE_FILES` / `KB_GRAPH_VIEWS` | `2` / `8` | graph files the graphify worker keeps parsed / views it keeps cut in memory (two per caller project set) |
 | `KB_OAUTH` | `on` | `off` = no browser sign-in of MCP clients, bearer tokens only. The admin pages and their sign-in stay |
 | `KB_LOGIN_ENV` | `<data>/kb-login.env`, then `<data>/deploy/kb-login.env` | a KEY=VALUE file with `KB_LOGIN_URL` and `KB_HOOK_HEADERS` |

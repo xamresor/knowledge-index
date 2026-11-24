@@ -86,6 +86,7 @@ serves = "api"
 | Variable | Default | Description |
 |---|---|---|
 | `KB_WARM` | `1` | `0` runs graphify and qmd as one process per call instead of keeping them loaded. |
+| `KB_WARM_KEEPALIVE` | `240` | Seconds between the queries that keep the model of the qmd worker loaded in `kb-http` and `kb-api`: qmd unloads an idle model after 5 minutes, and the next search then waits for the load (13.5 s against 1.2 s on a 4-core server). `0` switches it off and frees about 650 MB while nobody searches. |
 | `KB_GRAPH_CACHE_FILES` | `2` | Graph files the graph worker keeps parsed. |
 | `KB_GRAPH_VIEWS` | `8` | Caller views (one per project set) kept cut in memory; the recent ones are re-cut after each build. |
 | `KB_FAST_ROUTES` | set by the `fast-routes` add-on | `1` computes `graph_routes` on rustworkx. |

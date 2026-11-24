@@ -13,12 +13,31 @@ from __future__ import annotations
 import json
 import sys
 import time
+from http.server import ThreadingHTTPServer
 
 import kb_core
 
 SUPPORTED_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 MAX_BATCH = 50                      # messages in one batch
 MAX_RESPONSE = 16 * 1024 * 1024     # bytes of the answers of one batch
+
+CLIENT_GONE = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
+
+
+class QuietServer(ThreadingHTTPServer):
+    """The HTTP server of kb-http and kb-api. A client that closes its connection before the answer is
+    written (an agent that stopped, a browser tab that went away) is not a fault of the server: it gets
+    one log line. Every other exception keeps the traceback of the standard library."""
+
+    def handle_error(self, request, client_address) -> None:
+        exc = sys.exc_info()[1]
+        if isinstance(exc, CLIENT_GONE):
+            host = client_address[0] if client_address else "?"
+            sys.stderr.write(time.strftime("%Y-%m-%d %H:%M:%S ")
+                             + f"{host} closed the connection before the answer ({type(exc).__name__})\n")
+            sys.stderr.flush()
+            return
+        super().handle_error(request, client_address)
 
 
 def rpc_result(mid, result: dict) -> dict:

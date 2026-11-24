@@ -14,6 +14,16 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+- **Docs search stays fast after an idle time** (2026-11-24). `qmd mcp` unloads its model after 5 minutes
+  without a query, so the first search after a pause waited for the load (measured on a 4-core server:
+  13.5 s against 1.2 s). `kb-http` and `kb-api` now ask the qmd worker a tiny query every
+  `KB_WARM_KEEPALIVE` seconds (default 240; `0` = off, the model then leaves the memory when unused).
+  `kb-mcp` of one agent session does not: its model still unloads. (`warm.start_keepalive`)
+- **A client that closes its connection is one log line, not a traceback** (2026-11-24). `kb-http` and
+  `kb-api` printed the whole `BrokenPipeError` traceback of the standard library when an agent or a browser
+  went away before the answer. Both servers now run on `mcp_rpc.QuietServer`; every other exception keeps
+  its traceback.
+
 - **"How to" page: set up Claude Code** (2026-11-24). A new panel lists what a person does besides the MCP
   connection: install the `kb` and `doc-organization` skills, add the `kb-reminder.py` hook to
   `.claude/settings.json`, add the rule to `CLAUDE.md`, restart and check. The skills and the hook download

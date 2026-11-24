@@ -1093,7 +1093,8 @@ def _graph_once(argv: list[str], view: dict | None) -> str | None:
 
 def warm_qmd() -> None:
     """Fire a throwaway qmd query in the background so the embedding model is loaded before the
-    first real doc search — turns a >60s cold start into a ~2s warm call."""
+    first real doc search — turns a >60s cold start into a ~2s warm call. qmd unloads an idle model
+    after 5 minutes: the shared servers keep it loaded with warm.start_keepalive()."""
     if DOCS_MODE == "bm25":
         return  # no model to load
     if warm.ENABLED:  # load the model inside the long-lived qmd, and parse the graph once

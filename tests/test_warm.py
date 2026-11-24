@@ -195,3 +195,61 @@ class RewarmAfterRebuild(unittest.TestCase):
         for i in range(self.w.RECENT_VIEWS + 3):
             self.w.run(["explain", "X", "--graph", self.graph], {"allowed": [f"p{i}"], "routes": False})
         self.assertEqual(len(self.w.recent), self.w.RECENT_VIEWS)
+
+
+class KeepLoaded(unittest.TestCase):
+    """`qmd mcp` unloads its model after 5 minutes without a query, and the next search waits for the
+    load (measured 2026-11-24: 13.5 s against 1.2 s). The worker asks a tiny query before that."""
+
+    def worker(self, alive: bool, idle: float) -> "warm.QmdWorker":
+        w = warm.QmdWorker.__new__(warm.QmdWorker)
+        w.argv = ["qmd", "mcp"]
+        w.used = warm.time.monotonic() - idle
+        w._alive = lambda: alive
+        w.query = mock.Mock(return_value=[])
+        return w
+
+    def test_an_idle_worker_gets_a_tiny_query(self):
+        w = self.worker(alive=True, idle=300)
+        self.assertTrue(w.keep_loaded(240))
+        w.query.assert_called_once_with([{"type": "vec", "query": "warmup"}], [], 1, None, rerank=False)
+
+    def test_a_worker_in_use_is_left_alone(self):
+        w = self.worker(alive=True, idle=10)
+        self.assertFalse(w.keep_loaded(240))
+        w.query.assert_not_called()
+
+    def test_a_stopped_worker_is_not_started(self):
+        w = self.worker(alive=False, idle=3000)
+        self.assertFalse(w.keep_loaded(240))
+        w.query.assert_not_called()
+
+    def test_a_real_query_counts_as_use(self):
+        w = warm.QmdWorker.__new__(warm.QmdWorker)
+        w.argv, w.used, w._id, w._id_lock = ["qmd", "mcp"], 0.0, 0, warm.threading.Lock()
+        w.exchange = mock.Mock(return_value={"result": {"structuredContent": {"results": []}}})
+        w.query([{"type": "lex", "query": "x"}], [], 1, None, rerank=False)
+        self.assertGreater(w.used, warm.time.monotonic() - 5)
+
+    def test_the_interval_comes_from_the_environment(self):
+        with mock.patch.dict(os.environ, {"KB_WARM_KEEPALIVE": "0"}):
+            self.assertEqual(warm.keepalive_seconds(), 0)
+        with mock.patch.dict(os.environ, {"KB_WARM_KEEPALIVE": "junk"}):
+            self.assertEqual(warm.keepalive_seconds(), 240)
+        with mock.patch.dict(os.environ, {"KB_WARM_KEEPALIVE": "90"}):
+            self.assertEqual(warm.keepalive_seconds(), 90)
+
+    def test_off_means_no_thread(self):
+        with mock.patch.dict(os.environ, {"KB_WARM_KEEPALIVE": "0"}), mock.patch.object(warm, "ENABLED", True), \
+                mock.patch.object(warm, "_keepalive_on", False), \
+                mock.patch.object(warm.threading, "Thread") as thread:
+            warm.start_keepalive("/kb")
+            thread.assert_not_called()
+
+    def test_one_thread_however_often_it_is_asked(self):
+        with mock.patch.dict(os.environ, {"KB_WARM_KEEPALIVE": "240"}), mock.patch.object(warm, "ENABLED", True), \
+                mock.patch.object(warm, "_keepalive_on", False), \
+                mock.patch.object(warm.threading, "Thread") as thread:
+            warm.start_keepalive("/kb")
+            warm.start_keepalive("/kb")
+            thread.assert_called_once()

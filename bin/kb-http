@@ -1113,7 +1113,7 @@ def admin_name(user: dict) -> str:
     return next((str(user[k]) for k in admin.ID_FIELDS if user.get(k)), "?")
 
 
-class _Server(ThreadingHTTPServer):
+class _Server(mcp_rpc.QuietServer):
     # The listen backlog: the default of 5 drops connections when a team's agents start at once.
     request_queue_size = 128
 
@@ -1233,6 +1233,7 @@ def main() -> int:
                     f"http://127.0.0.1:{PORT}/local/... or set KB_PUBLIC_URL.")
     warm.enable()  # long-lived graphify and qmd: no cold start per call (bin/warm.py)
     kb_core.warm_qmd()
+    warm.start_keepalive(kb_core.KB)  # qmd unloads an idle model after 5 minutes: keep it loaded
     usage = Usage(USAGE_FILE)
     srv = make_server(usage=usage, access=access or False)
     log(f"kb-http listening on {HOST}:{PORT}, permissions={PERMISSION_URL}, docs_mode={kb_core.DOCS_MODE}, "

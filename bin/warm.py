@@ -354,6 +354,7 @@ class QmdWorker(_Proc):
         exe = shutil.which("qmd")
         super().__init__([exe, "mcp"] if exe else [], cwd=cwd, timeout=150.0)
         self._id = 0
+        self.used = time.monotonic()   # the last query: keep_loaded() asks only an idle worker
         self._id_lock = threading.Lock()
 
     def _next_id(self) -> int:
@@ -380,6 +381,7 @@ class QmdWorker(_Proc):
         """qmd's own hits (`structuredContent.results`), or None when the worker cannot answer."""
         if not self.argv:
             return None
+        self.used = time.monotonic()
         mid = self._next_id()
         args: dict = {"searches": searches, "rerank": rerank}
         if collections:
@@ -397,6 +399,16 @@ class QmdWorker(_Proc):
         if result.get("isError"):
             return None
         return list((result.get("structuredContent") or {}).get("results") or [])
+
+    def keep_loaded(self, idle: float) -> bool:
+        """Ask a tiny query when the worker runs and had no query for `idle` seconds. `qmd mcp` unloads
+        its model after 5 minutes without one, and the next search then waits for the load (measured
+        2026-11-24: 13.5 s against 1.2 s). A stopped worker is not started: the next search does that.
+        -> True when the query was sent."""
+        if not self.argv or not self._alive() or time.monotonic() - self.used < idle:
+            return False
+        self.query([{"type": "vec", "query": "warmup"}], [], 1, None, rerank=False)
+        return True
 
 
 def hit_path(hit: dict) -> str:
@@ -478,3 +490,36 @@ def qmd(cwd: str | None = None) -> QmdWorker | None:
         if _qmd is None:
             _qmd = QmdWorker(cwd)
     return _qmd
+
+
+_keepalive_on = False
+
+
+def keepalive_seconds() -> int:
+    """KB_WARM_KEEPALIVE: how often the qmd worker is asked to stay loaded (default 240 s, under qmd's
+    5 minutes). 0 switches it off: the model (~650 MB) then leaves the memory when nobody searches."""
+    try:
+        return max(0, int(os.environ.get("KB_WARM_KEEPALIVE", "240")))
+    except ValueError:
+        return 240
+
+
+def start_keepalive(cwd: str | None = None) -> None:
+    """Keep the model of the qmd worker loaded while the server runs: one daemon thread."""
+    global _keepalive_on
+    every = keepalive_seconds()
+    with _init:
+        if not ENABLED or not every or _keepalive_on:
+            return
+        _keepalive_on = True
+
+    def loop() -> None:
+        while True:
+            time.sleep(min(every, 30))
+            try:
+                worker = qmd(cwd)
+                if worker is not None:
+                    worker.keep_loaded(every)
+            except Exception:  # noqa: BLE001  (a failed pulse must never stop the next one)
+                pass
+    threading.Thread(target=loop, daemon=True, name="qmd-keepalive").start()
