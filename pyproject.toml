@@ -54,6 +54,7 @@ include = [
   "bin",
   "web",
   "contrib",
+  "skills",
   "VERSION",
   "Makefile",
   "kb.projects.toml.example",
@@ -71,6 +72,7 @@ exclude = ["web/vendor", "sandbox/node_modules", "**/__pycache__"]
 bin = "bin"
 web = "web"
 contrib = "contrib"                  # the access plugin `kb addon install contrib/users` names
+skills = "skills"                    # the how-to page offers them for download
 VERSION = "VERSION"
 "kb.projects.toml.example" = "kb.projects.toml.example"
 "aliases.toml.example" = "aliases.toml.example"

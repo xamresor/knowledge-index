@@ -6,6 +6,7 @@
 !web/
 !knowledge_index/
 !contrib/
+!skills/
 !sandbox/package.json
 !sandbox/package-lock.json
 !sandbox/runner.mjs

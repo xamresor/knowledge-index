@@ -617,6 +617,78 @@ def client_users(c: dict) -> str:
                        for u, t in sorted(users.items(), key=lambda kv: -kv[1]))
 
 
+# The files that the how-to page offers for download: the published name -> the source path under the
+# root of the KB and the media type. A fixed list, so a name in the URL never reaches the file system.
+HOWTO_FILES = {
+    "kb.md": ("skills/kb/SKILL.md", "text/markdown; charset=utf-8"),
+    "doc-organization.md": ("skills/doc-organization/SKILL.md", "text/markdown; charset=utf-8"),
+    "kb-reminder.py": ("skills/kb/install/kb-reminder.py", "text/x-python; charset=utf-8"),
+}
+
+
+def howto_file(name: str) -> tuple[bytes, str] | None:
+    """One file of HOWTO_FILES as (content, media type), or None for an unknown name or a missing file."""
+    entry = HOWTO_FILES.get(name)
+    if entry is None:
+        return None
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        with open(os.path.join(root, entry[0]), "rb") as f:
+            return f.read(), entry[1]
+    except OSError:
+        return None
+
+
+def _claude_setup(base: str) -> str:
+    """The panel "Set up Claude Code": the skills, the reminder hook and the lines for CLAUDE.md."""
+    files = f"{base}/admin/howto"
+
+    def link(name: str) -> str:
+        if howto_file(name) is None:
+            return f"<code>{esc(name)}</code> <span class=muted>(not on this server)</span>"
+        return f'<a href="{esc(files)}/{esc(name)}" download>{esc(name)}</a>'
+
+    hook = json.dumps({"hooks": {"UserPromptSubmit": [{"hooks": [{
+        "type": "command",
+        "command": 'python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/kb-reminder.py" 2>/dev/null || true'}]}]}},
+        indent=2)
+    guideline = ("## Code questions\n"
+                 "For \"how does X work\", \"what connects to Y\" and \"what breaks if I change Z\" questions, "
+                 "use the `kb` skill and its MCP tools before grep.\n"
+                 "When you delegate such a question to a sub-agent, tell it to use the `kb` tools.\n"
+                 "The index is as old as its last build: check a claim against the file before you rely on it.")
+    return panel(
+        "Set up Claude Code: skills, hook, CLAUDE.md",
+        "<p>The server alone is not enough. Without these steps the agent often greps and never asks the "
+        "knowledge base. Do steps 1–3 once per person or once per repository.</p>"
+        "<ol class=steps>"
+        f"<li><b>Install the skills.</b> Download {link('kb.md')} and {link('doc-organization.md')}. "
+        "Each file is a <code>SKILL.md</code>: put it in a folder with the name of the skill. For yourself, "
+        "in every project:"
+        "<pre>mkdir -p ~/.claude/skills/kb ~/.claude/skills/doc-organization\n"
+        "mv ~/Downloads/kb.md ~/.claude/skills/kb/SKILL.md\n"
+        "mv ~/Downloads/doc-organization.md ~/.claude/skills/doc-organization/SKILL.md</pre>"
+        "For a whole team, put the same folders in <code>.claude/skills/</code> of the repository and commit "
+        "them. <code>kb</code> tells the agent which tool answers which question. "
+        "<code>doc-organization</code> keeps the docs in the shape that the index reads well.</li>"
+        f"<li><b>Add the reminder hook.</b> Download {link('kb-reminder.py')} to "
+        "<code>.claude/hooks/</code> of the repository (or <code>~/.claude/hooks/</code> and change the path). "
+        "Merge this into <code>.claude/settings.json</code>; keep the hooks that are there:"
+        f"<pre>{esc(hook)}</pre>"
+        "The skill fires only when the agent decides so. With many MCP servers Claude Code also hides the "
+        "<code>kb</code> tools behind its tool search. The hook adds a one-line reminder to every prompt "
+        "that asks how code connects, so the agent does not fall back to grep.</li>"
+        "<li><b>Add the rule to CLAUDE.md</b> of the repository (or to <code>~/.claude/CLAUDE.md</code>):"
+        f"<pre>{esc(guideline)}</pre>"
+        "Sub-agents do not see the skill choice of the main session: the rule tells the main session to pass "
+        "it on.</li>"
+        "<li><b>Restart Claude Code</b>, then check: <code>/mcp</code> shows <code>kb</code> as connected, "
+        "and the question \"how does the sign-in work?\" starts with a <code>kb</code> tool, not with grep."
+        "</li></ol>"
+        "<p class=muted>A downloaded file is as new as this server. Download again after an update of the "
+        "server.</p>")
+
+
 def howto_page(base: str, csrf: str, login_url: str = "", member: bool = False) -> bytes:
     """How a person connects an agent to this server. The addresses come from the request, so the
     commands on the page work when pasted. `login_url` is the public address of the login webhook
@@ -661,6 +733,7 @@ def howto_page(base: str, csrf: str, login_url: str = "", member: bool = False) 
                 "that Claude Code sends the token by itself.</p>"
                 f"<pre>bin/kb-login --login-url {esc(login)} --kb-url {esc(mcp)} --add-to-claude</pre>{ask}"
                 "<p>When the token ends, run the same command without <code>--add-to-claude</code>.</p>")
+        + _claude_setup(base)
         + panel("Other MCP clients",
                 "<p>Any client that speaks MCP over HTTP works. A client with browser sign-in (OAuth) needs only "
                 "the address above. A client without it sends the token of <code>kb-login</code> in the header "

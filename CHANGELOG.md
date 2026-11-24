@@ -14,6 +14,12 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+- **"How to" page: set up Claude Code** (2026-11-24). A new panel lists what a person does besides the MCP
+  connection: install the `kb` and `doc-organization` skills, add the `kb-reminder.py` hook to
+  `.claude/settings.json`, add the rule to `CLAUDE.md`, restart and check. The skills and the hook download
+  from `/admin/howto/<file>` (a fixed list in `admin.HOWTO_FILES`; a member can download them too). The
+  wheel and the Docker image now ship `skills/`.
+
 Review of the fourth round (2026-11-24). Each fix has a test (`tests/test_audit5.py`).
 
 - **Security: contract docs live in collections of their own.** qmd writes `contracts___private.md`,

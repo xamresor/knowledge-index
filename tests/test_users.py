@@ -523,6 +523,8 @@ class HttpTest(unittest.TestCase):
         self.assertNotIn(">Usage<", page)
         self.assertIn(">My tokens<", page)
         self.assertIn("/local/login", page)                     # kb-login gets the address of this server
+        status, _, _ = self.req(c, "GET", "/admin/howto/kb.md")
+        self.assertEqual(status, 200)                           # a member downloads the skills too
 
     def test_a_person_makes_and_removes_the_own_tokens(self):
         key = self.store.add("gina", ["api"])

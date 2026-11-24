@@ -118,6 +118,32 @@ class Admin(unittest.TestCase):
         self.assertIn("kb-login", page)
         self.assertIn('class="on">How to<', page)
 
+    def test_howto_page_sets_up_claude_and_offers_the_skills(self):
+        c = self.client()
+        self.sign_in(c, self.base)
+        _, _, page = self.req(c, "GET", f"{self.base}/admin/howto")
+        self.assertIn("Set up Claude Code", page)
+        self.assertIn("UserPromptSubmit", page)                 # the hook entry for settings.json
+        self.assertIn("CLAUDE.md", page)
+        for name in ("kb.md", "doc-organization.md", "kb-reminder.py"):
+            self.assertIn(f'href="{self.base}/admin/howto/{name}" download', page)
+            status, headers, body = self.req(c, "GET", f"{self.base}/admin/howto/{name}")
+            self.assertEqual(status, 200, name)
+            self.assertIn(f'filename="{name}"', headers["Content-Disposition"])
+            self.assertEqual(body.encode(), admin.howto_file(name)[0])
+        _, headers, body = self.req(c, "GET", f"{self.base}/admin/howto/kb.md")
+        self.assertTrue(headers["Content-Type"].startswith("text/markdown"))
+        self.assertTrue(body.startswith("---\nname: kb\n"))
+
+    def test_howto_files_are_a_fixed_list(self):
+        c = self.client()
+        self.sign_in(c, self.base)
+        for name in ("SKILL.md", "..%2F..%2FVERSION", "../../VERSION", "admin.py"):
+            status, _, _ = self.req(c, "GET", f"{self.base}/admin/howto/{name}")
+            self.assertEqual(status, 404, name)
+        status, _, _ = self.req(self.client(), "GET", f"{self.base}/admin/howto/kb.md")
+        self.assertEqual(status, 302)                           # no session, no file
+
     def test_wrong_code_and_non_admin(self):
         status, _, page = self.sign_in(self.client(), self.base, code="000000")
         self.assertIn("Wrong code", page)
