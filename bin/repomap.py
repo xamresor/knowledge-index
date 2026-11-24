@@ -210,6 +210,7 @@ def scan_names(found: dict[str, list[str]], roots: dict[str, str],
     for repo, root in roots.items():
         if not complete:
             break
+        real_root = os.path.realpath(root)
         for dirpath, dirnames, filenames in os.walk(root):
             if deadline is not None and time.monotonic() > deadline:
                 complete = False
@@ -223,10 +224,8 @@ def scan_names(found: dict[str, list[str]], roots: dict[str, str],
                     break
                 path = os.path.join(dirpath, fn)
                 rel = os.path.relpath(path, root)
-                try:
-                    with open(path, encoding="utf-8", errors="replace") as fh:
-                        text = fh.read(2_000_000)
-                except OSError:
+                text = _read_inside(path, real_root)
+                if text is None:
                     continue
                 for m in set(pattern.findall(text)):
                     keys = names[m]
@@ -237,3 +236,31 @@ def scan_names(found: dict[str, list[str]], roots: dict[str, str],
             if not complete:
                 break
     return {k: v for k, v in found.items() if k not in alive}, complete
+
+
+SCAN_MAX_BYTES = 2_000_000   # one file of the unused scan; a longer file is read up to here
+
+
+def _read_inside(path: str, real_root: str) -> str | None:
+    """The text of a staged code file, or None. A link that leads out of the project's root, and
+    anything that is not a regular file (a FIFO would block the read), is skipped; the read stops at
+    SCAN_MAX_BYTES."""
+    import os
+    import stat
+    real = os.path.realpath(path)
+    if real != real_root and not real.startswith(real_root.rstrip(os.sep) + os.sep):
+        return None
+    try:
+        fd = os.open(real, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        with os.fdopen(fd, "rb", closefd=False) as fh:
+            data = fh.read(SCAN_MAX_BYTES)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return data.decode("utf-8", "replace")

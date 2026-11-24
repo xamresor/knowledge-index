@@ -33,12 +33,12 @@ serves = "api"
 
 | Key | Type | Description |
 |---|---|---|
-| `name` | string | The project's name in answers and in access rules. Letters, digits and `-`. Required, unique, and not `db` or `domain` (the build uses those for its own nodes). A key the build does not know (for example `serve`) gives a warning. |
-| `code` | list of paths | Folders whose code goes into the graph. `vendor`, `node_modules`, `storage`, `public`, `tests`, build output, images, fonts, source maps, minified files, `*.json` and `*.lock` are left out. Secrets are never copied: `.env` and `.env.*` (except `.env.example`) and `bootstrap/cache/` (it holds the DB password and `APP_KEY` after `config:cache`). This copy is the only filter, so the graph is the same in a checkout, a pip install and Docker. Each folder is copied to `repos/<name>/<folder name>/`, so two folders of one project must have different folder names. A missing or empty folder is an error: the project keeps its previous graph and the build exits non-zero. |
+| `name` | string | The project's name in answers and in access rules. Letters, digits, `-` and `_`, starting with a letter or a digit (it is a folder name under `repos/` and `.docs/`). Required, unique, and not `db` or `domain` (the build uses those for its own nodes). When the KB has its own `docs/` folder, not the name of that folder either (`KB_SELF_DOCS_NAME`, default `kb`). A key the build does not know (for example `serve`) gives a warning. |
+| `code` | list of paths | Folders whose code goes into the graph. `vendor`, `node_modules`, `storage`, `public`, `tests`, build output, images, fonts, source maps, minified files, `*.json` and `*.lock` are left out. Secrets are never copied: `.env` and `.env.*` (except `.env.example`) and `bootstrap/cache/` (it holds the DB password and `APP_KEY` after `config:cache`). This copy is the only filter, so the graph is the same in a checkout, a pip install and Docker. Each folder is copied to `repos/<name>/<folder name>/`, so two folders of one project must have different folder names. A link that points out of its folder, device files and pipes are not copied. A missing or empty folder, or a copy that fails (an unreadable file), is an error: the project keeps its previous copy and graph, and the build exits non-zero. |
 | `docs` | path | The docs folder: Markdown is searched; PDF, DOCX, ODT, RTF, EPUB and scans are extracted to text first (`docs/guide.pdf` is searched as `docs/guide.pdf.md`). A symlink that points out of the folder is not indexed. |
 | `routes` | path | A Laravel app folder: `php artisan route:list --json` there gives the route table, and its routes become graph edges. Its `database/migrations` give the foreign-key edges between tables. Eloquent relations and `$table` are resolved inside each project; two projects that declare the same table name share one `db::<table>` node. A path that ends in `.json` is a ready route table instead ([Docker](docker.md#route-tables-from-the-app-s-container)). An output that is not a JSON list keeps the previous table. |
 | `calls` | list of paths | Folders with frontend or backend code whose HTTP calls are linked to the routes of `serves`. |
-| `serves` | string or list | The project(s) whose routes these calls go to, e.g. `"api"` or `["api", "billing-api"]`. |
+| `serves` | string or list | The project(s) whose routes these calls go to, e.g. `"api"` or `["api", "billing-api"]`. Each one must be a project of this file with `routes`. |
 
 ## Where files live
 
@@ -56,11 +56,13 @@ serves = "api"
 | Variable | Default | Description |
 |---|---|---|
 | `KB_FORCE` | `0` | `1` rebuilds every project and every step, as `kb build` does. `kb update` otherwise skips what did not change. |
-| `KB_EXTRACT` | `1` | `0` skips text extraction from PDF, DOCX and scans, and removes the extracted files. With `1`, a file whose size and mtime did not change is not extracted again. |
+| `KB_EXTRACT` | `1` | `0` skips text extraction from PDF, DOCX and scans, and removes the extracted files. With `1`, a file whose size and mtime did not change is not extracted again. A PDF without a text layer goes on to OCR when `tesseract` is installed. A failed file is tried again when it changes or a new parser for it is installed; a timeout is tried again on the next build. |
+| `KB_EXTRACT_MAX_MB` | `200` | A document larger than this is not extracted. |
 | `KB_OCR_LANGS` | `eng` | Tesseract languages for scans, e.g. `eng+lav+rus`. |
+| `KB_OCR_MAX_PAGES` | `200` | OCR reads at most this many pages of a scanned PDF, one page at a time, and says when it stopped early. |
 | `KB_QMD_BACKEND` | asked once, then remembered | Embeddings: `llama` (on device), `none` (keywords only) or `other` (your own command). |
 | `KB_QMD_EMBED_CMD` | — | With `other`: the command that computes embeddings. |
-| `KB_REFRESH_WAIT_LOCK` | — | `kb-refresh` waits while your deploy holds this lock file. |
+| `KB_REFRESH_WAIT_LOCK` | — | `kb-refresh` waits while your deploy holds this lock file. `kb-refresh` builds when a git HEAD, the config or a `KB_ROUTES_DIR/*.json` table changed, or when it never built; `kb-refresh --force` runs `KB_FORCE=1 kb update`. |
 | — | `<data>/logs/update.lock` | Not a setting: `kb-refresh` holds a `flock` on this file while it builds. The file stays after the build; test the lock (`flock -n <file> true` fails while a build runs), not the file. |
 | `KB_ROUTES_DIR` | — | A folder with ready route tables, `<project>.json`. A project with `routes` reads its table there instead of running `php artisan route:list`. |
 
@@ -100,7 +102,7 @@ serves = "api"
 | `KB_METRICS` | `off` | `on` serves `/metrics` without the add-on. |
 | `KB_METRICS_TOKEN` | — | Bearer token or basic-auth password for `/metrics` from outside loopback. |
 | `KB_DATADICT_DIR` | `<config>/datadict` | Folder of the data dictionary files, one `<project>.toml` each ([data dictionary](data-dictionary.md)). |
-| `KB_ADMINS` | `<data>/admins.txt` | Comma-separated user names allowed into `/admin` on the shared server. |
+| `KB_ADMINS` | `<data>/admins.txt` | Comma-separated user names allowed into `/admin` on the shared server, matched against the `uname`, `username`, `id` or `uid` of the permission webhook (never the display `name`). |
 | `KB_SCIP_PHP` | `scip-php` on the `PATH` | Command of the PHP SCIP indexer for the `scip` add-on. It runs in `repos/<project>` and writes `index.scip` there. |
 | `KB_SCIP_TIMEOUT` | `600` | Seconds one SCIP indexer run may take. |
 
@@ -129,7 +131,7 @@ the registry: each setting with its choices, default, description and env variab
 | `KB_AUTH_TIMEOUT` | `10` | Timeout of a webhook call, seconds. |
 | `KB_AUTH_MAX_CHECKS` / `KB_AUTH_CHECK_WAIT` | `16` / `2` | Permission webhook calls at once; one more waits this many seconds for a slot, then gets `503`. |
 | `KB_AUTH_HINT` | a sign-in hint | Text a caller without a valid token gets. |
-| `KB_OAUTH` | `on` | `off` turns browser sign-in off: ready tokens only. |
+| `KB_OAUTH` | `on` | `off` turns the browser sign-in of MCP clients off: ready tokens only. The admin pages stay. |
 | `KB_OAUTH_TOKEN_TTL` | `28800` | Lifetime of an access token of the browser sign-in, seconds; `expires_in` says the same. A refresh gives a new one while the login webhook's token behind it lives. |
 | `KB_LOGIN_ENV` | `<data>/kb-login.env`, then `<data>/deploy/kb-login.env` | A KEY=VALUE file with `KB_LOGIN_URL` and `KB_HOOK_HEADERS`. |
 | `KB_USAGE_FILE` | `<data>/logs/usage.json` | Base name of the usage database (`usage.sqlite` next to it). |

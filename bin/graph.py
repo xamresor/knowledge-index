@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import tempfile
 from typing import Any, Iterable
 
@@ -71,6 +72,35 @@ def repo_file(path: str, repos_dir: str) -> tuple[str, str]:
     rel = os.path.relpath(path, repos_dir).replace(os.sep, "/")
     repo, _, sf = rel.partition("/")
     return repo, sf
+
+
+def staged_root(path: str, repos_dir: str) -> str:
+    """The staged project folder `<repos_dir>/<repo>` that holds `path`."""
+    return os.path.join(repos_dir, repo_file(path, repos_dir)[0])
+
+
+#: Bytes read from one source file. A longer file is cut here: no hand-written source is this long,
+#: and a link to a device (/dev/zero) never ends.
+MAX_SOURCE_BYTES = 4 * 1024 * 1024
+
+
+def read_source(path: str, root: str | None = None, limit: int = MAX_SOURCE_BYTES) -> str | None:
+    """The text of a source file, or None when it is not safe to read: not a regular file (a device,
+    a pipe), or, with `root`, a real path outside `root`. At most `limit` bytes are read."""
+    try:
+        real = os.path.realpath(path)
+        if root is not None:
+            base = os.path.realpath(root)
+            if real != base and not real.startswith(base + os.sep):
+                return None
+        # O_NONBLOCK: opening a pipe must not wait for a writer; the fstat below refuses it.
+        fd = os.open(real, os.O_RDONLY | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as fh:
+            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                return None
+            return fh.read(limit).decode("utf-8", errors="ignore")
+    except (OSError, ValueError):
+        return None
 
 
 def tag_repo(g: dict, repo: str) -> dict:

@@ -11,7 +11,10 @@
 a/x.pdf and b/x.pdf stay apart. Without --root the path is the bare file name. --from0 reads more
 file names from stdin, separated by NUL (find -print0). A file whose size and mtime did not change
 is not extracted again: <dir>/.kb-extracted.json remembers what was written, and also a file whose
-extraction failed, so a broken PDF is tried again only when it changes. --prune removes the
+extraction failed, so a broken PDF is tried again only when it changes or a new parser for it is
+installed. When a parser cannot read a file (a PDF without a text layer), the next one tries (OCR).
+A timeout is not remembered: the next run tries again, and the old text stays until then. A source
+over KB_EXTRACT_MAX_MB (default 200) is skipped. --prune removes the
 files written by an earlier run whose source is not in this run. A write never follows a symlink:
 it goes to a temp file and replaces the target, and a target outside <dir> is refused.
 
@@ -24,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -33,6 +37,14 @@ import parsers
 
 MANIFEST = ".kb-extracted.json"   # in the --into dir: target -> source, size, mtime, parser
 _STAMP = re.compile(r"(?m)^extracted_at: .*$")
+DEFAULT_MAX_MB = 200               # KB_EXTRACT_MAX_MB: a larger source is not extracted
+
+
+def _max_bytes() -> float:
+    try:
+        return float(os.environ.get("KB_EXTRACT_MAX_MB", DEFAULT_MAX_MB)) * 2**20
+    except ValueError:
+        return DEFAULT_MAX_MB * 2**20
 
 
 def _parser_name(module) -> str:
@@ -156,31 +168,61 @@ def main(argv: list[str]) -> int:
             print(f"skip {path.name}: the authored {key} has the same name", file=sys.stderr)
             continue
         st = path.stat()
-        module = parsers.for_path(path)
+        mods = parsers.runnable(path)
+        # The parsers that could run, by name: a cached failure or a kept text is reused only while
+        # this set is the same, so installing tesseract retries a scan that pdftotext could not read.
+        tried = "+".join(_parser_name(m) for m in mods)
         old = manifest.get(key) or {}
         same = old.get("size") == st.st_size and old.get("mtime_ns") == st.st_mtime_ns
-        if same and old.get("failed") and module is not None and old.get("parser") == _parser_name(module):
+        old_set = old.get("parsers", old.get("parser"))
+        if same and old.get("failed") and mods and old_set == tried:
             kept[key] = old                 # failed before and unchanged since: do not try every build
             continue
-        if (old.get("size") == st.st_size and old.get("mtime_ns") == st.st_mtime_ns
-                and (module is None or old.get("parser") == _parser_name(module))
+        if (same and not old.get("failed") and (not mods or old_set == tried)
                 and target.is_file() and not target.is_symlink()):
             kept[key] = old                 # unchanged since the last run: keep the text as it is
             continue
-        if module is None:
+        if not mods:
             needed = parsers.MISSING_TOOLS.get(path.suffix.lower())
             why = f"install {', '.join(needed)}" if needed else "no parser for this format"
             print(f"skip {path.name}: {why}", file=sys.stderr)
             continue
-        try:
-            text = parsers.with_provenance(module.extract(path), path, module)
-        except parsers.ExtractError as exc:
-            print(f"skip {path.name}: {exc} (not tried again until the file changes)", file=sys.stderr)
+        if st.st_size > _max_bytes():
+            print(f"skip {path.name}: {st.st_size // 2**20} MB is over KB_EXTRACT_MAX_MB "
+                  f"({os.environ.get('KB_EXTRACT_MAX_MB', DEFAULT_MAX_MB)})", file=sys.stderr)
+            _remove(target, into)           # not remembered: a raised limit takes effect at once
+            continue
+        # Best parser first; an ExtractError ("no text layer, needs OCR") goes on to the next one.
+        text, module, errors, transient = None, None, [], False
+        for candidate in mods:
+            try:
+                text = parsers.with_provenance(candidate.extract(path), path, candidate)
+                module = candidate
+                break
+            except parsers.TransientError as exc:
+                transient = True
+                errors.append(str(exc))
+            except parsers.ExtractError as exc:
+                errors.append(str(exc))
+            except (OSError, subprocess.SubprocessError) as exc:   # a parser that let one through
+                transient = True
+                errors.append(f"{_parser_name(candidate)}: {exc}")
+        if module is None:
+            why = "; ".join(errors)
+            if transient:
+                # A timeout says nothing about the file: no failure is remembered, and the old text
+                # stays (with its old manifest entry) until a run reads the file.
+                print(f"skip {path.name}: {why} (tried again on the next run)", file=sys.stderr)
+                if old:
+                    kept[key] = old
+                continue
+            print(f"skip {path.name}: {why} (not tried again until the file changes or a parser is added)",
+                  file=sys.stderr)
             # The text of the earlier version no longer describes the file: it leaves the index. The
-            # failure is remembered for this size and mtime only.
+            # failure is remembered for this size, mtime and set of parsers only.
             _remove(target, into)
             kept[key] = {"source": os.path.abspath(path), "size": st.st_size, "mtime_ns": st.st_mtime_ns,
-                         "parser": _parser_name(module), "failed": str(exc)[:200]}
+                         "parsers": tried, "failed": why[:200]}
             continue
         # The source mtime, not the clock: the same source gives the same text, so the doc index
         # does not embed it again on every build.
@@ -192,7 +234,7 @@ def main(argv: list[str]) -> int:
             print(f"skip {path.name}: cannot write {target}: {exc}", file=sys.stderr)
             continue
         kept[key] = {"source": os.path.abspath(path), "size": st.st_size, "mtime_ns": st.st_mtime_ns,
-                     "parser": _parser_name(module)}
+                     "parser": _parser_name(module), "parsers": tried}
         print(f"{path.name} -> {target}  ({len(text)} chars, {module.CONFIDENCE})")
     if prune:
         for key in set(manifest) - set(kept):
@@ -212,17 +254,22 @@ def _to_stdout(args: list[str]) -> int:
             print(f"skip {name}: not a file", file=sys.stderr)
             failures += 1
             continue
-        module = parsers.for_path(path)
-        if module is None:
+        mods = parsers.runnable(path)
+        if not mods:
             needed = parsers.MISSING_TOOLS.get(path.suffix.lower())
             why = f"install {', '.join(needed)}" if needed else "no parser for this format"
             print(f"skip {path.name}: {why}", file=sys.stderr)
             failures += 1
             continue
-        try:
-            sys.stdout.write(parsers.with_provenance(module.extract(path), path, module))
-        except parsers.ExtractError as exc:
-            print(f"skip {path.name}: {exc}", file=sys.stderr)
+        errors = []
+        for module in mods:                 # best first; the next one after an ExtractError
+            try:
+                sys.stdout.write(parsers.with_provenance(module.extract(path), path, module))
+                break
+            except parsers.ExtractError as exc:
+                errors.append(str(exc))
+        else:
+            print(f"skip {path.name}: {'; '.join(errors)}", file=sys.stderr)
             failures += 1
     return 1 if failures else 0
 

@@ -140,6 +140,16 @@ class Server:
         self.refresh: dict[str, dict] = {}
         self.access: dict[str, dict] = {}    # SHA-256 of an access token -> the token behind it, client, end
         self.headers: dict[str, str] = {}    # extra headers for the login webhook (kb-http: its self-call header)
+        # (url, body, headers, ip) -> answer dict, or LoginError: the call of the login webhook. kb-http sets
+        # it to call its access plugin in-process when the webhook is this server; else kb_login.post.
+        self.login_post = None
+
+    def clients_snapshot(self) -> dict:
+        """A deep copy of the registered clients, taken under the lock: a page that iterates it never meets
+        a client (or a user of one) added or removed in the middle."""
+        import copy
+        with self.lock:
+            return copy.deepcopy(self.clients)
 
     # ------------------------------------------------------------------ storage
     def _load_clients(self) -> dict:
@@ -299,8 +309,7 @@ class Server:
         txn = self._txn(txn_id)
         txn["user"] = username
         try:
-            data = kb_login.post(self.env["KB_LOGIN_URL"], {"username": username, "password": password},
-                                 headers=self._hook_headers(txn))
+            data = self._post(txn, {"username": username, "password": password})
         except kb_login.LoginError as e:
             self._event(username, "sign-in refused", str(e)[:200])
             raise
@@ -315,12 +324,16 @@ class Server:
         if not txn.get("api_challenge"):
             raise OAuthError(400, "invalid_request", "no second step pending")
         try:
-            data = kb_login.post(self.env["KB_LOGIN_URL"], {"challenge": txn["api_challenge"], "code": code.strip()},
-                                 headers=self._hook_headers(txn))
+            data = self._post(txn, {"challenge": txn["api_challenge"], "code": code.strip()})
         except kb_login.LoginError as e:
             self._event(txn.get("user", "?"), "sign-in refused", f"code: {str(e)[:180]}")
             raise
         return self._finish(txn_id, data.get("token"))
+
+    def _post(self, txn: dict, body: dict) -> dict:
+        if self.login_post is not None:
+            return self.login_post(self.env["KB_LOGIN_URL"], body, self._hook_headers(txn), txn.get("ip", ""))
+        return kb_login.post(self.env["KB_LOGIN_URL"], body, headers=self._hook_headers(txn))
 
     def _hook_headers(self, txn: dict) -> dict:
         """KB_HOOK_HEADERS, and the headers kb-http adds when the login webhook is kb-http itself: its
@@ -399,8 +412,21 @@ class Server:
         return True
 
     # ------------------------------------------------------------------ token
+    def _known_client(self, form: dict) -> None:
+        """A client_id that this server does not know (revoked by an admin, or pushed out by
+        KB_OAUTH_MAX_CLIENTS) is 401 invalid_client: an MCP client registers again only on that error. With
+        400 invalid_grant it would retry the same client forever."""
+        cid = form.get("client_id")
+        if cid:
+            with self.lock:
+                known = cid in self.clients
+            if not known:
+                raise OAuthError(401, "invalid_client", "unknown client_id: register again")
+
     def token(self, form: dict) -> dict:
         grant = form.get("grant_type")
+        if grant in ("authorization_code", "refresh_token"):
+            self._known_client(form)
         if grant == "authorization_code":
             with self.lock:
                 self._expire()
@@ -449,7 +475,7 @@ class Server:
         with self.lock:
             self._expire()
             if client_id not in self.clients:
-                raise OAuthError(400, "invalid_grant", "the client was revoked: sign in again")
+                raise OAuthError(401, "invalid_client", "the client was revoked: register again")
             now = self.now()
             old = self.access.get(replaces or "")
             if old is not None:

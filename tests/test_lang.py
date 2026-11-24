@@ -101,7 +101,8 @@ class DistinctivenessTest(unittest.TestCase):
 
     def test_ambiguous_labels_are_skipped(self):
         """Same rule as dedupe.py: when a label has two owners, do not invent a fact."""
-        index = markdown._symbol_index(graph_with("BookingService", "BookingService", "PaymentGate"))
+        index = markdown._symbols_for("api", *markdown._symbol_index(
+            graph_with("BookingService", "BookingService", "PaymentGate")))
         self.assertNotIn("BookingService", index)
         self.assertIn("PaymentGate", index)
 

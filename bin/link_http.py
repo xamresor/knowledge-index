@@ -152,6 +152,10 @@ def main() -> int:
     caller_repo, args = parse_args(sys.argv[1:])
     graph_path, routes_path, target_repo = args[0], args[1], args[2]
     fe_roots = args[3:]
+    if not os.path.isfile(routes_path):
+        # bin/kb refuses a `serves` project without routes; a hand run with a wrong name gets a line.
+        print(f"warning: no route table {routes_path} — no HTTP edges to {target_repo}", file=sys.stderr)
+        return 0
     g = graph.load(graph_path)
     routes = load_routes(routes_path)
 
@@ -260,9 +264,9 @@ def main() -> int:
                     continue  # a test calls its own API through the test client, not another service
                 fp = os.path.join(dp, fn)
                 rel = os.path.relpath(fp, repo_root)
-                try:
-                    text = open(fp, encoding="utf-8", errors="ignore").read()
-                except OSError:
+                # Not a device or a pipe; at most graph.MAX_SOURCE_BYTES.
+                text = graph.read_source(fp)
+                if text is None:
                     continue
                 if backend:
                     calls = list(php_laravel.iter_backend_calls(text))

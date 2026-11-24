@@ -156,7 +156,7 @@ class JobLimits(unittest.TestCase):
     def test_a_full_slot_answers_busy(self):
         sem = threading.BoundedSemaphore(1)
         with mock.patch.object(kb_core, "DOCS_JOBS", sem), mock.patch.object(kb_core, "JOB_WAIT", 0.1), \
-                mock.patch.object(kb_core.subprocess, "run") as sp:
+                mock.patch.object(kb_core.warm, "run_capped") as sp:
             sem.acquire()
             try:
                 with self.assertRaisesRegex(kb_core.ToolError, "busy"):
@@ -195,7 +195,7 @@ class Cursors(unittest.TestCase):
             c.get(tok, "t", (owner, None))
 
     def test_byte_budget_drops_the_oldest_and_refuses_a_giant(self):
-        c = kb_core.Cursors(600, 100, max_bytes=100, per_owner=10)
+        c = kb_core.Cursors(600, 100, max_bytes=100, per_owner=10, owner_bytes=100)
         first = c.put("a" * 60, "t", ("ann", None))
         second = c.put("b" * 60, "t", ("bob", None))
         with self.assertRaises(kb_core.ToolError):
@@ -330,8 +330,7 @@ class WarmTimeouts(unittest.TestCase):
             worker = mock.Mock(run=mock.Mock(return_value=None))
             with mock.patch.object(kb_core, "GRAPH", graph), \
                     mock.patch.object(kb_core.warm, "graph", return_value=worker), \
-                    mock.patch.object(kb_core.subprocess, "run",
-                                      return_value=mock.Mock(stdout="cli", stderr="", returncode=0)) as sp:
+                    mock.patch.object(kb_core.warm, "run_capped", return_value=(0, "cli", "", False)) as sp:
                 out = kb_core.graph_call(["graphify", "explain", "X"], {"project": "all"}, None, "X")
         self.assertIn("cli", out)
         self.assertEqual(worker.run.call_count, 1)

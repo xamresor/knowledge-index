@@ -224,7 +224,7 @@ class ExtractFailureIsRemembered(unittest.TestCase):
         err = io.StringIO()
         with mock.patch("sys.stdin", io.StringIO("".join(f"{f}\0" for f in files))), \
                 mock.patch("sys.stdout", io.StringIO()), mock.patch("sys.stderr", err), \
-                mock.patch.object(extract.parsers, "for_path", return_value=FailingParser):
+                mock.patch.object(extract.parsers, "runnable", return_value=[FailingParser]):
             extract.main(["--into", str(stage), "--root", str(root), "--prune", "--from0"])
         return err.getvalue()
 

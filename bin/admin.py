@@ -45,7 +45,26 @@ import warm
 
 SESSION_TTL = 8 * 3600
 COOKIE = "kb_admin"
-ID_FIELDS = ("uname", "username", "name", "id", "uid")
+ID_FIELDS = ("uname", "username", "name", "id", "uid")   # to show and to find a user
+# The fields that may make a user an admin (KB_ADMINS, admins.txt): stable, unique identifiers only. The
+# display `name` is not one of them: a webhook that lets a person choose the own name ("roman") must not
+# make that person an admin.
+ADMIN_FIELDS = ("uname", "username", "id", "uid")
+
+# The one script an admin page may run (the CSP allows it by its hash, kb-http): a "choose a password"
+# link carries its one-time value in the fragment (#t=...), which no access log sees; this copies it into
+# the form field `t` and takes it out of the address bar.
+FRAGMENT_SCRIPT = ("<script>(function(){var m=/^#t=([A-Za-z0-9_-]+)$/.exec(location.hash);if(!m)return;"
+                   "var f=document.querySelector('input[name=t]');if(f)f.value=m[1];"
+                   "history.replaceState(null,'',location.pathname+location.search);})();</script>")
+
+
+def script_hash(tag: str = FRAGMENT_SCRIPT) -> str:
+    """The CSP source of a <script> element: 'sha256-<base64 of its body>'."""
+    import base64
+    import hashlib
+    body = tag[len("<script>"):-len("</script>")]
+    return "'sha256-" + base64.b64encode(hashlib.sha256(body.encode()).digest()).decode() + "'"
 
 
 def admins(env: dict | None = None) -> set[str]:
@@ -63,7 +82,7 @@ def admins(env: dict | None = None) -> set[str]:
 
 
 def is_admin(user: dict, names: set[str]) -> bool:
-    return any(str(user.get(k, "")).strip().lower() in names for k in ID_FIELDS if user.get(k))
+    return any(str(user.get(k, "")).strip().lower() in names for k in ADMIN_FIELDS if user.get(k))
 
 
 class Sessions:
@@ -71,39 +90,54 @@ class Sessions:
         self.ttl = ttl
         self.items: dict[str, dict] = {}
         self.lock = threading.Lock()
+        # (token) -> None, called when a session ends (sign-out, expiry, an admin change): kb-http ends the
+        # sign-in token behind it in the access plugin. Called outside the lock; never raises.
+        self.on_end = None
+
+    def _ended(self, gone: list[dict]) -> None:
+        for v in gone:
+            if self.on_end is not None:
+                try:
+                    self.on_end(v["token"])
+                except Exception:  # noqa: BLE001 — a sign-out never fails on the clean-up
+                    pass
 
     def create(self, user: dict, token: str, admin: bool = True) -> str:
         """`admin` False: a person of the KB's own users who may open only the own tokens page."""
         sid = secrets.token_urlsafe(32)
         with self.lock:
-            self._expire()
+            gone = self._expire()
             self.items[sid] = {"user": user, "token": token, "csrf": secrets.token_urlsafe(24), "admin": admin,
                                "exp": time.monotonic() + self.ttl}
+        self._ended(gone)
         return sid
 
     def get(self, sid: str | None) -> dict | None:
         if not sid:
             return None
         with self.lock:
-            self._expire()
-            return self.items.get(sid)
+            gone = self._expire()
+            found = self.items.get(sid)
+        self._ended(gone)
+        return found
 
     def drop(self, sid: str | None) -> None:
         with self.lock:
-            self.items.pop(sid or "", None)
+            v = self.items.pop(sid or "", None)
+        self._ended([v] if v else [])
 
     def drop_user(self, name: str) -> None:
         """End every session of a user whose key or rights an admin has just changed."""
         name = name.strip().lower()
         with self.lock:
-            for sid in [k for k, v in self.items.items()
-                        if any(str(v["user"].get(f, "")).strip().lower() == name for f in ID_FIELDS)]:
-                del self.items[sid]
+            gone = [self.items.pop(sid) for sid in [k for k, v in self.items.items()
+                    if any(str(v["user"].get(f, "")).strip().lower() == name for f in ID_FIELDS)]]
+        self._ended(gone)
 
-    def _expire(self) -> None:
+    def _expire(self) -> list[dict]:
+        """Drop the ended sessions; the caller holds the lock and calls _ended with the result after it."""
         now = time.monotonic()
-        for k in [k for k, v in self.items.items() if v["exp"] < now]:
-            del self.items[k]
+        return [self.items.pop(k) for k in [k for k, v in self.items.items() if v["exp"] < now]]
 
 
 class Logins:

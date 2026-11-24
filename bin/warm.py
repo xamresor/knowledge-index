@@ -40,6 +40,63 @@ def enable() -> None:
     ENABLED = os.environ.get("KB_WARM", "1") != "0"
 
 
+class Overflow(Exception):
+    """A child wrote more than its byte limit; it was stopped."""
+
+
+def run_capped(argv: list[str], max_bytes: int, timeout: float, cwd: str | None = None,
+               input_text: str | None = None, env: dict | None = None) -> tuple[int, str, str, bool]:
+    """Run a process and read its output as it comes, at most `max_bytes` of stdout (and 64 KiB of
+    stderr). Past the limit the process is killed: a producer cannot fill the memory of the server
+    before the text is cut. -> (exit code, stdout, stderr, stdout was cut). Raises
+    subprocess.TimeoutExpired after `timeout` seconds (the process is killed)."""
+    proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE if input_text is not None
+                            else subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err, cut = bytearray(), bytearray(), [False]
+
+    def read_out() -> None:
+        assert proc.stdout
+        while chunk := proc.stdout.read1(65536):
+            room = max_bytes - len(out)
+            out.extend(chunk[:room])
+            if len(chunk) > room:
+                cut[0] = True
+                proc.kill()
+                return
+
+    def read_err() -> None:
+        assert proc.stderr
+        while chunk := proc.stderr.read1(65536):
+            err.extend(chunk[:max(0, 65536 - len(err))])   # keep draining, keep the first 64 KiB
+
+    readers = [threading.Thread(target=read_out, daemon=True), threading.Thread(target=read_err, daemon=True)]
+    for t in readers:
+        t.start()
+    try:
+        if input_text is not None:
+            assert proc.stdin
+            try:
+                proc.stdin.write(input_text.encode("utf-8"))
+                proc.stdin.close()
+            except (BrokenPipeError, OSError):
+                pass
+        code = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        raise
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        for t in readers:
+            t.join(timeout=5)
+        for f in (proc.stdout, proc.stderr):
+            if f:
+                f.close()
+    return (code, out.decode("utf-8", "replace"), err.decode("utf-8", "replace"), cut[0])
+
+
 class _Hung(Exception):
     """The child did not answer within its timeout."""
 
@@ -279,11 +336,16 @@ def graph_once(argv: list[str], view: dict | None = None, timeout: float = 120.0
     import addons
     env = {**os.environ, "KB_FAST_ROUTES": "1" if addons.on("fast-routes") else "0"}
     try:
-        p = subprocess.run([py, os.path.join(HERE, "graph_worker.py")], input=json.dumps(message) + "\n",
-                           capture_output=True, text=True, timeout=timeout, env=env)
-        return str(json.loads(p.stdout.strip().splitlines()[-1]).get("out", ""))
+        _code, stdout, _err, cut = run_capped([py, os.path.join(HERE, "graph_worker.py")], ONCE_MAX_BYTES,
+                                              timeout, input_text=json.dumps(message) + "\n", env=env)
+        if cut:
+            return f"(the answer is larger than {ONCE_MAX_BYTES // 1_000_000} MB: narrow the call)"
+        return str(json.loads(stdout.strip().splitlines()[-1]).get("out", ""))
     except (OSError, subprocess.SubprocessError, ValueError, IndexError):
         return None
+
+
+ONCE_MAX_BYTES = 32_000_000   # one graph_once answer; the worker reads it all before it is cut
 
 
 # --------------------------------------------------------------------------- docs

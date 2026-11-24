@@ -19,7 +19,8 @@ For a team that wants no second system behind the two webhooks of the access pro
 - A token is a long random string. It shows once; the store keeps only its SHA-256. It lives until its
   owner or an admin removes it, or an admin disables or removes the user. A change holds at once.
 - The password also works at the browser sign-in of an agent. Each sign-in makes a sign-in token: it ends
-  after 30 days without a request, and a new password ends all of them.
+  after 30 days without a request, and a new password ends all of them. Agents keep their 10 most recently
+  used, the admin pages their own 10; a page sign-in token ends with its session.
 
 Mail: `<data>/smtp.env` (owner only) or the environment: KB_SMTP_HOST, KB_SMTP_PORT (587), KB_SMTP_USER,
 KB_SMTP_PASSWORD, KB_SMTP_FROM, KB_SMTP_TLS (starttls | ssl | none) and KB_PUBLIC_URL, the address of this
@@ -73,7 +74,9 @@ TOUCH_SECONDS = 300  # write "last used" at most this often per token
 ONLINE_SECONDS = 900  # a user with a request in this time is "online"
 MAX_TOKENS = 20
 SIGNIN_PREFIX = "kbs_"
-SIGNIN_KEEP = 10  # sign-in tokens per user: the oldest go
+SIGNIN_KEEP = 10  # agent sign-in tokens per user (OAuth, kb-login): the least recently used go
+PAGE_KEEP = 10  # sign-in tokens of the admin pages per user: a quota of their own, so that page sign-ins
+                # never push out the token of an agent
 SIGNIN_IDLE = 30 * 86400  # a sign-in token ends after this time without a request
 EMAIL = re.compile(r"^[A-Za-z0-9._+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
 PW_MIN, PW_MAX = 12, 200
@@ -87,6 +90,13 @@ class UserError(Exception):
     """A refusal with a text that a person may read."""
 
 
+class Busy(UserError):
+    """Too many password hashes at once: the caller answers 503 and the person tries again."""
+
+    def __init__(self):
+        super().__init__("The server is busy. Try again in a moment.")
+
+
 class Locked(UserError):
     """Too many wrong passwords for a name."""
 
@@ -95,8 +105,20 @@ class Locked(UserError):
         self.retry = retry
 
 
+# One scrypt hash takes about 16 MiB of memory. Without a cap, a hundred parallel sign-ins take 1.6 GB and the
+# service is killed for its memory (MemoryMax), which ends every browser sign-in. At most HASH_SLOTS hashes
+# run at once; one more waits HASH_WAIT seconds, then the caller gets Busy.
+HASH_SLOTS = threading.BoundedSemaphore(4)
+HASH_WAIT = 5.0
+
+
 def _scrypt(password: str, salt: bytes) -> str:
-    return hashlib.scrypt(password.encode(), salt=salt, n=2 ** 14, r=8, p=1, dklen=32).hex()
+    if not HASH_SLOTS.acquire(timeout=HASH_WAIT):
+        raise Busy()
+    try:
+        return hashlib.scrypt(password.encode(), salt=salt, n=2 ** 14, r=8, p=1, dklen=32).hex()
+    finally:
+        HASH_SLOTS.release()
 
 
 def _hash(key: str) -> str:
@@ -403,7 +425,7 @@ class Store:
             hit = self._by_key(key)
             return hit[0] if hit else None
 
-    def login(self, username: str, password: str, ip: str = "") -> str:
+    def login(self, username: str, password: str, ip: str = "", purpose: str = "agent") -> str:
         """The login webhook. The password field holds the password of the user, or a token of the user.
         -> the bearer token: a new sign-in token after a password, the token itself after a token.
 
@@ -412,7 +434,11 @@ class Store:
         is taken again to save; a password changed in between counts as a wrong password.
 
         Wrong passwords count per name and client address (`ip`): five from one address shut that name for
-        that address only. A stranger who knows a name cannot keep its owner out."""
+        that address only. A stranger who knows a name cannot keep its owner out.
+
+        `purpose` "page" is a sign-in of the admin pages: its token counts against PAGE_KEEP, the others
+        (an agent: OAuth, kb-login) against SIGNIN_KEEP. A flood of page sign-ins never ends an agent."""
+        page = purpose == "page"
         name = (username or "").strip().lower()
         who = (name, str(ip or ""))
         with self._lock:
@@ -435,14 +461,20 @@ class Store:
                     self._fails.pop(who, None)
                     key = SIGNIN_PREFIX + secrets.token_urlsafe(32)
                     tokens = rec["tokens"]
-                    tokens[secrets.token_hex(4)] = {"hash": _hash(key), "start": key[:8], "label": "sign-in",
-                                                   "kind": "signin", "created": now, "last_used": now}
-                    signins = sorted((tid for tid, t in tokens.items() if t.get("kind") == "signin"),
-                                     key=lambda tid: tokens[tid].get("last_used") or tokens[tid].get("created") or 0)
-                    for tid in signins:
-                        stale = now - (tokens[tid].get("last_used") or tokens[tid].get("created") or 0) > SIGNIN_IDLE
-                        if stale or len([1 for t in tokens.values() if t.get("kind") == "signin"]) > SIGNIN_KEEP:
-                            del tokens[tid]
+                    tokens[secrets.token_hex(4)] = {"hash": _hash(key), "start": key[:8],
+                                                   "label": "page sign-in" if page else "sign-in",
+                                                   "kind": "signin", "page": page, "created": now, "last_used": now}
+
+                    def last(tid: str) -> float:
+                        return tokens[tid].get("last_used") or tokens[tid].get("created") or 0
+
+                    for tid in [tid for tid, t in tokens.items()
+                                if t.get("kind") == "signin" and now - last(tid) > SIGNIN_IDLE]:
+                        del tokens[tid]
+                    same = sorted((tid for tid, t in tokens.items()
+                                   if t.get("kind") == "signin" and bool(t.get("page")) == page), key=last)
+                    for tid in same[:max(0, len(same) - (PAGE_KEEP if page else SIGNIN_KEEP))]:
+                        del tokens[tid]
                     self._save()
                     return key
         with self._lock:
@@ -451,6 +483,17 @@ class Store:
             if len(self._fails) > 5000:  # a flood of names: keep the map small
                 self._fails = {k: v for k, v in self._fails.items() if v and now - v[-1] < LOCK_SECONDS}
         raise UserError("Wrong user name or password.")
+
+    def end_signin(self, token: str) -> bool:
+        """End one sign-in token (the admin session that held it ended). A key (`kbk_`) is never ended
+        here: a person may sign in to the pages with a key in the password field. -> True when one ended."""
+        with self._changing():
+            hit = self._by_key(token)
+            if hit is None or hit[1]["tokens"][hit[2]].get("kind") != "signin":
+                return False
+            del hit[1]["tokens"][hit[2]]
+            self._save()
+            return True
 
     def permissions(self, token: str, asked: list[str]) -> tuple[int, dict]:
         """The permission webhook: the HTTP status and the body."""
@@ -461,19 +504,35 @@ class Store:
             name, rec, tid = hit
             now = self.now()
             if now - (rec["tokens"][tid].get("last_used") or 0) >= TOUCH_SECONDS:
-                with self._changing():  # a fresh read under the file lock, then the "last used" time
-                    hit = self._by_key(token)
-                    if hit is None:
-                        return 401, {"message": "unknown key"}
-                    name, rec, tid = hit
-                    rec["tokens"][tid]["last_used"] = rec["last_used"] = now
-                    self._save()
+                try:
+                    with self._changing():  # a fresh read under the file lock, then the "last used" time
+                        hit = self._by_key(token)
+                        if hit is None:
+                            return 401, {"message": "unknown key"}
+                        name, rec, tid = hit
+                        rec["tokens"][tid]["last_used"] = rec["last_used"] = now
+                        self._save()
+                except OSError as e:
+                    rec["tokens"].get(tid, {})["last_used"] = now
+                    # A full disk or a read-only folder: "last used" is a convenience, the check is not. The
+                    # time stays in memory, so the next try comes after TOUCH_SECONDS again.
+                    _warn_once(f"users: cannot save the \"last used\" time ({type(e).__name__}); "
+                               "tokens keep working, but the users file is not written")
             if rec.get("projects") == "*":
                 return 200, {"user": {"name": name}, "projects": "*"}
             allowed = [p for p in rec.get("projects") or [] if p in set(asked or [])]
             if not allowed:
                 return 403, {"message": "no project of this server"}
             return 200, {"user": {"name": name}, "projects": allowed}
+
+
+_WARNED: set[str] = set()
+
+
+def _warn_once(msg: str) -> None:
+    if msg not in _WARNED:
+        _WARNED.add(msg)
+        sys.stderr.write(msg + "\n")
 
 
 # ---------------------------------------------------------------------------------- pages
@@ -745,7 +804,9 @@ def send_link(s: Store, name: str, base: str, cfg: dict, invite: bool = False) -
         raise UserError("Mail is not set up on this server.")
     ttl = INVITE_TTL if invite else RESET_TTL
     value = s.start_reset(name, ttl, invite=invite)
-    link = f"{base.rstrip('/')}/admin/reset?t={value}"
+    # The value goes in the fragment (#t=...): a browser never sends a fragment, so no access log of nginx
+    # or of a proxy holds it. A small script of the core page puts it into the form (admin.FRAGMENT_SCRIPT).
+    link = f"{base.rstrip('/')}/admin/reset#t={value}"
     hours = int(ttl // 3600)
     lead = ("You have an account on the knowledge base." if invite
             else "Somebody asked for a new password for your account on the knowledge base.")
@@ -762,14 +823,28 @@ def send_link(s: Store, name: str, base: str, cfg: dict, invite: bool = False) -
 
 
 def login(body: dict, core) -> tuple:
-    """The login webhook: the password of the user, or a token of the user in the password field."""
+    """The login webhook: the password of the user, or a token of the user in the password field.
+    `purpose` "page" (set by kb-http for the admin pages) puts the sign-in token in the page quota."""
     try:
         return 200, {"token": store(core).login(str(body.get("username", "")), str(body.get("password", "")),
-                                                str(body.get("ip", "")))}
+                                                str(body.get("ip", "")), str(body.get("purpose", "agent")))}
     except Locked as e:
         return 429, {"message": str(e)}, {"Retry-After": str(e.retry)}
+    except Busy as e:
+        return 503, {"message": str(e)}, {"Retry-After": "5"}
     except UserError as e:
         return 401, {"message": str(e)}
+    except OSError as e:  # the sign-in token cannot be saved (a full disk, a read-only folder)
+        _warn_once(f"users: cannot save a sign-in ({type(e).__name__})")
+        return 503, {"message": "The sign-in cannot be saved on the server (its disk). Tell an admin."}
+
+
+def logout(token: str, core) -> None:
+    """An admin session ended (sign-out, or 8 hours): its sign-in token ends too. A key stays."""
+    try:
+        store(core).end_signin(token)
+    except (UserError, OSError) as e:
+        _warn_once(f"users: cannot end a sign-in token ({type(e).__name__})")
 
 
 def permissions(token: str, projects: list[str], core) -> tuple[int, dict]:
@@ -815,7 +890,13 @@ def public_page(req: dict, core) -> tuple[int, str, str]:
                    f'<input id="u" name="username" autocomplete="username" autofocus required>'
                    f'<p><button class="primary">Send me a link</button></p></form>{back}')
 
+    # A link of an older version carries the value in the query (?t=); a new one in the fragment, which the
+    # page script copies into the form. A GET without a value shows the form: the POST checks the value.
     value = str(req["form"].get("t") or req["query"].get("t") or "")
+    script = _fragment_script()
+    if req["method"] == "GET" and not value and script:
+        return box("Choose a password", _reset_form(base, "", "", "") + script
+                   + "<noscript><p>This page needs JavaScript to read the link.</p></noscript>")
     name = s.reset_user(value)
     if name is None:
         return box("Choose a password", f"<p>This link does not work any more. Ask for a new mail.</p>"
@@ -838,14 +919,39 @@ def public_page(req: dict, core) -> tuple[int, str, str]:
                                             f'<p><a href="{base}/admin/login">Sign in</a></p>')
         except UserError as e:
             error = f'<p class="bad">{esc(str(e))}</p>'
-    return box("Choose a password",
-               f'{error}<p>Account <b>{esc(name)}</b>. {PW_MIN} characters or more.</p>'
-               f'<form method="post" action="{base}/admin/reset"><input type="hidden" name="t" value="{esc(value)}">'
-               f'<label for="p">New password</label><input id="p" name="password" type="password" '
-               f'autocomplete="new-password" minlength="{PW_MIN}" autofocus required>'
-               f'<label for="a">The same again</label><input id="a" name="again" type="password" '
-               f'autocomplete="new-password" minlength="{PW_MIN}" required>'
-               f'<p><button class="primary">Set the password</button></p></form>')
+    return box("Choose a password", _reset_form(base, value, name, error))
+
+
+def _fragment_script() -> str:
+    try:
+        import admin
+    except ImportError:
+        return ""
+    return getattr(admin, "FRAGMENT_SCRIPT", "")
+
+
+def _reset_form(base: str, value: str, name: str, error: str) -> str:
+    esc, _ = _ui()
+    who = f"Account <b>{esc(name)}</b>. " if name else ""
+    return (f'{error}<p>{who}{PW_MIN} characters or more.</p>'
+            f'<form method="post" action="{base}/admin/reset"><input type="hidden" name="t" value="{esc(value)}">'
+            f'<label for="p">New password</label><input id="p" name="password" type="password" '
+            f'autocomplete="new-password" minlength="{PW_MIN}" autofocus required>'
+            f'<label for="a">The same again</label><input id="a" name="again" type="password" '
+            f'autocomplete="new-password" minlength="{PW_MIN}" required>'
+            f'<p><button class="primary">Set the password</button></p></form>')
+
+
+def _loses(before: dict, projects, is_admin: bool, disabled: bool) -> bool:
+    """Does a save take something away from a user: disabled now, the admin right gone, or a project gone?"""
+    if disabled and not before.get("disabled"):
+        return True
+    if before.get("admin") and not is_admin:
+        return True
+    old = before.get("projects")
+    if old == "*":
+        return projects != "*"
+    return projects != "*" and bool(set(old or []) - set(projects or []))
 
 
 def page(req: dict, core) -> tuple:
@@ -861,6 +967,7 @@ def page(req: dict, core) -> tuple:
         # The Users tab. An admin cannot take the own access away: that is how the last admin locks
         # everybody out.
         name, note, key = str(form.get("name", "")).strip(), "", None
+        lost = action in ("revoke", "remove")  # the person loses access or rights: open sessions end
         try:
             cfg = mail_config(core)
             if action == "add":
@@ -898,6 +1005,8 @@ def page(req: dict, core) -> tuple:
                         # admin can no longer sign in to undo it.
                         raise UserError("Keep at least one project on your own account: without one you "
                                         "could not sign in any more.")
+                    before = s.all().get(name.lower()) or {}
+                    lost = _loses(before, projects, is_admin, disabled)
                     s.update(name, projects, is_admin, disabled)
                     note = "Saved."
             elif action:
@@ -908,7 +1017,8 @@ def page(req: dict, core) -> tuple:
             if action:
                 if action != "reset":
                     req["forget"]()
-                    if name.lower() != me:
+                    # A new key or a save that takes nothing away keeps the person signed in.
+                    if lost and name.lower() != me:
                         req["drop_sessions"](name)
                 req["audit"](f"user {action}", name[:80])
         return 200, "KB admin · users", users_page(req["base"], req["csrf"], s.all(), sorted(core.PROJECTS), me, note, key,

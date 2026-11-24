@@ -103,7 +103,7 @@ def main() -> int:
     # 1) Eloquent model -> model
     eloq = 0
     for fp in php_laravel.walk(repos_dir):
-        txt = php_laravel.read(fp)
+        txt = php_laravel.read(fp, graph.staged_root(fp, repos_dir))
         if txt is None:
             continue
         cls = php_laravel.class_name(txt)
@@ -144,7 +144,7 @@ def main() -> int:
         if not os.path.isdir(mdir):
             continue
         for fp in php_laravel.walk(mdir):
-            txt = php_laravel.read(fp) or ""
+            txt = php_laravel.read(fp, mdir) or ""
             declared = php_laravel.schema_tables(txt)
             if len(declared) > 1:                       # multi-table file -> split per block
                 for blk in php_laravel.schema_blocks(txt):
@@ -158,7 +158,7 @@ def main() -> int:
     # 3) raw SQL / query-builder table refs: class/file -> db_table
     sql = 0
     for fp in php_laravel.walk(repos_dir):
-        txt = php_laravel.read(fp)
+        txt = php_laravel.read(fp, graph.staged_root(fp, repos_dir))
         if txt is None:
             continue
         tbls = php_laravel.table_refs(txt)

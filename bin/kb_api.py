@@ -39,6 +39,7 @@ header): otherwise a website could point its own domain at 127.0.0.1 (DNS rebind
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
 import os
 import sys
@@ -91,7 +92,7 @@ def authorized(host: str, token: str | None, header: str | None) -> bool:
     if not header:
         return False
     supplied = header[7:] if header.lower().startswith("bearer ") else header
-    return supplied == token
+    return hmac.compare_digest(supplied.encode(), token.encode())   # the time tells nothing about the token
 
 
 def host_allowed(token: str | None, host_header: str | None) -> bool:

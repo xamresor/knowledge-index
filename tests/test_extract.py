@@ -45,7 +45,7 @@ class ExtractInto(unittest.TestCase):
         self.root.mkdir()
         self.stage.mkdir()
         FakeParser.calls = []
-        patcher = mock.patch.object(extract.parsers, "for_path", return_value=FakeParser)
+        patcher = mock.patch.object(extract.parsers, "runnable", return_value=[FakeParser])
         patcher.start()
         self.addCleanup(patcher.stop)
 

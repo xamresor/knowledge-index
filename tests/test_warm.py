@@ -51,23 +51,21 @@ class Fallback(unittest.TestCase):
     def test_graph_worker_failure_falls_back_to_a_process(self):
         dead = mock.Mock(run=mock.Mock(return_value=None))
         with mock.patch.object(warm, "graph", return_value=dead), \
-                mock.patch.object(kb_core.subprocess, "run",
-                                  return_value=mock.Mock(stdout="from cli", stderr="", returncode=0)) as sp:
+                mock.patch.object(kb_core.warm, "run_capped", return_value=(0, "from cli", "", False)) as sp:
             self.assertEqual(kb_core.run(["graphify", "explain", "X", "--graph", "/g.json"]), "from cli")
             sp.assert_called_once()
 
     def test_graph_worker_answer_skips_the_process(self):
         alive = mock.Mock(run=mock.Mock(return_value="  warm answer \n"))
         with mock.patch.object(warm, "graph", return_value=alive), \
-                mock.patch.object(kb_core.subprocess, "run") as sp:
+                mock.patch.object(kb_core.warm, "run_capped") as sp:
             self.assertEqual(kb_core.run(["graphify", "path", "A", "B", "--graph", "/g.json"]), "warm answer")
             sp.assert_not_called()
 
     def test_other_commands_never_use_the_worker(self):
         alive = mock.Mock(run=mock.Mock(return_value="warm"))
         with mock.patch.object(warm, "graph", return_value=alive), \
-                mock.patch.object(kb_core.subprocess, "run",
-                                  return_value=mock.Mock(stdout="cli", stderr="", returncode=0)):
+                mock.patch.object(kb_core.warm, "run_capped", return_value=(0, "cli", "", False)):
             self.assertEqual(kb_core.run(["graphify", "merge-graphs", "a", "b"]), "cli")
             alive.run.assert_not_called()
 

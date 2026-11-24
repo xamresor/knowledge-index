@@ -19,6 +19,8 @@ name of a plugin whose folder is missing for a moment.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import sys
@@ -48,6 +50,21 @@ CORE = {"admin"}   # former add-ons that are part of the core now
 _cache: dict = {}      # {"mtime": ..., "names": frozenset}: replaced in one assignment, never changed in place
 _cache_lock = threading.Lock()
 _write_lock = threading.Lock()   # set_enabled: read, change and write the file as one step
+
+
+@contextlib.contextmanager
+def _file_lock(path: str):
+    """An exclusive flock on `<path>.lock`: a read, change and write of the file is one step also against
+    another process (the command line, a second server), not only against the threads of this one."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    fd = os.open(f"{path}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def known() -> dict[str, str]:
@@ -135,7 +152,9 @@ def set_enabled(name: str, value: bool) -> set[str]:
     if name not in known() and value:
         raise SystemExit(f"unknown add-on: {name} (one of: {', '.join(known())})")
     global _cache
-    with _write_lock:
+    with _write_lock, _file_lock(state_file()):
+        with _cache_lock:
+            _cache = {}             # the file as it is now, not a cached read of the same mtime
         names = set(_from_file())   # the file as it is: names of plugins missing right now stay
         names = (names | {name}) if value else (names - {name})
         path = state_file()
@@ -165,6 +184,9 @@ if __name__ == "__main__":  # bin/kb calls this: addons.py list | on <name> | of
                 print(f"note: {', '.join(others)} answers the sign-in already. One server has one access plugin: "
                       f"the first by name. Switch the other one off (kb addon off {others[0]}), then restart.")
         set_enabled(cmd[1], cmd[0] == "on")
+        lack = missing(cmd[1]) if cmd[0] == "on" else None
+        if lack:   # `on` downloads nothing: say what `kb addon install` would fetch
+            print(f"note: {cmd[1]}: {lack}")
         if plugins.is_access(cmd[1]):
             print(f"{cmd[1]} is an access plugin: restart kb-http for the change to take effect.")
     else:

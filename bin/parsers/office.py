@@ -9,7 +9,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from . import EXTRACTED, ExtractError
+from . import EXTRACTED, ExtractError, TransientError
 
 EXTENSIONS = (".docx", ".odt", ".rtf", ".epub")
 REQUIRES = ("pandoc",)
@@ -24,7 +24,8 @@ def extract(path: Path) -> str:
              "--wrap=none", str(path)],
             capture_output=True, text=True, timeout=300)
     except (OSError, subprocess.SubprocessError) as exc:
-        raise ExtractError(f"pandoc failed on {path.name}: {exc}") from exc
+        # A timeout or an OS error says nothing about the file: the next build tries again.
+        raise TransientError(f"pandoc failed on {path.name}: {exc}") from exc
     text = out.stdout.strip()
     if not text:
         raise ExtractError(f"{path.name}: pandoc produced nothing ({out.stderr.strip()[:120]})")

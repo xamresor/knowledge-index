@@ -8,8 +8,9 @@ running server (the Settings page of /admin): who sees which contracts. Each of 
 with its choices, its default, its description and the env variable that overrides it.
 
   * **The file.** `<config>/settings.json`, a JSON object `{"contracts": "own"}`. Only keys of the
-    registry count; anything else in the file is ignored. A write goes to a temp file and then
-    `os.replace`, so a reader sees the old file or the new one. Reads are cached by mtime: a change
+    registry count; anything else in the file is ignored. A write takes a flock on
+    `settings.json.lock`, goes to a temp file and then `os.replace`, so a reader sees the old file or the
+    new one and two processes never lose each other's change. Reads are cached by mtime: a change
     takes effect on the next call, without a restart (unless the setting says `restart`).
   * **The env variable.** When it is set, it wins, and the Settings page shows the value as locked
     ("set by KB_CONTRACTS").
@@ -20,6 +21,8 @@ CLI: `settings.py list` | `settings.py get <key>` | `settings.py set <key> <valu
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import sys
@@ -57,6 +60,21 @@ class Locked(PermissionError):
 
 _cache: dict = {}
 _lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def _file_lock(path: str):
+    """An exclusive flock on `<path>.lock`: a read, change and write of the file is one step also against
+    another process (the command line, a second server), not only against the threads of this one."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    fd = os.open(f"{path}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def state_file() -> str:
@@ -118,7 +136,7 @@ def set_value(key: str, value: str) -> None:
     if value not in s.choices:
         raise ValueError(f"{key}: one of {', '.join(s.choices)}")
     path = state_file()
-    with _lock:
+    with _lock, _file_lock(path):
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
@@ -134,6 +152,17 @@ def set_value(key: str, value: str) -> None:
             f.write("\n")
         os.replace(tmp, path)
         _cache.clear()
+
+
+def generation() -> str:
+    """A value that changes on every settings save and with the effective value of every setting (an env
+    variable too). A cursor of kb_core keys its owner on it: a cursor made under one policy (contracts
+    all) must not be read on under another (own)."""
+    try:
+        mtime = os.stat(state_file()).st_mtime_ns
+    except OSError:
+        mtime = 0
+    return ",".join(f"{k}={get(k)}" for k in sorted(REGISTRY)) + f"@{mtime}"
 
 
 def rows() -> list[dict]:

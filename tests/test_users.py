@@ -371,8 +371,10 @@ class HttpTest(unittest.TestCase):
 
     def link(self, to):
         (text,) = [t for name, t in self.mails if name == to][-1:]
-        url = re.search(r"https://kb\.public\.test/kb(/admin/reset\?t=[A-Za-z0-9_-]+)", text).group(1)
-        return url, url.split("t=")[1]
+        # The value is in the fragment: a browser never sends it, the page script puts it into the form.
+        url = re.search(r"https://kb\.public\.test/kb(/admin/reset#t=[A-Za-z0-9_-]+)", text).group(1)
+        value = url.split("t=")[1]
+        return f"/admin/reset?t={value}", value    # the form of an older link: the server still reads it
 
     def test_a_new_person_gets_a_mail_and_chooses_a_password(self):
         self.with_mail()
@@ -421,7 +423,8 @@ class HttpTest(unittest.TestCase):
         self.assertEqual(answers[0], answers[1])                           # the same page for both names
         self.assertEqual([to for to, _ in self.mails], ["lena@example.com"])
         self.assertNotIn("evil.test", self.mails[0][1])
-        self.assertIn("https://kb.public.test/kb/admin/reset?t=", self.mails[0][1])
+        self.assertIn("https://kb.public.test/kb/admin/reset#t=", self.mails[0][1])
+        self.assertNotIn("reset?t=", self.mails[0][1])      # nothing in a query that an access log keeps
 
     def test_without_mail_there_is_no_forgot_and_an_admin_gives_a_key(self):
         del self.mails[:]
@@ -469,10 +472,11 @@ class HttpTest(unittest.TestCase):
         self.assertNotIn("kbk_no", json.dumps(body))
 
     def test_permission_webhook_and_the_mcp_endpoint(self):
-        self.assertEqual(self.post_json("/local/permissions", {"protocol": 1, "projects": ["api", "web"]}, self.ann),
+        # The permission webhook answers this server only (in-process); from the network it is closed.
+        self.assertEqual(self.post_json("/local/permissions", {"protocol": 1, "projects": ["api", "web"]}, self.ann)[0],
+                         403)
+        self.assertEqual(users.permissions(self.ann, ["api", "web"], kb_core),
                          (200, {"user": {"name": "ann"}, "projects": ["api"]}))
-        self.assertEqual(self.post_json("/local/permissions", {"protocol": 1, "projects": ["api"]}, "kbk_no")[0], 401)
-        self.assertEqual(self.post_json("/local/permissions", {"protocol": 1, "projects": ["api"]})[0], 401)
         init = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
         self.assertEqual(self.post_json("/mcp", init, self.ann)[0], 200)
         self.assertEqual(self.post_json("/mcp", init, "kbk_no")[0], 401)

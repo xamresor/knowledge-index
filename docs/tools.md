@@ -28,7 +28,11 @@ A few rules that hold for every tool:
   `method`/`contains` edge.
 - **Projects.** `graph_path`, `graph_routes` and `code_grep` look at every project the caller may
   see unless `project` narrows them. `api:Customer` pins a project only when `api` is a project
-  and one `:` follows it; `OrderService::create` is a name.
+  and one `:` follows it; `OrderService::create` is a name. In `graph_explain` and `graph_affected`
+  a pin narrows the call to that project (a project the caller may not see is refused).
+- **Session scope.** When the session's own projects hold nothing for a name, `graph_explain` and
+  `graph_affected` widen to every project the caller may see, and a name defined twice there is
+  answered for each definition.
 - **Names defined twice.** `graph_explain` and `graph_affected` answer each node that carries the
   name exactly as typed (two `.create()` methods, a function and a template), up to 3.
 - **Docs and access.** A caller limited to some projects searches its own collections by name. With
@@ -44,14 +48,20 @@ A few rules that hold for every tool:
   complete scan is cached per build.
 - **`review_context`** takes a diff up to 1 MB (the shared server refuses larger request bodies) or
   `files` up to 1000 items and 200000 lines in all; a larger input is refused.
-- **`code_grep`** never shows `.env*` files or `bootstrap/cache/`, with ripgrep or with grep.
+- **`code_grep`** never shows `.env*` files or `bootstrap/cache/`, with ripgrep or with grep. A file
+  it cannot read adds a note; the matches of the other files stay.
+- **`problems`** under `contracts: own` writes another project that the caller may not see as
+  `(hidden)`, as `connections` does.
 - **Contract docs** are indexed only from inside their project's docs root: a symlink in
   `contracts/` (or a symlinked `contracts/` folder) that leaves it is skipped.
 - **Limits.** At most `KB_MAX_GRAPH_JOBS` (3) graphify or grep processes and `KB_MAX_DOCS_JOBS` (1)
   qmd processes run at once, and `KB_MAX_RUN_JOBS` (2) `run_code` programs. A call that waits more
   than `KB_JOB_WAIT` (120) seconds for a slot gets a "busy" error. The warm workers take no slot.
-  Cursors keep at most `KB_CURSOR_BYTES` (64 MB) of answers and `KB_CURSOR_PER_OWNER` (50) per
-  caller. `run_code` cuts its output and its returned value at `KB_RUN_MAX_OUTPUT` (60000)
+  Cursors keep at most `KB_CURSOR_BYTES` (64 MB) of answers; one caller keeps at most
+  `KB_CURSOR_PER_OWNER` (50) answers and an eighth of the bytes, and when the budget is full the
+  caller's own oldest answers go first. A cursor ends when the caller's grant, the `contracts`
+  setting or (where the server has it) any saved setting changes. A qmd or graphify process is
+  stopped when its output passes the answer limit. `run_code` cuts its output and its returned value at `KB_RUN_MAX_OUTPUT` (60000)
   characters each. `code_grep` stops reading at `limit` lines (1 to 500), sorted by path.
 
 ## When `search` finds nothing that fits

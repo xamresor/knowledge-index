@@ -45,16 +45,16 @@ other 4xx refusal is 403, an unreachable webhook, a 5xx answer or a body of anot
 | `KB_AUTH_MAX_CHECKS` / `KB_AUTH_CHECK_WAIT` | `16` / `2` | permission webhook calls at once; one more waits this many seconds, then `503`. A malformed token gets `401` without a call |
 | `KB_LOGIN_TIMEOUT` | `30` | the timeout of the login webhook (sign-in pages, `kb-login`) |
 | `KB_HTTP_IDLE_TIMEOUT` | `60` | a connection that sends nothing for this long closes |
-| `KB_LOGIN_LIMIT` / `KB_LOGIN_LIMIT_ALL` / `KB_LOGIN_WINDOW` | `20` / `2000` / `300` | password attempts per client address in the window (seconds) at `/admin/login`, `/authorize` and `/local/login`; then `429`. While all addresses together pass `KB_LOGIN_LIMIT_ALL`, each address gets 5 attempts: a flood slows down, a person at a fresh address still signs in. A request of this machine counts under its address; only kb-http's own calls of its webhooks (a secret header of the process) do not. `0` = no limit |
+| `KB_LOGIN_LIMIT` / `KB_LOGIN_LIMIT_ALL` / `KB_LOGIN_WINDOW` | `20` / `2000` / `300` | password attempts per client address in the window (seconds) at `/admin/login`, `/authorize` and `/local/login`; then `429`. While all addresses together pass `KB_LOGIN_LIMIT_ALL`, each address gets 5 attempts: a flood slows down, a person at a fresh address still signs in. A request of this machine counts under its address; only kb-http's own calls of its webhooks (in-process, or a secret header of the process) do not. `0` = no limit |
 | `KB_CONTRACT_EDGES` | `1` | `0` hides other repos' endpoints of `http_request` edges |
 | `KB_CONTRACTS` | `all` | who sees the contracts: `all` or `own`; set, it locks the value of the Settings page ([below](#who-sees-the-contracts)) |
 | `KB_USAGE_FILE` | `<data>/logs/usage.json` | tool usage: one SQLite row per call in `usage.sqlite` next to this name (an old `usage.json` is imported once); every call is written at once, rows older than 90 days go once an hour. `kb-http usage` prints the report with user names; the MCP tool `usage` without |
 | `KB_WARM` | `1` | `0` = no long-lived graphify / qmd: one process per call, as before |
 | `KB_GRAPH_CACHE_FILES` / `KB_GRAPH_VIEWS` | `2` / `8` | graph files the graphify worker keeps parsed / views it keeps cut in memory (two per caller project set) |
-| `KB_OAUTH` | `on` | `off` = no browser sign-in, bearer tokens only |
+| `KB_OAUTH` | `on` | `off` = no browser sign-in of MCP clients, bearer tokens only. The admin pages and their sign-in stay |
 | `KB_LOGIN_ENV` | `<data>/kb-login.env`, then `<data>/deploy/kb-login.env` | a KEY=VALUE file with `KB_LOGIN_URL` and `KB_HOOK_HEADERS` |
 | `KB_OAUTH_TOKEN_TTL` | `28800` | lifetime of an access token of the browser sign-in (`kbo_…`), the `expires_in` the client is told. It stands for the login webhook's token; a refresh gives a new one while that token lives. Access tokens live in memory: a restart means one more browser sign-in |
-| `KB_OAUTH_MAX_CLIENTS` / `KB_OAUTH_MAX_URIS` / `KB_OAUTH_MAX_URI_LENGTH` | `1000` / `10` / `512` | registered clients, redirect URIs per client, characters per URI |
+| `KB_OAUTH_MAX_CLIENTS` / `KB_OAUTH_MAX_URIS` / `KB_OAUTH_MAX_URI_LENGTH` | `1000` / `10` / `512` | registered clients, redirect URIs per client, characters per URI. `/token` answers a client it does not know (revoked by an admin, or pushed out of a full list) with `401 invalid_client`: the MCP client then registers again |
 | `KB_OAUTH_MAX_TXNS` / `KB_OAUTH_TXNS_PER_CLIENT` / `KB_OAUTH_TXNS_PER_ADDRESS` | `1000` / `20` / `10` | browser sign-ins in progress, in all, per client and per client address. An address over its limit loses its own oldest; a full list loses one of the busiest address or one older than a minute, never a fresh sign-in of another person: then the new one gets `503` |
 | `KB_TRUSTED_PROXIES` | — | proxy addresses or networks besides loopback whose last `X-Forwarded-For` entry is the client (e.g. `172.17.0.0/16` for nginx outside a Docker container) |
 | `KB_OAUTH_AUTHORIZE_LIMIT` | `60` | `GET /authorize` per address in 5 minutes |
@@ -87,7 +87,21 @@ or the person signs in with the user name and a token in the password field of t
 `kb-login`. A key or token shows once; `<data>/users.json` (owner only) keeps its SHA-256. It lives until
 its owner or an admin removes it, or an admin disables or removes the user. With the add-on on,
 `KB_PERMISSION_URL` and `KB_LOGIN_URL` default to the server itself (`/local/permissions`,
-`/local/login`); set them only to use another system.
+`/local/login`); set them only to use another system. kb-http calls the plugin in-process for both, with
+no HTTP request, when the URL is this server: loopback on its own port, or the host of `KB_PUBLIC_URL` /
+`KB_PUBLIC_LOGIN_URL` with any path prefix (`https://kb.example.com/kb/local/login`). Each sign-in then counts
+under the address of the person, not of the server. At the start kb-http logs a warning for a `/local/…`
+URL it does not recognise as itself. `/local/permissions` answers only this server; from the network it is
+`403` (an open, uncached token check would be a proxy to the plugin). `/local/login` stays public for
+`kb-login`.
+
+Every password sign-in makes a sign-in token. An agent (browser sign-in of an MCP client, `kb-login`) keeps
+its 10 most recently used, and the admin pages their own 10: page sign-ins never push out the token of an
+agent. A page sign-in token ends with its session (sign-out, 8 hours, or an admin change). A sign-in token
+also ends after 30 days without a request. At most 4 password hashes run at once (about 16 MiB each); one
+more waits 5 seconds, then the sign-in gets `503`. A users file that cannot be written (a full disk, a
+read-only folder) does not stop the tokens: the "last used" time stays in memory, the server logs it once,
+and a password sign-in gets a clear `503`.
 
 With mail set up (`<data>/smtp.env`, owner only: `KB_SMTP_HOST`, `KB_SMTP_PORT`, `KB_SMTP_USER`,
 `KB_SMTP_PASSWORD`, `KB_SMTP_FROM`, `KB_SMTP_TLS`, and `KB_PUBLIC_URL`, the address of the server that goes
@@ -95,7 +109,11 @@ into a mail), a user name is the e-mail of the person and nobody hands a key ove
 with a link and chooses a password. "Forgot the password?" on the sign-in page and "Reset password" on the
 Users tab send the same mail. The password signs the person in to the pages and at the browser sign-in of
 an agent; tokens stay the way for a header. A "forgot" mail does not end a pending invite: both links work
-until one sets the password.
+until one sets the password. The link carries its one-time value after `#` (`/admin/reset#t=…`): a browser
+never sends that part, so no access log of nginx or of a proxy keeps it. A small script of the page (the
+only script of the admin pages, allowed by its hash in the CSP) puts it into the form. A link of an older
+version (`?t=`) still works. "New key" and a save that takes nothing away keep the person signed in; a
+revoke, a removal, a disable, a lost admin right or a lost project end the sessions of the person.
 
 Five wrong passwords from one address shut the sign-in of that name from that address for 15 minutes; the
 owner signs in from another address. An admin cannot save the own row without a project: the permission
@@ -110,21 +128,25 @@ The contract is in `bin/plugins.py`. One server has one access plugin: the first
 server logs a warning when more are on. The Settings page does not switch an access plugin off and does
 not switch on a second one: after a restart nobody could sign in to undo it. The plugin the server
 started with is protected by its name, whatever its source looks like. Do it on the server
-(`kb addon off <name>`, `kb addon on <name>`), then restart. Without an access plugin and without
+(`kb addon off <name>`, `kb addon on <name>`: only the switch, nothing is downloaded), then restart. Without an access plugin and without
 `KB_PERMISSION_URL`, or with `KB_PERMISSION_URL` on the server's own `/local/permissions` and no access
 plugin, kb-http does not start and says how to switch the plugin back on. The admin pages show the access
 plugin the server started with until the next restart.
 
 **Admin pages (`/admin`).** They are part of the core, not an add-on. For the users named in `KB_ADMINS` (comma-separated) or in `<data>/admins.txt`
-(one per line), matched against the `uname`, `username`, `name`, `id` or `uid` the permission webhook
-returns, or for the admins an access plugin names (`contrib/users`); nobody else gets more than a 404.
+(one per line), matched against the `uname`, `username`, `id` or `uid` the permission webhook
+returns, or for the admins an access plugin names (`contrib/users`); nobody else gets more than a 404. The
+display `name` never makes an admin: a system that lets a person choose the own name must not let that
+person become one. Give the webhook a `uname` (or `id`) and name that in `KB_ADMINS`. Without a login
+webhook (`KB_LOGIN_URL`) there is no sign-in and the pages are a 404; `KB_OAUTH=off` does not remove them.
 Sign-in goes through the login webhook with its second factor, then
 an HttpOnly, SameSite=Strict session cookie (8 hours) and a CSRF token on every form. Every request checks
 the token of the session again (cached `KB_AUTH_CACHE_SECONDS`): a removed token or a new password ends the
 session, and an admin who lost the right keeps only the pages of a member. Pages: status
 (version, graph, the last builds, warm helpers, a rebuild button), index (charts: graph make-up,
 storage per index, documents and embedded chunks per project, build times, answer time per tool,
-calls per day), usage, sign-in clients (revoke one) and settings. Plain HTML and server-drawn SVG, no scripts.
+calls per day), usage, sign-in clients (revoke one) and settings. Plain HTML and server-drawn SVG; the only
+script is the one of a password link (above), allowed by its hash.
 An `addons.json` of an older version that still names `admin` keeps working: the name is ignored.
 
 **Settings (`/admin/settings`).** Admins only; a member gets 403. Two parts:

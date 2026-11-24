@@ -19,8 +19,13 @@ protocol (docs/access-protocol.md) from it, at `/local/login` and `/local/permis
 `ACCESS = True`: the Settings page reads that line without loading the plugin (without it, a plugin.py
 that defines both functions itself counts, one that imports them does not):
 
-  def login(body, core) -> (status, body) or (status, body, headers)   # body["ip"]: the client address
+  def login(body, core) -> (status, body) or (status, body, headers)   # body["ip"]: the client address,
+                                     # body["purpose"]: "page" for the admin pages, else "agent"
   def permissions(token, projects, core) -> (status, body)
+  def logout(token, core) -> None    # optional: an admin session on this token ended
+
+When the webhook URLs are this server, kb-http calls these functions in-process, not over HTTP;
+`/local/permissions` answers only this server.
 
 It may bring pages to `/admin` as well (the plugin `contrib/users` does: users, rights, tokens):
 

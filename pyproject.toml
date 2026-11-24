@@ -53,6 +53,7 @@ include = [
   "knowledge_index",
   "bin",
   "web",
+  "contrib",
   "VERSION",
   "Makefile",
   "kb.projects.toml.example",
@@ -69,6 +70,7 @@ exclude = ["web/vendor", "sandbox/node_modules", "**/__pycache__"]
 [tool.hatch.build.targets.wheel.force-include]
 bin = "bin"
 web = "web"
+contrib = "contrib"                  # the access plugin `kb addon install contrib/users` names
 VERSION = "VERSION"
 "kb.projects.toml.example" = "kb.projects.toml.example"
 "aliases.toml.example" = "aliases.toml.example"
@@ -80,7 +82,8 @@ VERSION = "VERSION"
 "sandbox/socket-server.mjs" = "sandbox/socket-server.mjs"
 
 [tool.hatch.build.targets.sdist]
-include = ["bin", "web", "tests", "knowledge_index", "VERSION", "Makefile", "README.md",
+include = ["bin", "web", "contrib", "tests", "knowledge_index", "VERSION", "Makefile", "README.md",
+           "Dockerfile", ".dockerignore", "docker",
            "CHANGELOG.md", "LICENSE", "*.example", "kb.hubs.txt", "docs", "skills", "examples",
            "sandbox/package.json", "sandbox/package-lock.json", "sandbox/runner.mjs",
            "sandbox/socket-server.mjs"]

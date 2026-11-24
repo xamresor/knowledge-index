@@ -12,7 +12,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from . import EXTRACTED, ExtractError
+from . import EXTRACTED, ExtractError, TransientError
 
 EXTENSIONS = (".pdf",)
 REQUIRES = ("pdftotext",)
@@ -25,7 +25,8 @@ def extract(path: Path) -> str:
         out = subprocess.run(["pdftotext", "-layout", str(path), "-"],
                              capture_output=True, text=True, timeout=180)
     except (OSError, subprocess.SubprocessError) as exc:
-        raise ExtractError(f"pdftotext failed on {path.name}: {exc}") from exc
+        # A timeout or an OS error says nothing about the file: the next build tries again.
+        raise TransientError(f"pdftotext failed on {path.name}: {exc}") from exc
     text = out.stdout.strip()
     if len(text) < 40:
         # Almost nothing came out: most likely a scan. Say so rather than indexing an empty document.

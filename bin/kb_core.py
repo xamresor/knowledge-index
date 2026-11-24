@@ -47,6 +47,7 @@ import datadict
 import docs_grade
 import paths
 import query_build
+import settings
 import warm
 from alias_expand import expand as expand_aliases, load_aliases
 
@@ -230,6 +231,9 @@ def graph_call(cmd: list[str], args: dict, allowed: set[str] | None, *terms: str
     if cmd[1] == "affected":
         extra = [x for r in AFFECTED_RELATIONS for x in ("--relation", r)]
 
+    if cmd[1] in ("explain", "affected") and terms:
+        cmd, args, terms = _pinned(cmd, args, allowed, terms)
+
     warm_ok = [True]   # the worker failed once in this call: the rest of the call runs processes
 
     def ask(projects: set[str] | None, c: list[str] | None = None) -> tuple[str, dict]:
@@ -251,8 +255,11 @@ def graph_call(cmd: list[str], args: dict, allowed: set[str] | None, *terms: str
         graph = graph_of(projects)
         return run([*c, "--graph", graph, *extra], warm_ok=False), {"graph": graph}
 
-    projects, label, auto = scope_projects(args, allowed)
-    if cmd[1] in ("explain", "affected") and terms:
+    def answer_picked(projects: set[str] | None, label: str) -> str | None:
+        """The answer for a name that the picks below resolve (a member, a class, a name defined
+        twice) in this scope; None when they do not apply."""
+        if cmd[1] not in ("explain", "affected") or not terms:
+            return None
         scope = projects if projects is not None else allowed
         picked = (_pick_member(terms[0], scope) or _pick_classes(terms[0], scope)
                   or _pick_same_name(terms[0], scope))
@@ -276,12 +283,22 @@ def graph_call(cmd: list[str], args: dict, allowed: set[str] | None, *terms: str
                 out += (f"\n\n(Also named like this, not shown: {shown}{more}. Ask for one by its node ID "
                         "or as Class.method.)")
             return f"[projects: {label}]\n\n{out}"
+        return None
+
+    projects, label, auto = scope_projects(args, allowed)
+    picked_out = answer_picked(projects, label)
+    if picked_out is not None:
+        return picked_out
     out, where = ask(projects)
     if auto and _no_match(out):
-        out, where = ask(allowed)
-        label = f"all (nothing in {label[:-7]})"
+        # the session's projects had nothing: everything below works on the widened scope
+        projects, label = allowed, f"all (nothing in {label[:-7]})"
+        picked_out = answer_picked(projects, label)
+        if picked_out is not None:
+            return picked_out
+        out, where = ask(projects)
     if cmd[1] == "explain":
-        out = _full_connections(out, projects if not (auto and "all (" in label) else allowed)
+        out = _full_connections(out, projects)
     if terms:
         out = with_suggestions(out, *terms, **where)
     if cmd[1] in ("explain", "affected") and "EXACT labels" in out:
@@ -306,6 +323,26 @@ def graph_call(cmd: list[str], args: dict, allowed: set[str] | None, *terms: str
     if cmd[1] == "query":
         out = _mcp_hint(out)
     return f"[projects: {label}]\n\n{out}"
+
+
+_PIN = re.compile(r"^([\w-]+):(?!:)(.+)$")
+
+
+def _pinned(cmd: list[str], args: dict, allowed: set[str] | None, terms: tuple):
+    """`api:Customer` in graph_explain / graph_affected: the name `Customer` in the project `api`. The
+    prefix pins only when it is a known project (`OrderService::create` stays a name); a project the
+    caller may not see is refused like an unknown one, and a pin outside an explicit `project` is
+    refused too. -> (cmd, args, terms) with the bare name and the scope narrowed to the project."""
+    m = _PIN.match(terms[0].strip())
+    if not m or m.group(1) not in PROJECTS:
+        return cmd, args, terms
+    repo, name = m.group(1), m.group(2).strip()
+    if allowed is not None and repo not in allowed:
+        raise ToolError(f"unknown or not allowed project: {repo}")
+    want = (args.get("project") or "").strip()
+    if want and want.lower() != "all" and repo not in {n.strip() for n in want.split(",")}:
+        raise ToolError(f"'{terms[0]}' pins the project {repo}, which is not in project: {want}")
+    return ([*cmd[:2], name, *cmd[3:]], {**args, "project": repo}, (name, *terms[1:]))
 
 
 CLASS_TYPES = {"model", "controller", "class", "service", "interface", "trait", "enum"}
@@ -383,7 +420,7 @@ def _explain_node(row: tuple, projects: set[str] | None) -> str:
     lst = worker.run(argv, view) if worker is not None else None
     if lst is None:
         lst = _graph_once(argv, view)
-    lst = (lst or "").strip() or "All connections (0):"
+    lst = _cap_text((lst or "").strip()) or "All connections (0):"
     return f"Node: {lab}\n  ID:        {nid}\n  Source:    {file}\n  Type:      {typ}\n  Project:   {repo}\n\n{lst}"
 
 
@@ -403,7 +440,15 @@ def _full_connections(out: str, projects: set[str] | None) -> str:
     if not lst:
         return out
     head = re.split(r"(?m)^Connections \(\d+\):$", out)[0].rstrip()
-    return head + "\n\n" + lst.strip()
+    return head + "\n\n" + _cap_text(lst.strip())
+
+
+def _cap_text(text: str) -> str:
+    """At most MAX_OUT characters of a producer's text, cut on a line end, with a note."""
+    if len(text) <= MAX_OUT:
+        return text
+    cut = text.rfind("\n", 0, MAX_OUT)
+    return text[:cut if cut > 0 else MAX_OUT] + f"\n… (cut at {MAX_OUT} characters: narrow the call)"
 
 
 def graph_routes(args: dict, allowed: set[str] | None) -> str:
@@ -523,9 +568,21 @@ def _grep_root(cmd: list[str], root: str, name: str, path_glob: str, lines: list
         if stopped.is_set():
             return True
         if code not in (0, 1):
+            # Exit 2 also means "a file could not be read", even when other files matched: keep
+            # those matches. Only an error that is not about a file is a bad pattern.
             err.seek(0)
-            raise ToolError(f"code_grep: bad pattern: {err.read(1000).strip()[:200]}")
+            text = err.read(20_000)
+            other = [e for e in text.splitlines() if e.strip() and not _FILE_ERROR.search(e)]
+            if other:
+                raise ToolError(f"code_grep: bad pattern: {' '.join(e.strip() for e in other)[:200]}")
+            lines.append(f"{name}: (some files could not be read; the other matches are shown)")
     return False
+
+
+# grep / rg messages about one file, not about the pattern
+_FILE_ERROR = re.compile(r"Permission denied|No such file or directory|Input/output error|Is a directory|"
+                         r"Too many levels of symbolic links|Operation not permitted|binary file matches",
+                         re.IGNORECASE)
 
 
 def _visible_routes(allowed: set[str] | None) -> list[dict]:
@@ -978,6 +1035,9 @@ def _slots(cmd: list[str]) -> _Job | None:
     return None
 
 
+PROC_MAX_BYTES = 16_000_000   # a process whose whole output is parsed (qmd --format json)
+
+
 def run(cmd: list[str], cwd: str | None = None, timeout: int = TIMEOUT_GRAPH,
         limit: int | None = MAX_OUT, warm_ok: bool = True) -> str:
     """Run a qmd or graphify command. A graph lookup goes to the warm worker first, unless the caller
@@ -989,9 +1049,14 @@ def run(cmd: list[str], cwd: str | None = None, timeout: int = TIMEOUT_GRAPH,
             out = out.strip()
             return (out[:limit] if limit else out) or "(no results)"
     try:
+        # stdout is read as it comes and the process is stopped past the byte limit (4 bytes per
+        # character at most in UTF-8), so a huge answer never sits whole in memory
         with _slots(cmd) or contextlib.nullcontext():
-            p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
-        out = (p.stdout or "") + (("\n[stderr] " + p.stderr) if p.returncode and p.stderr else "")
+            code, stdout, stderr, cut = warm.run_capped(cmd, (limit or 0) * 4 or PROC_MAX_BYTES,
+                                                        timeout, cwd=cwd)
+        if cut:
+            code = 0   # stopped by us at the limit, not a failure of the tool
+        out = (stdout or "") + (("\n[stderr] " + stderr) if code and stderr else "")
         out = out.strip()
         return (out[:limit] if limit else out) or "(no results)"
     except subprocess.TimeoutExpired:
@@ -1338,7 +1403,22 @@ def _searches(args: dict, q: str) -> tuple[list[dict], str | None]:
             intent = text
         elif kind in ("lex", "vec", "hyde"):
             searches.append({"type": kind, "query": text})
-    return searches or [{"type": "lex", "query": q}, {"type": "vec", "query": q}], intent
+    return _cap_searches(searches) or [{"type": "lex", "query": q}, {"type": "vec", "query": q}], intent
+
+
+QMD_MAX_SEARCHES = 10   # qmd's MCP `query` refuses a call with more sub-queries than this
+
+
+def _cap_searches(searches: list[dict]) -> list[dict]:
+    """At most QMD_MAX_SEARCHES sub-queries. The vec/hyde lines stay; the lex lines that go are the
+    least specific ones (the shortest words), and the kept ones keep their order."""
+    if len(searches) <= QMD_MAX_SEARCHES:
+        return searches
+    other = [i for i, s in enumerate(searches) if s["type"] != "lex"][:QMD_MAX_SEARCHES]
+    lex = [i for i, s in enumerate(searches) if s["type"] == "lex"]
+    room = QMD_MAX_SEARCHES - len(other)
+    keep = set(other) | set(sorted(lex, key=lambda i: (-len(searches[i]["query"]), i))[:room])
+    return [s for i, s in enumerate(searches) if i in keep]
 
 
 def _docs_warm(args: dict, q: str) -> list[dict] | None:
@@ -1486,6 +1566,11 @@ def graph_for(allowed: set[str] | None) -> str:
 
 
 def docs_get(path: str, allowed: set[str] | None = None) -> str:
+    """One document by its path or id. The answer is read up to MAX_OUT characters (the process is
+    stopped there). A limited caller: a `qmd://` path of a project it may not see is refused before
+    qmd runs; a fuzzy id or partial path is checked on the path qmd resolved."""
+    if allowed is not None and path.strip().startswith("qmd://") and not access.doc_allowed(path, allowed):
+        return "(document not found in your projects)"
     out = run(["qmd", "get", path], cwd=KB, timeout=TIMEOUT_DOCS)
     if allowed is None:
         return out
@@ -1573,11 +1658,11 @@ def _call_tool(name: str, args: dict, allowed: set[str] | None = None, caller: s
         first = paginate(text, page, length)
         if "[page " not in first:
             return first
-        return paginate(text, page, length, CURSORS.put(text, name, (caller, frozenset(allowed) if allowed is not None else None),
+        return paginate(text, page, length, CURSORS.put(text, name, _cursor_owner(caller, allowed),
                                                         length, page))
     if name in UNPAGED:
         return _dispatch(name, args, allowed)
-    owner = (caller, frozenset(allowed) if allowed is not None else None)
+    owner = _cursor_owner(caller, allowed)
     if cursor:   # a cursor alone: the page after the last one served; the size it was cut with
         if nested:   # read a page, never move the caller's own cursor
             text, state = CURSORS.get(cursor, name, owner)
@@ -1603,6 +1688,16 @@ def _call_tool(name: str, args: dict, allowed: set[str] | None = None, caller: s
     return paginate(text, page, length, token)
 
 
+def _cursor_owner(caller, allowed: set[str] | None) -> tuple:
+    """Who may read a cursor: the caller, its projects, the kind of grant (a list of names or every
+    project), the contracts mode and the settings generation. A change of any of them (a new grant, a
+    switch of `contracts`, any settings save) makes the old cursors "expired" instead of serving text
+    cut under the old policy."""
+    gen = getattr(settings, "generation", None)   # missing in a copy without it
+    return (caller, frozenset(allowed) if allowed is not None else None,
+            isinstance(allowed, AllProjects), access.contract_mode(), gen() if callable(gen) else None)
+
+
 def _whole(text: str, page: int | None, length: int | None) -> str:
     """The answer of a nested call: all of it up to MAX_OUT, or the page asked for without a cursor
     (a program's calls must not push its caller's own cursors out)."""
@@ -1615,13 +1710,17 @@ def _whole(text: str, page: int | None, length: int | None) -> str:
 
 class Cursors:
     """Answers kept for their next pages: a random token -> (text, tool, owner, expiry, state, bytes).
-    In memory, per process, bounded three ways: at most `cap` answers, `max_bytes` of text in all and
-    `per_owner` answers per caller (one caller cannot push the others' answers out); each lives `ttl`
+    In memory, per process, bounded four ways: at most `cap` answers, `max_bytes` of text in all,
+    `per_owner` answers and `owner_bytes` bytes per caller (one caller cannot push the others' answers
+    out; under pressure a caller's own oldest answers go first); each lives `ttl`
     seconds. A token works only for the tool, the caller and the projects that made it: another
     caller gets "expired", not someone's answer."""
 
-    def __init__(self, ttl: float, cap: int, max_bytes: int = 64_000_000, per_owner: int = 50):
+    def __init__(self, ttl: float, cap: int, max_bytes: int = 64_000_000, per_owner: int = 50,
+                 owner_bytes: int | None = None):
         self.ttl, self.cap, self.max_bytes, self.per_owner = ttl, cap, max_bytes, per_owner
+        # one caller may hold at most this many bytes, so it cannot use up the budget of the others
+        self.owner_bytes = owner_bytes if owner_bytes is not None else max(1, max_bytes // 8)
         self.items: "OrderedDict[str, tuple]" = OrderedDict()
         self.bytes = 0
         self.lock = threading.Lock()
@@ -1629,15 +1728,23 @@ class Cursors:
     def put(self, text: str, tool: str, owner: tuple, size: int | None = None, page: int = 1) -> str | None:
         """-> the token; None when the answer alone is larger than the whole budget (not kept)."""
         nbytes = len(text.encode("utf-8", "replace"))
-        if nbytes > self.max_bytes:
+        if nbytes > min(self.max_bytes, self.owner_bytes):
             return None
         token = "c_" + secrets.token_urlsafe(12)
         with self.lock:
             self._expire()
             mine = [k for k, v in self.items.items() if v[2] == owner]
-            while len(mine) >= self.per_owner:
+            held = sum(self.items[k][5] for k in mine)
+            while mine and (len(mine) >= self.per_owner or held + nbytes > self.owner_bytes):
+                held -= self.items[mine[0]][5]
                 self._drop(mine.pop(0))
-            while self.items and (len(self.items) >= self.cap or self.bytes + nbytes > self.max_bytes):
+
+            def full() -> bool:
+                return bool(self.items) and (len(self.items) >= self.cap
+                                             or self.bytes + nbytes > self.max_bytes)
+            while mine and full():      # under pressure the caller's own oldest answers go first
+                self._drop(mine.pop(0))
+            while full():
                 self._drop(next(iter(self.items)))
             self.items[token] = (text, tool, owner, time.monotonic() + self.ttl,
                                  {"size": size, "page": page}, nbytes)
@@ -1883,7 +1990,8 @@ def _dispatch(name: str, args: dict, allowed: set[str] | None) -> str:
         return _index(contracts.connections, args.get("service", ""), None, _contract_view(allowed))
     if name == "problems":
         extra = (datadict.problems(GRAPH, allowed, set(PROJECTS)) if addons.on("datadict") else None)
-        return _index(contracts.problems, args.get("project", ""), allowed, None, extra)
+        return _index(contracts.problems, args.get("project", ""), allowed, None, extra,
+                      _contract_view(allowed))
     if name in PLUGIN_TOOLS:
         return str(PLUGIN_TOOLS[name].call(name, args, allowed, sys.modules[__name__]))
     if name == "version":

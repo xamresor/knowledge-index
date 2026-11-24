@@ -94,10 +94,8 @@ def link(g: dict, repos_dir: str) -> int:
     added = 0
     for (repo, f), starts in per_file.items():
         path = os.path.join(repos_dir, repo, f)
-        try:
-            with open(path, encoding="utf-8", errors="replace") as fh:
-                text = fh.read()
-        except OSError:
+        text = graph.read_source(path, os.path.join(repos_dir, repo))
+        if text is None:
             continue
         starts.sort()
         props = {name: _short(t) for t, name in PROP_RE.findall(text) if _short(t) not in SCALARS}

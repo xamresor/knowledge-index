@@ -162,7 +162,8 @@ class OAuthClientRevokedMeanwhile(unittest.TestCase):
         self.srv.check_token = lambda t: self.srv.revoke(self.cid)
         with self.assertRaises(oauth.OAuthError) as e:
             self.srv.token({"grant_type": "refresh_token", "refresh_token": tok["refresh_token"]})
-        self.assertEqual(e.exception.error, "invalid_grant")
+        # A revoked client: 401 invalid_client, so the MCP client registers again (third audit round).
+        self.assertEqual((e.exception.status, e.exception.error), (401, "invalid_client"))
         self.assertEqual((self.srv.refresh, self.srv.access), ({}, {}))
 
     def test_a_token_of_a_removed_client_does_not_resolve(self):
@@ -326,7 +327,7 @@ class FailedReExtractionDropsTheOldText(unittest.TestCase):
             def run(parser):
                 with mock.patch("sys.stdin", io.StringIO(f"{pdf}\0")), mock.patch("sys.stdout", io.StringIO()), \
                         mock.patch("sys.stderr", io.StringIO()), \
-                        mock.patch.object(extract.parsers, "for_path", return_value=parser), \
+                        mock.patch.object(extract.parsers, "runnable", return_value=[parser]), \
                         mock.patch.object(extract.parsers, "with_provenance", lambda text, p, m: text):
                     extract.main(["--into", str(stage), "--root", str(root), "--prune", "--from0"])
             run(Good)

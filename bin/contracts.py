@@ -251,6 +251,11 @@ def contracts_search(q: str, path: str | None = None, limit: int = CONTRACTS_RES
         if visible is not None:
             callers = [x for x in c["callers"] if x["repo"] in visible]
             if c["project"] not in visible:
+                # match the bare endpoint first: the declared callers cost a walk over the service
+                # map, so they are found only for the routes that match
+                bare_hay = " ".join([c["method"], c["uri"], norm_uri(c["uri"])]).lower()
+                if not all(w.strip("/") in bare_hay for w in words):
+                    continue
                 declared = declared_callers(c, conn)
                 if not callers and not declared:
                     continue
@@ -384,8 +389,12 @@ def build_problems(docs: dict[str, str], calls: dict[str, tuple[str, list[str]]]
     """
     out: list[dict] = []
 
-    def add(project: str, kind: str, where: str, message: str) -> None:
-        out.append({"project": project, "kind": kind, "where": where, "message": message})
+    def add(project: str, kind: str, where: str, message: str, others: list[str] | None = None) -> None:
+        # `others`: the other projects the row names, hidden from a caller who may not see them
+        row = {"project": project, "kind": kind, "where": where, "message": message}
+        if others:
+            row["others"] = others
+        out.append(row)
 
     for project, root in sorted(docs.items()):
         if not os.path.isdir(os.path.join(root, CONTRACT_DOCS_DIR)):
@@ -409,7 +418,7 @@ def build_problems(docs: dict[str, str], calls: dict[str, tuple[str, list[str]]]
         if not r.get("doc") and (r["from"], r["to"]) not in documented:
             add(r["from"], "missing-contract", f"{r['from']} -> {r['to']}",
                 f"The code calls {r['to']} ({r['protocol']}, {r['summary'].split(' (')[0]}), "
-                f"but no {CONTRACT_DOCS_DIR}/*.md has from: {r['from']}, to: {r['to']}.")
+                f"but no {CONTRACT_DOCS_DIR}/*.md has from: {r['from']}, to: {r['to']}.", [r["to"]])
 
     # Frontend call sites without a route: the same scanner as link_http.py.
     import lang  # noqa: PLC0415
@@ -449,13 +458,36 @@ def build_problems(docs: dict[str, str], calls: dict[str, tuple[str, list[str]]]
                                 or known(verb, uri):
                             continue
                         add(fe, "unknown-route", f"{os.path.relpath(fp, base)}:L{i}",
-                            f"Calls {verb.upper()} {raw}, but {' / '.join(apis)} has no such route.")
+                            f"Calls {verb.upper()} {raw}, but {' / '.join(apis)} has no such route.",
+                            [a for a in apis if a != fe])
     return out
 
 
+def _other_ends(r: dict) -> list[str]:
+    """The other projects a problem row names. An index built before the `others` field: read them
+    from the text of the row."""
+    if "others" in r:
+        return list(r["others"])
+    if r.get("kind") == "missing-contract":
+        return [str(r.get("where", "")).partition(" -> ")[2]]
+    m = re.search(r", but (.+) has no such route\.$", str(r.get("message", "")))
+    return m.group(1).split(" / ") if r.get("kind") == "unknown-route" and m else []
+
+
+def _hide_ends(r: dict, visible: set[str]) -> dict:
+    """The row with every other project that `visible` does not hold written as "(hidden)"."""
+    hidden = [o for o in _other_ends(r) if o and o not in visible]
+    if not hidden:
+        return r
+    pat = re.compile(r"(?<![\w-])(?:" + "|".join(re.escape(o) for o in hidden) + r")(?![\w-])")
+    return {**r, "where": pat.sub(HIDDEN, str(r["where"])), "message": pat.sub(HIDDEN, str(r["message"]))}
+
+
 def problems(project: str, allowed: set[str] | None, path: str | None = None,
-             extra: list[dict] | None = None) -> str:
-    """`extra`: rows an add-on finds at call time (the data dictionary), merged with the built index."""
+             extra: list[dict] | None = None, visible: set[str] | None = None) -> str:
+    """`extra`: rows an add-on finds at call time (the data dictionary), merged with the built index.
+    `visible`: the projects whose contracts the caller sees (`contracts: own`); another project that
+    a row names is written as "(hidden)", as `connections` does. None = every name shows."""
     try:
         rows = load_index(path or PROBLEMS)
     except NotBuilt:
@@ -473,6 +505,8 @@ def problems(project: str, allowed: set[str] | None, path: str | None = None,
         rows = [r for r in rows if str(r["project"]).lower() == p or str(r["kind"]).lower() == p]
     if not rows:
         return "(no problems" + (" in your projects)" if allowed is not None else ")")
+    if visible is not None:
+        rows = [_hide_ends(r, visible) for r in rows]
     rows = sorted(rows, key=lambda r: (r["project"], r["kind"], r["where"]))
     counts: dict[str, int] = {}
     for r in rows:

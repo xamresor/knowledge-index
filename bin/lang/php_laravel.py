@@ -22,6 +22,8 @@ from __future__ import annotations
 import os
 import re
 
+import graph as graph_io
+
 from . import PHP
 
 NAME = "php_laravel"
@@ -164,13 +166,10 @@ def walk(root: str):
                 yield os.path.join(dirpath, filename)
 
 
-def read(path: str) -> str | None:
-    """File text, or None if it cannot be read — a bad file must not stop a build."""
-    try:
-        with open(path, encoding="utf-8", errors="ignore") as handle:
-            return handle.read()
-    except OSError:
-        return None
+def read(path: str, root: str | None = None) -> str | None:
+    """File text, or None if it cannot be read — a bad file must not stop a build. A device, a pipe
+    or (with `root`) a link out of `root` is not read; a long file is cut (graph.read_source)."""
+    return graph_io.read_source(path, root)
 
 
 def declared_tables(repos_dir: str) -> dict[tuple[str, str], str]:
@@ -185,7 +184,7 @@ def declared_tables(repos_dir: str) -> dict[tuple[str, str], str]:
             if not filename.endswith(EXTENSIONS):
                 continue
             path = os.path.join(dirpath, filename)
-            text = read(path)
+            text = read(path, graph_io.staged_root(path, repos_dir))
             if text is None:
                 continue
             table, cls = TABLE_PROP.search(text), CLASS_ANYWHERE.search(text)

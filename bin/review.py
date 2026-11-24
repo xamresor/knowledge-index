@@ -19,6 +19,7 @@ It runs in the graph worker (bin/graph_worker.py) on the caller's view, so acces
 from __future__ import annotations
 
 import re
+from bisect import bisect_right
 from collections import defaultdict, deque
 
 # kb-http refuses a request body over 1 MB, so a larger diff never reaches the tool there.
@@ -172,15 +173,16 @@ def analyze(graph: dict, changes: dict[str, set[int]], routes: list[dict] | None
                     if n.get("type") in CONTAINER_TYPES:
                         changed[n["id"]] = "file changed"
                 continue
-            for ln in sorted(lines):
-                owner = None
-                for n in syms:
-                    if 0 < _line(n) <= ln:
-                        owner = n
-                    elif _line(n) > ln:
-                        break
-                if owner is not None:
-                    changed.setdefault(owner["id"], "changed lines")
+            # start line of each symbol, computed once; a changed line belongs to the last symbol
+            # that starts at or before it (a binary search, not a walk over all symbols per line)
+            syms = [n for n in syms if _line(n) > 0]
+            starts = [_line(n) for n in syms]
+            if not starts:
+                continue
+            owners = {bisect_right(starts, min(ln, starts[-1])) - 1 for ln in lines}
+            for i in sorted(owners):
+                if i >= 0:
+                    changed.setdefault(syms[i]["id"], "changed lines")
 
     # who depends on the changed symbols: walk edges backwards (source depends on target)
     rev: dict[str, list[tuple[str, str]]] = defaultdict(list)

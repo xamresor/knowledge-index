@@ -69,13 +69,14 @@ Content-Type: application/json
 | Answer | Meaning |
 |---|---|
 | `200 {"user": {"name": "ann", …}, "projects": ["api", "web"]}` | these projects; names not in the question are ignored |
-| `200 {"user": {…}, "projects": "*"}` | every project of the question |
+| `200 {"user": {…}, "projects": "*"}` | every project of the question; on a server without projects yet, the person still signs in to the admin pages |
 | `401` | the token is unknown or expired: the client signs in again |
 | `403`, another `4xx`, or `200` with an empty list | the person may not use the KB (`403`) |
 | unreachable, a `5xx` answer, or a body of another shape | an outage: `503`, not cached. The admin pages show "not available", and a refresh of the browser sign-in keeps its refresh token for the next try |
 
 `user` may hold any fields; the KB shows the first of `name`, `uname`, `username`, `id`, `uid` in its
-logs and admin pages, and matches `KB_ADMINS` against them.
+logs and admin pages. It matches `KB_ADMINS` only against `uname`, `username`, `id` and `uid`: stable,
+unique identifiers. The display `name` never makes an admin.
 
 ## The smallest implementation
 

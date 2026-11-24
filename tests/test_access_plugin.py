@@ -92,14 +92,13 @@ class Slot(unittest.TestCase):
         self.assertEqual((status, headers.get("Retry-After")), (429, "7"))
 
     def test_the_plugin_answers_the_permission_webhook_and_mcp_uses_it(self):
-        self.assertEqual(post(f"{self.base}/local/permissions", {"projects": ["api", "web"]}, "tok-ann")[:2],
-                         (200, {"user": {"name": "ann"}, "projects": ["api"]}))
+        # the permission webhook answers only this server; from the network it is closed
+        self.assertEqual(post(f"{self.base}/local/permissions", {"projects": ["api", "web"]}, "tok-ann")[0], 403)
         init = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
         self.assertEqual(post(f"{self.base}/mcp", init, "tok-ann")[0], 200)
         self.assertEqual(post(f"{self.base}/mcp", init, "other")[0], 401)
 
     def test_a_broken_plugin_is_an_outage_not_an_open_door(self):
-        self.assertEqual(post(f"{self.base}/local/permissions", {"projects": ["api"]}, "boom")[0], 503)
         init = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
         self.assertEqual(post(f"{self.base}/mcp", init, "boom")[0], 503)   # an outage, still no door
 

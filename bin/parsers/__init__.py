@@ -26,7 +26,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-__all__ = ["ExtractError", "for_path", "available", "extract", "with_provenance", "MISSING_TOOLS"]
+__all__ = ["ExtractError", "TransientError", "for_path", "runnable", "available", "extract", "with_provenance", "MISSING_TOOLS"]
 
 EXTRACTED = "EXTRACTED"   # a real text layer: the characters came from the file
 OCR = "OCR"               # recognised from pixels: expect noise, never quote it as authoritative
@@ -36,6 +36,10 @@ MISSING_TOOLS: dict[str, tuple[str, ...]] = {}   # extension -> tools that were 
 
 class ExtractError(RuntimeError):
     """The format is known and the tool is present, but this file could not be read."""
+
+
+class TransientError(ExtractError):
+    """The tool did not finish this time (a timeout, an OS error): try again on the next build."""
 
 
 def _modules():
@@ -57,21 +61,26 @@ def _tools_present(module) -> bool:
     return all(shutil.which(tool) for tool in module.REQUIRES)
 
 
-def for_path(path: Path | str):
-    """The parser that can actually run for this file, or None.
+def runnable(path: Path | str) -> list:
+    """Every parser that can actually run for this file, best first. The caller tries the next one
+    when a parser raises ExtractError (a PDF without a text layer goes on to OCR).
 
     A format with parsers but no installed tool records itself in MISSING_TOOLS, so the caller can
     report *why* a file was skipped instead of leaving a silent hole in the index.
     """
     ext = Path(path).suffix.lower()
     candidates = registry().get(ext, [])
-    for module in candidates:
-        if _tools_present(module):
-            return module
-    if candidates:
+    ready = [m for m in candidates if _tools_present(m)]
+    if candidates and not ready:
         missing = tuple(sorted({t for m in candidates for t in m.REQUIRES if not shutil.which(t)}))
         MISSING_TOOLS[ext] = missing
-    return None
+    return ready
+
+
+def for_path(path: Path | str):
+    """The best parser that can actually run for this file, or None."""
+    ready = runnable(path)
+    return ready[0] if ready else None
 
 
 def available() -> dict[str, str]:

@@ -65,10 +65,11 @@ def main() -> int:
             if not fn.endswith(EXTS):
                 continue
             fp = os.path.join(dp, fn)
-            try:
-                lines = open(fp, encoding="utf-8", errors="ignore").read().splitlines()
-            except OSError:
+            # Not a device, a pipe or a link out of the project; at most graph.MAX_SOURCE_BYTES.
+            text = graph.read_source(fp, graph.staged_root(fp, repos_dir))
+            if text is None:
                 continue
+            lines = text.splitlines()
             hits = []
             for i, line in enumerate(lines, 1):
                 m = COMMENT_RE.search(line)

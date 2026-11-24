@@ -91,6 +91,31 @@ Audit of 2026-11-23 (four reviews: security, query tools, build, server). Each f
     processes that cut one filtered graph copy no longer break each other (unique temporary files, a lock);
     a changed document whose extraction fails leaves the index; the `repo_map unused` file scan stops at
     its deadline inside one large folder and says it is incomplete.
+- **Third audit round (2026-11-24).**
+  - Security: `/local/permissions` answers only this server (403 from the network); kb-http calls its access
+    plugin in-process, also through the public URL (`KB_PUBLIC_URL`), so sign-ins count under the person's
+    address. `KB_ADMINS` / `admins.txt` match only `uname`, `username`, `id` or `uid`, never the display
+    `name` (breaking for a webhook that returns only `name`). Reset and invite links carry the value in the
+    fragment (`#t=`), out of access logs. Cursors end when the grant type or a setting changes, and have a
+    byte cap per caller.
+  - Security: code staging drops links out of the code folder, devices and pipes; linkers and the unused
+    scan read only regular files inside their project, with a size cap; qmd and graphify output is read as a
+    stream with a limit; `docs_get` refuses a hidden path before qmd runs; extraction has budgets
+    (`KB_EXTRACT_MAX_MB`, `KB_OCR_MAX_PAGES`); `problems` writes hidden projects as `(hidden)` under `own`.
+  - Fixed (outages): a failed "last used" write (full disk) no longer turns every token check into 503;
+    at most 4 password hashes at once; a token revoked during its check is not cached; admin-page sign-ins
+    have their own quota and end with their session; "New key" no longer signs the person out; OAuth
+    `/token` answers `invalid_client` for a revoked client; `KB_OAUTH=off` keeps the admin pages.
+  - Fixed (build): project names are checked (`.`/`..` could reach `rm -rf`); a failed copy keeps the last
+    stage; `kb-refresh --force` really rebuilds and builds without a git checkout; declutter drops the
+    guessed calls into a curated hub the project defines (api `.log()`); `kb label` re-runs the merge; an
+    unknown `serves` name is refused; extraction falls back to OCR; doc mentions resolve in their own
+    project first; stale dashboard files are deleted; the wheel and sdist ship `contrib/`.
+  - Fixed (tools): `review_context` maps lines to symbols by binary search; long docs questions stay in the
+    warm worker; `repo:Name` pins work in `graph_explain` and `graph_affected`; a widened scope answers each
+    definition of a name; `contracts_search` under `own` is fast; `code_grep` keeps matches when a file is
+    unreadable.
+  - Added: `kb addon on|off <name>` (switch only).
 - **Docs:** the design doc no longer says the tool has no permissions; server, access protocol and tools
   docs list the new settings.
 

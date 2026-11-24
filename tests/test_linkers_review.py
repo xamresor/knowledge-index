@@ -257,7 +257,7 @@ class MarkdownMentionsAndLinks(unittest.TestCase):
     def test_two_methods_with_one_name_stay_ambiguous(self):
         g = {"nodes": [node("api::a", ".createOrder()", "api", "a.php"),
                        node("api::b", ".createOrder()", "api", "b.php")], "links": []}
-        self.assertEqual(markdown._symbol_index(g), {})
+        self.assertEqual(markdown._symbols_for("api", *markdown._symbol_index(g)), {})
 
 
 class HttpClientShapes(unittest.TestCase):

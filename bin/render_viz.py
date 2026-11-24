@@ -270,6 +270,12 @@ def main() -> int:
     write_js(os.path.join(data_dir, "_cross.js"), "kbCross", cross)
     write_js(os.path.join(data_dir, "_index.js"), "kbIndex",
              [[n["label"], n["id"], dom_of[n["id"]]] for n in real])
+    # The files of a domain or project that left the graph would still be served: remove every .js
+    # this build did not write.
+    current = {fname[d] + ".js" for d in domains} | {"_cross.js", "_index.js"}
+    for name in os.listdir(data_dir):
+        if name.endswith(".js") and name not in current and os.path.isfile(os.path.join(data_dir, name)):
+            os.remove(os.path.join(data_dir, name))
 
     write_js(os.path.join(out_dir, MANIFEST), "kbManifest", {
         "domains": domains,

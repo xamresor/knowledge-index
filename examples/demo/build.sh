@@ -15,7 +15,15 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 # Tracked files only (working-tree versions): no private config, aliases or generated data come along.
-git -C "$KB" ls-files -z -- . ':!examples' | rsync -a --from0 --files-from=- "$KB/" "$TMP/"
+# Without git (an unpacked sdist): the source tree minus what a KB writes or keeps private.
+if git -C "$KB" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  git -C "$KB" ls-files -z -- . ':!examples' | rsync -a --from0 --files-from=- "$KB/" "$TMP/"
+else
+  rsync -a --exclude /examples --exclude /graphify-out --exclude /repos --exclude /.docs --exclude /.qmd \
+    --exclude /logs --exclude /scip --exclude /plugins --exclude /sandbox/node_modules --exclude /web/vendor \
+    --exclude /kb.projects.toml --exclude /aliases.toml --exclude /datadict.toml --exclude /.kb.local --exclude /addons.json --exclude /users.json \
+    --exclude /admins.txt --exclude /smtp.env --exclude __pycache__ "$KB/" "$TMP/"
+fi
 
 SRC="$DEMO/src"
 cat > "$TMP/kb.projects.toml" <<TOML

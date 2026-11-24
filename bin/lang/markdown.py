@@ -16,8 +16,9 @@ The `documents` edge is where noise would come from, so it is deliberately sting
   (`name()`), or containing a namespace separator. A doc mentioning "User" would otherwise attach
   itself to every `User` in every repo, which is worse than no edge at all.
 * matching is whole-word, case-sensitive (a class name is written the way it is spelled).
-* a label that is ambiguous in the graph (same label defined more than once) is **skipped**, following
-  the same rule as `dedupe.py`: when in doubt, do not invent a fact.
+* a label resolves inside the doc's own project first; a label of another project counts only when it
+  is unique in the whole graph. A label that is ambiguous where it is looked up (defined more than
+  once) is **skipped**, following the same rule as `dedupe.py`: when in doubt, do not invent a fact.
 * capped per document, because a doc that mentions forty symbols is an index, not a description.
 """
 from __future__ import annotations
@@ -109,20 +110,32 @@ def _mention(label: str) -> str:
     return label[1:] if label.startswith(".") and label.endswith("()") else label
 
 
-def _symbol_index(graph: dict) -> dict[str, str]:
-    """mention -> node id, for distinctive labels that are **unambiguous** in the graph."""
-    seen: dict[str, str | None] = {}
+def _symbol_index(graph: dict) -> tuple[dict[str, str | None], dict[str, dict[str, str | None]]]:
+    """mention -> node id for distinctive labels: over the whole graph, and per project (`repo`).
+    None marks a label defined more than once there ("ambiguous")."""
+    everywhere: dict[str, str | None] = {}
+    per_repo: dict[str, dict[str, str | None]] = {}
     for node in graph_io.nodes(graph):
         label = _mention(node.get("label", ""))
         if not _is_distinctive(label):
             continue
-        seen[label] = None if label in seen else node["id"]   # None marks "ambiguous"
-    return {label: nid for label, nid in seen.items() if nid}
+        everywhere[label] = None if label in everywhere else node["id"]
+        own = per_repo.setdefault(node.get("repo", ""), {})
+        own[label] = None if label in own else node["id"]
+    return everywhere, per_repo
+
+
+def _symbols_for(repo: str, everywhere: dict, per_repo: dict) -> dict[str, str]:
+    """The symbols a doc of `repo` may point at: its own project first (a label twice there stays
+    ambiguous), then a label that is unique in the whole graph. A label that two other projects both
+    define is no edge: the doc does not say which one it means."""
+    merged = {**everywhere, **per_repo.get(repo, {})}
+    return {label: nid for label, nid in merged.items() if nid}
 
 
 def enrich(graph: dict, roots: list[tuple[str, str]]) -> tuple[int, int]:
     """Add doc nodes and their edges. `roots` is [(project_name, docs_dir), …]. Mutates `graph`."""
-    symbols = _symbol_index(graph)
+    everywhere, per_repo = _symbol_index(graph)
     existing = {n["id"] for n in graph_io.nodes(graph)}
     # Two indexes, deliberately: paths resolve a relative markdown link, stems resolve a [[wikilink]].
     # (An earlier version keyed both off one composite string and took `Path("api::b.md").stem`,
@@ -147,6 +160,7 @@ def enrich(graph: dict, roots: list[tuple[str, str]]) -> tuple[int, int]:
     edges: list[dict] = []
     for repo, root in roots:
         base = Path(root)
+        symbols = _symbols_for(repo, everywhere, per_repo)
         for path, rel in _doc_files(root):
             src = by_path.get((repo, rel))
             if not src:

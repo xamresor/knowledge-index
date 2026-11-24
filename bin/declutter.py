@@ -11,7 +11,8 @@ after dedupe, a high-degree node without a definition is usually a real domain s
 definition graphify did not capture. A node the project DEFINES itself (it has `contains` or
 `method` edges, a file node contains it, or it has an AST source_file and source_location) is never
 pruned, even when its label is in the list: a project's own `Controller` base class is code, not
-framework noise.
+framework noise. Such a node loses only its INFERRED incoming edges (name guesses, e.g. every
+`->log()` call matched to the project's one `log()` method).
 
 Usage: declutter.py <graph.json> <kb.hubs.txt>
 """
@@ -46,10 +47,15 @@ def main() -> int:
                 and str(by_id.get(e["source"], {}).get("label", "")).endswith(lang.FILE_LABEL_SUFFIXES)}
     defined |= {n["id"] for n in N if n.get("source_file") and n.get("source_location")}
     prune_ids = {n["id"] for n in N if n["label"] in curated and n["id"] not in defined}
+    # A curated label that the project also defines (api's ConsumerSession::log is `.log()`): the node
+    # stays, but the calls graphify only guessed by name (INFERRED) go. Hundreds of `->log()` calls on
+    # loggers would otherwise all point at this one method.
+    defined_hubs = {n["id"] for n in N if n["label"] in curated and n["id"] in defined}
 
     before_n, before_e = len(N), len(L)
     g["nodes"] = [n for n in N if n["id"] not in prune_ids]
-    g["links"] = [e for e in L if e["source"] not in prune_ids and e["target"] not in prune_ids]
+    g["links"] = [e for e in L if e["source"] not in prune_ids and e["target"] not in prune_ids
+                  and not (e["target"] in defined_hubs and e.get("confidence") == "INFERRED")]
     graph.save(g, graph_path)
 
     print(f"decluttered: -{before_n - len(g['nodes'])} nodes "
