@@ -38,6 +38,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+import zipfile
 from collections import OrderedDict, deque
 
 import addons  # noqa: E402
@@ -626,8 +627,111 @@ HOWTO_FILES = {
 }
 
 
+# One download with everything of "Set up Claude Code": the folders as ~/.claude (or .claude/ of a repository)
+# holds them, and install.py that copies them and merges the hook and the CLAUDE.md rule.
+HOWTO_BUNDLE = "kb-claude-setup.zip"
+HOWTO_BUNDLE_FILES = {
+    "skills/kb/SKILL.md": "kb.md",
+    "skills/doc-organization/SKILL.md": "doc-organization.md",
+    "hooks/kb-reminder.py": "kb-reminder.py",
+}
+
+CLAUDE_MD_RULE = ("## Code questions\n"
+                  "For \"how does X work\", \"what connects to Y\" and \"what breaks if I change Z\" questions, "
+                  "use the `kb` skill and its MCP tools before grep.\n"
+                  "When you delegate such a question to a sub-agent, tell it to use the `kb` tools.\n"
+                  "The index is as old as its last build: check a claim against the file before you rely on it.")
+
+INSTALL_PY = r'''#!/usr/bin/env python3
+"""Install the kb skills, the reminder hook and the CLAUDE.md rule for Claude Code.
+
+  python3 install.py                      for yourself: ~/.claude, ~/.claude/CLAUDE.md
+  python3 install.py --project <repo>     for a team: <repo>/.claude, <repo>/CLAUDE.md (commit them)
+
+A repeat changes nothing new. Hooks and text that are already there stay.
+"""
+import argparse
+import json
+import os
+import shutil
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+FILES = ["skills/kb/SKILL.md", "skills/doc-organization/SKILL.md", "hooks/kb-reminder.py"]
+RULE = __RULE__
+MARK = "kb-reminder.py"
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--project", metavar="REPO", help="install into this repository instead of ~/.claude")
+    args = ap.parse_args()
+    if args.project:
+        root = os.path.abspath(args.project)
+        target, claude_md = os.path.join(root, ".claude"), os.path.join(root, "CLAUDE.md")
+        hook_path = '"$CLAUDE_PROJECT_DIR/.claude/hooks/kb-reminder.py"'
+    else:
+        target = os.path.join(os.path.expanduser("~"), ".claude")
+        claude_md = os.path.join(target, "CLAUDE.md")
+        hook_path = '"$HOME/.claude/hooks/kb-reminder.py"'
+
+    for rel in FILES:
+        dest = os.path.join(target, rel)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        shutil.copyfile(os.path.join(HERE, rel), dest)
+        print("copied  ", dest)
+
+    settings_path = os.path.join(target, "settings.json")
+    settings = {}
+    if os.path.exists(settings_path):
+        with open(settings_path, encoding="utf-8") as f:
+            settings = json.load(f)
+    groups = settings.setdefault("hooks", {}).setdefault("UserPromptSubmit", [])
+    if any(MARK in h.get("command", "") for g in groups for h in g.get("hooks", [])):
+        print("kept    ", settings_path, "(the hook is there)")
+    else:
+        groups.append({"hooks": [{"type": "command", "command": f"python3 {hook_path} 2>/dev/null || true"}]})
+        with open(settings_path, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2)
+            f.write("\n")
+        print("updated ", settings_path)
+
+    text = ""
+    if os.path.exists(claude_md):
+        with open(claude_md, encoding="utf-8") as f:
+            text = f.read()
+    if RULE.splitlines()[0] in text:
+        print("kept    ", claude_md, "(the rule is there)")
+    else:
+        with open(claude_md, "a", encoding="utf-8") as f:
+            f.write(("\n" if text and not text.endswith("\n") else "") + ("\n" if text else "") + RULE + "\n")
+        print("updated ", claude_md)
+    print("Done. Restart Claude Code, then check that /mcp shows kb as connected.")
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+def howto_bundle() -> bytes | None:
+    """The zip of HOWTO_BUNDLE, built from the files of this server; None when a file is missing."""
+    import io
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for arc, name in HOWTO_BUNDLE_FILES.items():
+            found = howto_file(name)
+            if found is None:
+                return None
+            z.writestr(arc, found[0])
+        z.writestr("install.py", INSTALL_PY.replace("__RULE__", json.dumps(CLAUDE_MD_RULE)))
+    return buf.getvalue()
+
+
 def howto_file(name: str) -> tuple[bytes, str] | None:
     """One file of HOWTO_FILES as (content, media type), or None for an unknown name or a missing file."""
+    if name == HOWTO_BUNDLE:
+        bundle = howto_bundle()
+        return None if bundle is None else (bundle, "application/zip")
     entry = HOWTO_FILES.get(name)
     if entry is None:
         return None
@@ -652,15 +756,19 @@ def _claude_setup(base: str) -> str:
         "type": "command",
         "command": 'python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/kb-reminder.py" 2>/dev/null || true'}]}]}},
         indent=2)
-    guideline = ("## Code questions\n"
-                 "For \"how does X work\", \"what connects to Y\" and \"what breaks if I change Z\" questions, "
-                 "use the `kb` skill and its MCP tools before grep.\n"
-                 "When you delegate such a question to a sub-agent, tell it to use the `kb` tools.\n"
-                 "The index is as old as its last build: check a claim against the file before you rely on it.")
+    guideline = CLAUDE_MD_RULE
     return panel(
         "Set up Claude Code: skills, hook, CLAUDE.md",
         "<p>The server alone is not enough. Without these steps the agent often greps and never asks the "
-        "knowledge base. Do steps 1–3 once per person or once per repository.</p>"
+        "knowledge base.</p>"
+        f"<p><b>The short way.</b> Download {link(HOWTO_BUNDLE)} (the skills, the hook and an installer), then:"
+        "<pre>cd ~/Downloads &amp;&amp; unzip -o kb-claude-setup.zip -d kb-claude-setup\n"
+        "python3 kb-claude-setup/install.py                   # for yourself, every project\n"
+        "python3 kb-claude-setup/install.py --project ~/my-repo   # or for a team: commit .claude/ and CLAUDE.md</pre>"
+        "The installer copies the files, adds the hook to <code>settings.json</code> and the rule to "
+        "<code>CLAUDE.md</code>, and keeps what is there. A repeat changes nothing. Then restart Claude Code "
+        "(step 4).</p>"
+        "<p><b>By hand,</b> the same in steps (once per person or once per repository):</p>"
         "<ol class=steps>"
         f"<li><b>Install the skills.</b> Download {link('kb.md')} and {link('doc-organization.md')}. "
         "Each file is a <code>SKILL.md</code>: put it in a folder with the name of the skill. For yourself, "

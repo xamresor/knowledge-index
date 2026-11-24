@@ -14,6 +14,11 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+- **"How to" page: one download sets up Claude Code** (2026-11-24). `kb-claude-setup.zip` holds the `kb` and
+  `doc-organization` skills, the `kb-reminder.py` hook and `install.py`. `python3 install.py` installs them into
+  `~/.claude` (`--project <repo>`: into the repository), adds the hook to `settings.json` and the rule to
+  `CLAUDE.md`, and keeps what is there; a repeat changes nothing. The zip is built from the files of the server
+  (`admin.howto_bundle`). The steps by hand stay on the page.
 - **Docs search stays fast after an idle time** (2026-11-24). `qmd mcp` unloads its model after 5 minutes
   without a query, so the first search after a pause waited for the load (measured on a 4-core server:
   13.5 s against 1.2 s). `kb-http` and `kb-api` now ask the qmd worker a tiny query every

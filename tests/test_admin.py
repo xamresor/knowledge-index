@@ -135,6 +135,45 @@ class Admin(unittest.TestCase):
         self.assertTrue(headers["Content-Type"].startswith("text/markdown"))
         self.assertTrue(body.startswith("---\nname: kb\n"))
 
+    def test_howto_bundle_installs_the_skills_the_hook_and_the_rule_once(self):
+        import io, json as _json, os as _os, subprocess as _sp, sys as _sys, tempfile as _tf, zipfile as _zf
+        c = self.client()
+        self.sign_in(c, self.base)
+        _, _, page = self.req(c, "GET", f"{self.base}/admin/howto")
+        self.assertIn(f'href="{self.base}/admin/howto/kb-claude-setup.zip" download', page)
+        self.assertIn("install.py --project", page)
+        data, media = admin.howto_file("kb-claude-setup.zip")
+        self.assertEqual(media, "application/zip")
+        with _zf.ZipFile(io.BytesIO(data)) as z, _tf.TemporaryDirectory() as tmp:
+            self.assertEqual(sorted(z.namelist()), ["hooks/kb-reminder.py", "install.py",
+                                                    "skills/doc-organization/SKILL.md", "skills/kb/SKILL.md"])
+            self.assertEqual(z.read("skills/kb/SKILL.md"), admin.howto_file("kb.md")[0])
+            z.extractall(_os.path.join(tmp, "bundle"))
+            repo = _os.path.join(tmp, "repo")
+            _os.makedirs(_os.path.join(repo, ".claude"))
+            other = {"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "echo mine"}]}]},
+                     "model": "x"}
+            with open(_os.path.join(repo, ".claude", "settings.json"), "w") as f:
+                _json.dump(other, f)
+            with open(_os.path.join(repo, "CLAUDE.md"), "w") as f:
+                f.write("# Repo rules\n")
+            for _ in range(2):                                   # a repeat changes nothing new
+                _sp.run([_sys.executable, _os.path.join(tmp, "bundle", "install.py"), "--project", repo],
+                        check=True, capture_output=True)
+            with open(_os.path.join(repo, ".claude", "settings.json")) as f:
+                settings = _json.load(f)
+            commands = [h["command"] for g in settings["hooks"]["UserPromptSubmit"] for h in g["hooks"]]
+            self.assertEqual(commands[0], "echo mine")           # the own hook stays
+            self.assertEqual(sum("kb-reminder.py" in cmd for cmd in commands), 1)
+            self.assertIn("$CLAUDE_PROJECT_DIR/.claude/hooks/kb-reminder.py", commands[1])
+            self.assertEqual(settings["model"], "x")
+            with open(_os.path.join(repo, "CLAUDE.md")) as f:
+                text = f.read()
+            self.assertTrue(text.startswith("# Repo rules\n"))
+            self.assertEqual(text.count("## Code questions"), 1)
+            self.assertTrue(_os.path.isfile(_os.path.join(repo, ".claude", "skills", "kb", "SKILL.md")))
+            self.assertTrue(_os.path.isfile(_os.path.join(repo, ".claude", "hooks", "kb-reminder.py")))
+
     def test_howto_files_are_a_fixed_list(self):
         c = self.client()
         self.sign_in(c, self.base)
