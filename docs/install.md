@@ -71,9 +71,10 @@ Skip the prompt by setting `KB_QMD_BACKEND=none|llama|other` (e.g. in CI). Chang
 
 ## Install into a project
 
-Each consuming project needs two things: the **MCP server config** so its agent can query the KB,
-and the **`kb` skill** so the agent knows when/how to use it. Both point back here — this repo is
-the single source of truth.
+Each consuming project needs three things: the **MCP server config** so its agent can query the KB,
+the **`kb` skill** so the agent knows when/how to use it, and the **priority** (two hooks and a rule)
+so the agent asks the KB before it greps. All three point back here — this repo is the single source
+of truth. A setup with the first one only works badly: the agent has the tools and does not use them.
 
 ### 1. MCP server config
 
@@ -127,25 +128,27 @@ version of [`docs/documentation-guide.md`](documentation-guide.md): agents follo
 move or tidy a project's docs, so new docs land where the KB links them to the code. Install it the same
 way, or once for every project in `~/.claude/skills/doc-organization`.
 
-### 3. Auto-reminder hook (recommended)
+### 3. Make kb the first search tool (required)
 
-**Skip this and the install reliably under-performs.** The skill only fires on the agent's own
-judgement, and the `kb` MCP tools may be **deferred** behind a tool-search index when a project has
-many MCP servers — so an agent can default to `grep`/`Explore` on a "how does X work / what connects
-to Y / impact" prompt and never reach the graph (exactly the failure this hook prevents). A
-`UserPromptSubmit` hook closes that gap deterministically: it scans the prompt for connection/impact
-trigger words and injects a one-line reminder to use the `kb` graph tools first.
+**The setup is not done after step 1.** A connected server gives the agent the tools, not the habit.
+The skill fires only on the agent's own judgement, and the `kb` MCP tools can be **deferred** behind a
+tool-search index when a project has many MCP servers. The agent then greps and never asks the graph.
+An agent that follows this page for a person does this step too, not only the connection.
 
-Add it in the consuming project (not here — this repo is read-only and isn't a Claude Code project).
-A ready-made matcher template ships at [`skills/kb/install/kb-reminder.py`](../skills/kb/install/kb-reminder.py)
-(EN + RU triggers; extend `TRIGGERS` with your team's languages):
+Three parts set the priority. Do all three in the consuming project (or once in `~/.claude`):
+
+| Part | File | What it does |
+|---|---|---|
+| Guard hook | [`skills/kb/install/kb-guard.py`](../skills/kb/install/kb-guard.py), `PreToolUse` | Refuses a Grep or Glob over the project and a search sub-agent until the session calls a `kb` tool once. |
+| Reminder hook | [`skills/kb/install/kb-reminder.py`](../skills/kb/install/kb-reminder.py), `UserPromptSubmit` | Adds a one-line reminder to a prompt that asks how code connects (EN + RU triggers; extend `TRIGGERS`). |
+| Rule | `CLAUDE.md` | Tells the agent, and through it the sub-agents, to start every search with `kb`. |
 
 ```bash
-# 1. copy the matcher template (don't symlink — projects extend its TRIGGERS list)
+# 1. copy the hooks (do not symlink: a project extends TRIGGERS and SEARCH_AGENTS)
 mkdir -p /path/to/project/.claude/hooks
-cp /path/to/kb/skills/kb/install/kb-reminder.py /path/to/project/.claude/hooks/
+cp /path/to/kb/skills/kb/install/kb-reminder.py /path/to/kb/skills/kb/install/kb-guard.py /path/to/project/.claude/hooks/
 
-# 2. wire it in .claude/settings.json (merge — never clobber existing hooks/keys)
+# 2. wire them in .claude/settings.json (merge: keep the hooks and keys that are there)
 ```
 ```json
 {
@@ -154,17 +157,47 @@ cp /path/to/kb/skills/kb/install/kb-reminder.py /path/to/project/.claude/hooks/
       { "hooks": [ { "type": "command",
         "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/kb-reminder.py\" 2>/dev/null || true",
         "statusMessage": "Checking for kb-graph relevance" } ] }
+    ],
+    "PreToolUse": [
+      { "matcher": "Grep|Glob|Agent|Task",
+        "hooks": [ { "type": "command",
+        "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/kb-guard.py\" 2>/dev/null || true" } ] }
     ]
   }
 }
 ```
 
-The script reads the hook JSON on stdin, prints
-`{"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "<reminder>"}}`
-on a trigger hit, and stays silent + exit 0 otherwise so it can never block a prompt. Also add a
-**project-guideline line** ("for how-does-X / what-connects / impact questions, use the `kb` skill
-before grep, and tell delegated sub-agents to do the same"). See SKILL.md "How to use it well"
-points 5–6 for the rationale.
+3\. Add the rule to `CLAUDE.md` of the project (or to `~/.claude/CLAUDE.md`):
+
+```markdown
+## Code search
+Start every search of the code with the `kb` skill and its MCP tools, also a search for one word. Go to Grep, Glob or a search sub-agent first only when you already know the file.
+When you delegate a search to a sub-agent, tell it to use the `kb` tools.
+The index is as old as its last build: check a claim against the file before you rely on it.
+```
+
+The rule has no "for a non-trivial question" clause on purpose. An agent that may judge a search as
+trivial goes to Grep.
+
+**How the guard decides.** It reads the session transcript (JSON lines) and counts only an assistant
+`tool_use` block whose name starts with `mcp__kb__`. A failed call counts too. A text match is wrong:
+Claude Code writes the names of the deferred tools into the transcript at the start of every session.
+
+The guard lets these through, so a session cannot get stuck:
+
+- Grep in one known file, Glob without a wildcard, an agent that is not a search agent.
+- Every call inside a sub-agent. The Agent call that started it was already checked.
+- A session where `kb` is not connected: no `kb` tools in the transcript and no `kb` entry in
+  `.mcp.json` or `~/.claude.json`.
+- Its own errors: it fails open.
+
+Settings of the guard (environment variables): `KB_GUARD=off` switches it off, `KB_GUARD_SERVER`
+names the MCP server when it is not `kb`, `KB_GUARD_PATHS` (folders, `:` between them) limits the
+guard to the folders that the index covers. Set `KB_GUARD_PATHS` when the hook is in `~/.claude`:
+without it the guard asks for one `kb` call also in a project that the index does not hold.
+
+Not covered: `grep`, `rg` and `find` through the Bash tool, and what a sub-agent does after its start.
+The rule in `CLAUDE.md` and the reminder cover those. See SKILL.md "How to use it well", points 5–6.
 
 ### 4. Verify the install
 
@@ -178,12 +211,20 @@ test -x "$(python3 -c "import json;print(json.load(open('.mcp.json'))['mcpServer
 # 2. skill reachable (whichever layout the project uses)
 test -f .claude/skills/kb/SKILL.md && echo "skill: YES"
 
-# 3. hook present, valid, and actually fires on a sample prompt
+# 3. reminder hook present, valid, and actually fires on a sample prompt
 test -f .claude/hooks/kb-reminder.py && echo "hook script: present"
 jq -e '.hooks.UserPromptSubmit' .claude/settings.json >/dev/null && echo "hook wired: YES"
 echo '{"prompt":"how does auth work"}' | python3 .claude/hooks/kb-reminder.py | jq -e .hookSpecificOutput >/dev/null && echo "hook fires: YES"
 
-# 4. qmd is the compatible lineage (the docs half of `search` needs `qmd query`)
+# 4. guard hook present, wired, and refuses a sweep in a session that never called kb
+test -f .claude/hooks/kb-guard.py && echo "guard script: present"
+jq -e '.hooks.PreToolUse[] | select(.matcher | test("Grep"))' .claude/settings.json >/dev/null && echo "guard wired: YES"
+t=$(mktemp); echo '{"type":"attachment","attachment":{"type":"deferred_tools_delta","addedLines":["mcp__kb__search"]}}' > "$t"
+echo "{\"tool_name\":\"Grep\",\"tool_input\":{\"pattern\":\"x\"},\"cwd\":\"$PWD\",\"transcript_path\":\"$t\"}" \
+  | python3 .claude/hooks/kb-guard.py | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null && echo "guard refuses: YES"
+grep -q '^## Code search' CLAUDE.md && echo "rule in CLAUDE.md: YES"
+
+# 5. qmd is the compatible lineage (the docs half of `search` needs `qmd query`)
 qmd query --help >/dev/null 2>&1 && echo "qmd query CLI: YES" || echo "qmd query CLI: NO — wrong qmd lineage"
 ```
 

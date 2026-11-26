@@ -14,6 +14,17 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+- **Setup: kb is the first search tool, and the setup says so** (2026-11-26). An agent that followed the
+  setup steps connected the server and stopped: the priority was a "recommended" step. New hook
+  `skills/kb/install/kb-guard.py` (`PreToolUse`, matcher `Grep|Glob|Agent|Task`) refuses a Grep or Glob over
+  the project and a search sub-agent until the session calls a `kb` tool once. It counts only an assistant
+  `tool_use` block in the transcript: a text match is always true, because Claude Code writes the names of the
+  deferred tools into the transcript. It lets through a known file, a call inside a sub-agent and a session
+  where `kb` is not connected (`KB_GUARD=off`, `KB_GUARD_SERVER`, `KB_GUARD_PATHS`). The `CLAUDE.md` rule is
+  now "start every search of the code with `kb`, also a search for one word", with no clause about hard
+  questions. `kb-claude-setup.zip` and its `install.py` install the guard and replace the rule of an older
+  installer. The quick start has a step 6, and `docs/install.md` step 3 is required and has the checks.
+
 - **"How to" page: one download sets up Claude Code** (2026-11-24). `kb-claude-setup.zip` holds the `kb` and
   `doc-organization` skills, the `kb-reminder.py` hook and `install.py`. `python3 install.py` installs them into
   `~/.claude` (`--project <repo>`: into the repository), adds the hook to `settings.json` and the rule to

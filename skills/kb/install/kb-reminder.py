@@ -2,7 +2,8 @@
 """Reusable `UserPromptSubmit` hook for the `kb` Code Knowledge Base.
 
 Copy this into a consuming project's `.claude/hooks/` and wire it in
-`.claude/settings.json` (see the kb README "Install into a project", step 3).
+`.claude/settings.json` (see docs/install.md, "Make kb the first search tool").
+Its partner `kb-guard.py` (`PreToolUse`) enforces what this hook only says.
 
 Why it exists: the `kb` skill only fires on the agent's own judgement, and the
 `kb` MCP tools may be *deferred* behind a tool-search index in projects with many

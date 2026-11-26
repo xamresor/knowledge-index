@@ -624,6 +624,7 @@ HOWTO_FILES = {
     "kb.md": ("skills/kb/SKILL.md", "text/markdown; charset=utf-8"),
     "doc-organization.md": ("skills/doc-organization/SKILL.md", "text/markdown; charset=utf-8"),
     "kb-reminder.py": ("skills/kb/install/kb-reminder.py", "text/x-python; charset=utf-8"),
+    "kb-guard.py": ("skills/kb/install/kb-guard.py", "text/x-python; charset=utf-8"),
 }
 
 
@@ -634,16 +635,27 @@ HOWTO_BUNDLE_FILES = {
     "skills/kb/SKILL.md": "kb.md",
     "skills/doc-organization/SKILL.md": "doc-organization.md",
     "hooks/kb-reminder.py": "kb-reminder.py",
+    "hooks/kb-guard.py": "kb-guard.py",
 }
 
-CLAUDE_MD_RULE = ("## Code questions\n"
-                  "For \"how does X work\", \"what connects to Y\" and \"what breaks if I change Z\" questions, "
-                  "use the `kb` skill and its MCP tools before grep.\n"
-                  "When you delegate such a question to a sub-agent, tell it to use the `kb` tools.\n"
+# The tools that the guard hook checks: a search with no kb call before it is refused.
+GUARD_MATCHER = "Grep|Glob|Agent|Task"
+
+CLAUDE_MD_RULE = ("## Code search\n"
+                  "Start every search of the code with the `kb` skill and its MCP tools, also a search for one "
+                  "word. Go to Grep, Glob or a search sub-agent first only when you already know the file.\n"
+                  "When you delegate a search to a sub-agent, tell it to use the `kb` tools.\n"
                   "The index is as old as its last build: check a claim against the file before you rely on it.")
+# The rule of the installers before 2026-11-26. install.py replaces it; a text that a person changed stays.
+CLAUDE_MD_OLD_RULE = ("## Code questions\n"
+                      "For \"how does X work\", \"what connects to Y\" and \"what breaks if I change Z\" "
+                      "questions, use the `kb` skill and its MCP tools before grep.\n"
+                      "When you delegate such a question to a sub-agent, tell it to use the `kb` tools.\n"
+                      "The index is as old as its last build: check a claim against the file before you rely "
+                      "on it.")
 
 INSTALL_PY = r'''#!/usr/bin/env python3
-"""Install the kb skills, the reminder hook and the CLAUDE.md rule for Claude Code.
+"""Install the kb skills, the two hooks and the CLAUDE.md rule for Claude Code.
 
   python3 install.py                      for yourself: ~/.claude, ~/.claude/CLAUDE.md
   python3 install.py --project <repo>     for a team: <repo>/.claude, <repo>/CLAUDE.md (commit them)
@@ -656,9 +668,11 @@ import os
 import shutil
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-FILES = ["skills/kb/SKILL.md", "skills/doc-organization/SKILL.md", "hooks/kb-reminder.py"]
+FILES = ["skills/kb/SKILL.md", "skills/doc-organization/SKILL.md", "hooks/kb-reminder.py", "hooks/kb-guard.py"]
 RULE = __RULE__
-MARK = "kb-reminder.py"
+OLD_RULE = __OLD_RULE__
+# event, matcher, script: the reminder on a prompt, the guard before a search.
+HOOKS = [("UserPromptSubmit", None, "kb-reminder.py"), ("PreToolUse", __MATCHER__, "kb-guard.py")]
 
 
 def main() -> None:
@@ -668,11 +682,11 @@ def main() -> None:
     if args.project:
         root = os.path.abspath(args.project)
         target, claude_md = os.path.join(root, ".claude"), os.path.join(root, "CLAUDE.md")
-        hook_path = '"$CLAUDE_PROJECT_DIR/.claude/hooks/kb-reminder.py"'
+        hooks_dir = "$CLAUDE_PROJECT_DIR/.claude/hooks"
     else:
         target = os.path.join(os.path.expanduser("~"), ".claude")
         claude_md = os.path.join(target, "CLAUDE.md")
-        hook_path = '"$HOME/.claude/hooks/kb-reminder.py"'
+        hooks_dir = "$HOME/.claude/hooks"
 
     for rel in FILES:
         dest = os.path.join(target, rel)
@@ -685,27 +699,43 @@ def main() -> None:
     if os.path.exists(settings_path):
         with open(settings_path, encoding="utf-8") as f:
             settings = json.load(f)
-    groups = settings.setdefault("hooks", {}).setdefault("UserPromptSubmit", [])
-    if any(MARK in h.get("command", "") for g in groups for h in g.get("hooks", [])):
-        print("kept    ", settings_path, "(the hook is there)")
-    else:
-        groups.append({"hooks": [{"type": "command", "command": f"python3 {hook_path} 2>/dev/null || true"}]})
+    added = []
+    for event, matcher, script in HOOKS:
+        groups = settings.setdefault("hooks", {}).setdefault(event, [])
+        if any(script in h.get("command", "") for g in groups for h in g.get("hooks", [])):
+            continue
+        group = {"hooks": [{"type": "command", "command": f'python3 "{hooks_dir}/{script}" 2>/dev/null || true'}]}
+        if matcher:
+            group = {"matcher": matcher, **group}
+        groups.append(group)
+        added.append(script)
+    if added:
         with open(settings_path, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=2)
             f.write("\n")
-        print("updated ", settings_path)
+        print("updated ", settings_path, "(" + ", ".join(added) + ")")
+    else:
+        print("kept    ", settings_path, "(the hooks are there)")
 
     text = ""
     if os.path.exists(claude_md):
         with open(claude_md, encoding="utf-8") as f:
             text = f.read()
-    if RULE.splitlines()[0] in text:
+    if RULE in text:
         print("kept    ", claude_md, "(the rule is there)")
+    elif OLD_RULE in text:
+        with open(claude_md, "w", encoding="utf-8") as f:
+            f.write(text.replace(OLD_RULE, RULE))
+        print("updated ", claude_md, "(the rule of an older installer is replaced)")
+    elif RULE.splitlines()[0] in text or OLD_RULE.splitlines()[0] in text:
+        print("kept    ", claude_md, "(it has its own text under the heading of the rule: compare it by hand)")
+        print(RULE)
     else:
         with open(claude_md, "a", encoding="utf-8") as f:
             f.write(("\n" if text and not text.endswith("\n") else "") + ("\n" if text else "") + RULE + "\n")
         print("updated ", claude_md)
-    print("Done. Restart Claude Code, then check that /mcp shows kb as connected.")
+    print("Done. Restart Claude Code, then check: /mcp shows kb as connected, and a Grep over the project")
+    print("before any kb call is refused with the text \"kb first\".")
 
 
 if __name__ == "__main__":
@@ -723,7 +753,9 @@ def howto_bundle() -> bytes | None:
             if found is None:
                 return None
             z.writestr(arc, found[0])
-        z.writestr("install.py", INSTALL_PY.replace("__RULE__", json.dumps(CLAUDE_MD_RULE)))
+        z.writestr("install.py", (INSTALL_PY.replace("__OLD_RULE__", json.dumps(CLAUDE_MD_OLD_RULE))
+                                  .replace("__RULE__", json.dumps(CLAUDE_MD_RULE))
+                                  .replace("__MATCHER__", json.dumps(GUARD_MATCHER))))
     return buf.getvalue()
 
 
@@ -744,7 +776,7 @@ def howto_file(name: str) -> tuple[bytes, str] | None:
 
 
 def _claude_setup(base: str) -> str:
-    """The panel "Set up Claude Code": the skills, the reminder hook and the lines for CLAUDE.md."""
+    """The panel "Set up Claude Code": the skills, the two hooks and the lines for CLAUDE.md."""
     files = f"{base}/admin/howto"
 
     def link(name: str) -> str:
@@ -752,20 +784,25 @@ def _claude_setup(base: str) -> str:
             return f"<code>{esc(name)}</code> <span class=muted>(not on this server)</span>"
         return f'<a href="{esc(files)}/{esc(name)}" download>{esc(name)}</a>'
 
-    hook = json.dumps({"hooks": {"UserPromptSubmit": [{"hooks": [{
-        "type": "command",
-        "command": 'python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/kb-reminder.py" 2>/dev/null || true'}]}]}},
-        indent=2)
+    def command(script: str) -> dict:
+        return {"type": "command", "command": f'python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/{script}" 2>/dev/null || true'}
+
+    hook = json.dumps({"hooks": {
+        "UserPromptSubmit": [{"hooks": [command("kb-reminder.py")]}],
+        "PreToolUse": [{"matcher": GUARD_MATCHER, "hooks": [command("kb-guard.py")]}]}}, indent=2)
     guideline = CLAUDE_MD_RULE
     return panel(
-        "Set up Claude Code: skills, hook, CLAUDE.md",
-        "<p>The server alone is not enough. Without these steps the agent often greps and never asks the "
-        "knowledge base.</p>"
-        f"<p><b>The short way.</b> Download {link(HOWTO_BUNDLE)} (the skills, the hook and an installer), then:"
+        "Set up Claude Code: skills, hooks, CLAUDE.md",
+        "<p><b>The connection is half of the setup.</b> A connected server gives the agent the tools, not the "
+        "habit: without the steps below the agent greps and never asks the knowledge base. The setup is done "
+        "when the knowledge base is the first search tool: the skills, the two hooks and the rule are in place "
+        "and the check of step 4 passes. An agent that does this setup for a person does all of it, not only "
+        "the connection.</p>"
+        f"<p><b>The short way.</b> Download {link(HOWTO_BUNDLE)} (the skills, the hooks and an installer), then:"
         "<pre>cd ~/Downloads &amp;&amp; unzip -o kb-claude-setup.zip -d kb-claude-setup\n"
         "python3 kb-claude-setup/install.py                   # for yourself, every project\n"
         "python3 kb-claude-setup/install.py --project ~/my-repo   # or for a team: commit .claude/ and CLAUDE.md</pre>"
-        "The installer copies the files, adds the hook to <code>settings.json</code> and the rule to "
+        "The installer copies the files, adds the hooks to <code>settings.json</code> and the rule to "
         "<code>CLAUDE.md</code>, and keeps what is there. A repeat changes nothing. Then restart Claude Code "
         "(step 4).</p>"
         "<p><b>By hand,</b> the same in steps (once per person or once per repository):</p>"
@@ -779,20 +816,26 @@ def _claude_setup(base: str) -> str:
         "For a whole team, put the same folders in <code>.claude/skills/</code> of the repository and commit "
         "them. <code>kb</code> tells the agent which tool answers which question. "
         "<code>doc-organization</code> keeps the docs in the shape that the index reads well.</li>"
-        f"<li><b>Add the reminder hook.</b> Download {link('kb-reminder.py')} to "
-        "<code>.claude/hooks/</code> of the repository (or <code>~/.claude/hooks/</code> and change the path). "
+        f"<li><b>Add the two hooks.</b> Download {link('kb-reminder.py')} and {link('kb-guard.py')} to "
+        "<code>.claude/hooks/</code> of the repository (or <code>~/.claude/hooks/</code> and change the paths). "
         "Merge this into <code>.claude/settings.json</code>; keep the hooks that are there:"
         f"<pre>{esc(hook)}</pre>"
         "The skill fires only when the agent decides so. With many MCP servers Claude Code also hides the "
-        "<code>kb</code> tools behind its tool search. The hook adds a one-line reminder to every prompt "
-        "that asks how code connects, so the agent does not fall back to grep.</li>"
+        "<code>kb</code> tools behind its tool search. <code>kb-reminder.py</code> adds a one-line reminder to "
+        "a prompt that asks how code connects. <code>kb-guard.py</code> sets the priority: it refuses a Grep "
+        "or Glob over the project and a search sub-agent until the session calls a <code>kb</code> tool once. "
+        "It refuses nothing when the file is known, inside a sub-agent, or when <code>kb</code> is not "
+        "connected. <code>KB_GUARD=off</code> switches it off; <code>KB_GUARD_PATHS</code> limits it to the "
+        "folders that the index covers.</li>"
         "<li><b>Add the rule to CLAUDE.md</b> of the repository (or to <code>~/.claude/CLAUDE.md</code>):"
         f"<pre>{esc(guideline)}</pre>"
-        "Sub-agents do not see the skill choice of the main session: the rule tells the main session to pass "
-        "it on.</li>"
-        "<li><b>Restart Claude Code</b>, then check: <code>/mcp</code> shows <code>kb</code> as connected, "
-        "and the question \"how does the sign-in work?\" starts with a <code>kb</code> tool, not with grep."
-        "</li></ol>"
+        "The rule has no \"when the question is hard\" clause on purpose: an agent that may judge a search as "
+        "simple goes to Grep. Sub-agents do not see the skill choice of the main session: the rule tells the "
+        "main session to pass it on.</li>"
+        "<li><b>Restart Claude Code</b>, then check. <code>/mcp</code> shows <code>kb</code> as connected. "
+        "In a new session, ask for a search (\"where is the sign-in checked?\"): it starts with a "
+        "<code>kb</code> tool. A Grep over the project before any <code>kb</code> call is refused with the "
+        "text \"kb first\".</li></ol>"
         "<p class=muted>A downloaded file is as new as this server. Download again after an update of the "
         "server.</p>")
 

@@ -123,9 +123,14 @@ class Admin(unittest.TestCase):
         self.sign_in(c, self.base)
         _, _, page = self.req(c, "GET", f"{self.base}/admin/howto")
         self.assertIn("Set up Claude Code", page)
-        self.assertIn("UserPromptSubmit", page)                 # the hook entry for settings.json
+        self.assertIn("UserPromptSubmit", page)                 # the hook entries for settings.json
+        self.assertIn("PreToolUse", page)
+        self.assertIn("Grep|Glob|Agent|Task", page)
+        self.assertIn("The connection is half of the setup", page)
+        self.assertIn("## Code search", page)                   # the rule for CLAUDE.md, with no "hard question" clause
+        self.assertNotIn("non-trivial", page)
         self.assertIn("CLAUDE.md", page)
-        for name in ("kb.md", "doc-organization.md", "kb-reminder.py"):
+        for name in ("kb.md", "doc-organization.md", "kb-reminder.py", "kb-guard.py"):
             self.assertIn(f'href="{self.base}/admin/howto/{name}" download', page)
             status, headers, body = self.req(c, "GET", f"{self.base}/admin/howto/{name}")
             self.assertEqual(status, 200, name)
@@ -145,7 +150,7 @@ class Admin(unittest.TestCase):
         data, media = admin.howto_file("kb-claude-setup.zip")
         self.assertEqual(media, "application/zip")
         with _zf.ZipFile(io.BytesIO(data)) as z, _tf.TemporaryDirectory() as tmp:
-            self.assertEqual(sorted(z.namelist()), ["hooks/kb-reminder.py", "install.py",
+            self.assertEqual(sorted(z.namelist()), ["hooks/kb-guard.py", "hooks/kb-reminder.py", "install.py",
                                                     "skills/doc-organization/SKILL.md", "skills/kb/SKILL.md"])
             self.assertEqual(z.read("skills/kb/SKILL.md"), admin.howto_file("kb.md")[0])
             z.extractall(_os.path.join(tmp, "bundle"))
@@ -155,8 +160,8 @@ class Admin(unittest.TestCase):
                      "model": "x"}
             with open(_os.path.join(repo, ".claude", "settings.json"), "w") as f:
                 _json.dump(other, f)
-            with open(_os.path.join(repo, "CLAUDE.md"), "w") as f:
-                f.write("# Repo rules\n")
+            with open(_os.path.join(repo, "CLAUDE.md"), "w") as f:   # the rule of an older installer is there
+                f.write("# Repo rules\n\n" + admin.CLAUDE_MD_OLD_RULE + "\n\n## Other\nkeep me\n")
             for _ in range(2):                                   # a repeat changes nothing new
                 _sp.run([_sys.executable, _os.path.join(tmp, "bundle", "install.py"), "--project", repo],
                         check=True, capture_output=True)
@@ -167,12 +172,39 @@ class Admin(unittest.TestCase):
             self.assertEqual(sum("kb-reminder.py" in cmd for cmd in commands), 1)
             self.assertIn("$CLAUDE_PROJECT_DIR/.claude/hooks/kb-reminder.py", commands[1])
             self.assertEqual(settings["model"], "x")
+            guards = settings["hooks"]["PreToolUse"]             # the guard: one entry, with its matcher
+            self.assertEqual(len(guards), 1)
+            self.assertEqual(guards[0]["matcher"], "Grep|Glob|Agent|Task")
+            self.assertIn("$CLAUDE_PROJECT_DIR/.claude/hooks/kb-guard.py", guards[0]["hooks"][0]["command"])
             with open(_os.path.join(repo, "CLAUDE.md")) as f:
                 text = f.read()
             self.assertTrue(text.startswith("# Repo rules\n"))
-            self.assertEqual(text.count("## Code questions"), 1)
+            self.assertEqual(text.count("## Code questions"), 0)     # the old rule is replaced, not doubled
+            self.assertEqual(text.count(admin.CLAUDE_MD_RULE), 1)
+            self.assertTrue(text.endswith("## Other\nkeep me\n"))
+            self.assertTrue(_os.path.isfile(_os.path.join(repo, ".claude", "hooks", "kb-guard.py")))
             self.assertTrue(_os.path.isfile(_os.path.join(repo, ".claude", "skills", "kb", "SKILL.md")))
             self.assertTrue(_os.path.isfile(_os.path.join(repo, ".claude", "hooks", "kb-reminder.py")))
+
+    def test_howto_installer_adds_the_rule_once_and_keeps_a_changed_one(self):
+        import io, os as _os, subprocess as _sp, sys as _sys, tempfile as _tf, zipfile as _zf
+        data, _ = admin.howto_file("kb-claude-setup.zip")
+        with _zf.ZipFile(io.BytesIO(data)) as z, _tf.TemporaryDirectory() as tmp:
+            z.extractall(_os.path.join(tmp, "bundle"))
+            install = [_sys.executable, _os.path.join(tmp, "bundle", "install.py"), "--project"]
+            fresh, own = _os.path.join(tmp, "fresh"), _os.path.join(tmp, "own")
+            _os.makedirs(own)
+            for _ in range(2):
+                _sp.run(install + [fresh], check=True, capture_output=True)
+            with open(_os.path.join(fresh, "CLAUDE.md")) as f:
+                self.assertEqual(f.read(), admin.CLAUDE_MD_RULE + "\n")
+            mine = "## Code search\nOur own words about kb.\n"
+            with open(_os.path.join(own, "CLAUDE.md"), "w") as f:
+                f.write(mine)
+            out = _sp.run(install + [own], check=True, capture_output=True, text=True).stdout
+            with open(_os.path.join(own, "CLAUDE.md")) as f:
+                self.assertEqual(f.read(), mine)
+            self.assertIn("compare it by hand", out)
 
     def test_howto_files_are_a_fixed_list(self):
         c = self.client()

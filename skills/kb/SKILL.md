@@ -65,7 +65,10 @@ because it follows real edges (calls, eloquent, fk, sql, http_request) rather th
    about one symbol rather than re-running the same question.
 4. **Docs vs code.** Connection/architecture/impact → graph tools. "Where did we write about X" →
    `search` with `domain: docs` → `docs_get` the most relevant path, then answer **with the citation**.
-5. **Reach for the graph BEFORE grep — and before delegating.** A spawned `Explore`/general
+5. **Reach for the graph BEFORE grep — and before delegating.** Every search where you do not know
+   the file yet starts here, also a search for one word (`code_grep` takes exact text). A project can
+   enforce it: the `kb-guard.py` hook refuses Grep, Glob and search sub-agents until the session calls
+   a `kb` tool once. A spawned `Explore`/general
    sub-agent defaults to text search and will *not* use these tools unless told. If you delegate a
    "how does X work" investigation, either run the graph query yourself first, or instruct the
    sub-agent explicitly to use the `kb` graph tools. Don't let a delegation silently downgrade the

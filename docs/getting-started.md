@@ -25,6 +25,9 @@
 4. **Build:** `kb build` (a few minutes the first time; `kb update` after that).
 5. **Connect your agent:** `claude mcp add kb -- kb-mcp` (or the `.mcp.json` entry in
    [Install](install.md#_1-mcp-server-config)), then restart the session.
+6. **Make kb the first search tool:** install the `kb` skill, the two hooks and the `CLAUDE.md` rule
+   ([Install, step 3](install.md#_3-make-kb-the-first-search-tool-required)). Do not stop at step 5: an agent with the tools only
+   connected keeps to grep and never asks the knowledge base.
 
 That is the whole core. Everything else is optional and off until you turn it on.
 
