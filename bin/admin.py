@@ -9,7 +9,8 @@ plugin with roles -> no admin pages.
 
 Sign-in: the same login as the browser sign-in of MCP clients (user name, password, the authenticator
 code, through the login webhook). The token is checked like any tool call; then a session cookie
-(random, HttpOnly, Secure behind TLS, SameSite=Strict, 8 hours) stands for it. Every request checks
+(random, HttpOnly, Secure behind TLS, SameSite=Strict; 15 minutes without a request, 8 hours at most)
+stands for it. Every request checks
 the token of the session again (cached KB_AUTH_CACHE_SECONDS): a removed token or a new password ends
 the session, and a lost admin right ends the admin pages. Every form carries the session's own CSRF
 token. Pages are plain HTML, no scripts. The password pages have an attempt limit (Throttle).
@@ -45,7 +46,11 @@ import addons  # noqa: E402
 import kb_core
 import warm
 
-SESSION_TTL = 8 * 3600
+SESSION_TTL = 8 * 3600   # a session of the pages ends after this, whatever the person does
+try:                     # ... and earlier after this time without a request (KB_ADMIN_SESSION_IDLE, seconds)
+    SESSION_IDLE = max(60, int(os.environ.get("KB_ADMIN_SESSION_IDLE") or 900))
+except ValueError:
+    SESSION_IDLE = 900
 COOKIE = "kb_admin"
 ID_FIELDS = ("uname", "username", "name", "id", "uid")   # to show and to find a user
 # The fields that may make a user an admin (KB_ADMINS, admins.txt): stable, unique identifiers only. The
@@ -88,8 +93,12 @@ def is_admin(user: dict, names: set[str]) -> bool:
 
 
 class Sessions:
-    def __init__(self, ttl: float = SESSION_TTL):
+    """The sessions of the pages, in memory. A session ends after `idle` seconds without a request and
+    after `ttl` seconds in any case. An agent does not use a session: its token has its own rules."""
+
+    def __init__(self, ttl: float = SESSION_TTL, idle: float | None = None):
         self.ttl = ttl
+        self.idle = SESSION_IDLE if idle is None else idle
         self.items: dict[str, dict] = {}
         self.lock = threading.Lock()
         # (token) -> None, called when a session ends (sign-out, expiry, an admin change): kb-http ends the
@@ -109,8 +118,9 @@ class Sessions:
         sid = secrets.token_urlsafe(32)
         with self.lock:
             gone = self._expire()
+            now = time.monotonic()
             self.items[sid] = {"user": user, "token": token, "csrf": secrets.token_urlsafe(24), "admin": admin,
-                               "exp": time.monotonic() + self.ttl}
+                               "end": now + self.ttl, "exp": now + min(self.ttl, self.idle)}
         self._ended(gone)
         return sid
 
@@ -120,6 +130,8 @@ class Sessions:
         with self.lock:
             gone = self._expire()
             found = self.items.get(sid)
+            if found is not None:   # a request: the idle time starts again, the end of the session stays
+                found["exp"] = min(found["end"], time.monotonic() + self.idle)
         self._ended(gone)
         return found
 

@@ -191,8 +191,21 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(len(self.store.all()["ann@example.com"]["tokens"]), users.SIGNIN_KEEP)
         self.assertEqual(self.store.permissions(tokens[0], ["api"])[0], 401)     # the oldest went
         self.assertEqual(self.store.permissions(tokens[-1], ["api"])[0], 200)
-        self.clock[0] += users.SIGNIN_IDLE + 1
-        self.assertEqual(self.store.permissions(tokens[-1], ["api"])[0], 401)
+        self.clock[0] += 5 * 365 * 86400                                        # an agent token has no end ...
+        self.assertEqual(users.SIGNIN_IDLE, 0)
+        self.assertEqual(self.store.permissions(tokens[-1], ["api"])[0], 200)
+        with mock.patch.object(users, "SIGNIN_IDLE", 30 * 86400):                # ... unless the server sets days
+            self.clock[0] += 30 * 86400 + users.TOUCH_SECONDS + 1
+            self.assertEqual(self.store.permissions(tokens[-1], ["api"])[0], 401)
+
+    def test_a_page_sign_in_token_that_no_session_ended_goes_when_idle(self):
+        self.store.add("ann@example.com", ["api"], key=False)
+        self.store.set_password("ann@example.com", "correct horse battery")
+        page = self.store.login("ann@example.com", "correct horse battery", purpose="page")
+        agent = self.store.login("ann@example.com", "correct horse battery")
+        self.clock[0] += users.PAGE_IDLE + users.TOUCH_SECONDS + 1
+        self.assertEqual(self.store.permissions(agent, ["api"])[0], 200)
+        self.assertEqual(self.store.permissions(page, ["api"])[0], 401)
 
     def test_five_wrong_passwords_lock_the_name_but_not_a_token(self):
         key = self.store.add("ann@example.com", ["api"])

@@ -965,6 +965,7 @@ class Handler(BaseHTTPRequestHandler):
         _audit(admin_name(ident.user), "admin sign-in" if is_admin else "sign-in")
         self.send_response(302)
         home = f"{base}/admin" if is_admin else f"{base}/admin{member_home}"
+        # The cookie lives as long as the longest session; the server ends an idle one earlier.
         for k, v in {**self._set_cookie(sid, admin.SESSION_TTL), "Location": home}.items():
             self.send_header(k, v)
         self.send_header("Content-Length", "0")
@@ -1131,7 +1132,8 @@ def make_server(host: str = HOST, port: int = PORT, auth: Authenticator | None =
     def check(token: str) -> None:
         auth.check_upstream(token)   # the token behind a wrapper: never resolved as a wrapper again
 
-    srv_oauth = oauth.Server(env, check, os.path.join(kb_core.KB, "logs", "oauth-clients.json")) \
+    srv_oauth = oauth.Server(env, check, os.path.join(kb_core.KB, "logs", "oauth-clients.json"),
+                             tokens_file=os.path.join(kb_core.KB, "logs", "oauth-tokens.json")) \
         if env else None
     if srv_oauth is not None:
         srv_oauth.on_event = _audit
@@ -1148,7 +1150,8 @@ def make_server(host: str = HOST, port: int = PORT, auth: Authenticator | None =
         srv_oauth.login_post = lambda url, body, headers, ip: webhook_login(access, url, body, headers, ip)
     sessions = admin.Sessions()
     if callable(getattr(access, "logout", None)):
-        # A session that ends (sign-out, 8 hours, an admin change) ends its sign-in token in the plugin.
+        # A session that ends (sign-out, 15 idle minutes, 8 hours, an admin change) ends its sign-in token
+        # in the plugin.
         def ended(token: str) -> None:
             access.logout(token, kb_core)
             auth.forget()

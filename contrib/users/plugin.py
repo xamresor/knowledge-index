@@ -20,9 +20,10 @@ For a team that wants no second system behind the two webhooks of the access pro
   is no admin reaches only that page and the how-to.
 - A token is a long random string. It shows once; the store keeps only its SHA-256. It lives until its
   owner or an admin removes it, or an admin disables or removes the user. A change holds at once.
-- The password also works at the browser sign-in of an agent. Each sign-in makes a sign-in token: it ends
-  after 30 days without a request, and a new password ends all of them. Agents keep their 10 most recently
-  used, the admin pages their own 10; a page sign-in token ends with its session.
+- The password also works at the browser sign-in of an agent. Each sign-in makes a sign-in token. The
+  token of an agent has no end of its own (KB_SIGNIN_IDLE_DAYS sets days without a request, 0 = none); a
+  new password ends all of them. Agents keep their 10 most recently used, the admin pages their own 10; a
+  page sign-in token ends with its session (15 idle minutes, 8 hours at most).
 
 Mail: `<data>/smtp.env` (owner only) or the environment: KB_SMTP_HOST, KB_SMTP_PORT (587), KB_SMTP_USER,
 KB_SMTP_PASSWORD, KB_SMTP_FROM, KB_SMTP_TLS (starttls | ssl | none) and KB_PUBLIC_URL, the address of this
@@ -79,7 +80,25 @@ SIGNIN_PREFIX = "kbs_"
 SIGNIN_KEEP = 10  # agent sign-in tokens per user (OAuth, kb-login): the least recently used go
 PAGE_KEEP = 10  # sign-in tokens of the admin pages per user: a quota of their own, so that page sign-ins
                 # never push out the token of an agent
-SIGNIN_IDLE = 30 * 86400  # a sign-in token ends after this time without a request
+def _days(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.environ.get(name, "") or default))
+    except ValueError:
+        return default
+
+
+# A sign-in token of an agent (OAuth, kb-login) ends after this time without a request; 0 = no end.
+# KB_SIGNIN_IDLE_DAYS sets the days. The person, an admin or a new password still ends it.
+SIGNIN_IDLE = _days("KB_SIGNIN_IDLE_DAYS", 0) * 86400
+PAGE_IDLE = 30 * 86400  # a page sign-in token that its session did not end (a restart) goes after this
+
+
+def _idle(token: dict, now: float) -> bool:
+    """True when a sign-in token had no request for longer than its kind allows. A key never is."""
+    if token.get("kind") != "signin":
+        return False
+    limit = PAGE_IDLE if token.get("page") else SIGNIN_IDLE
+    return limit > 0 and now - (token.get("last_used") or token.get("created") or 0) > limit
 EMAIL = re.compile(r"^[A-Za-z0-9._+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
 PW_MIN, PW_MAX = 12, 200
 RESET_TTL = 3600  # "forgot the password": the link works this long
@@ -437,8 +456,7 @@ class Store:
         want, found, now = _hash(key or ""), None, self.now()
         for name, rec in self._load().items():
             for tid, token in rec["tokens"].items():
-                idle = token.get("kind") == "signin" and \
-                    now - (token.get("last_used") or token.get("created") or 0) > SIGNIN_IDLE
+                idle = _idle(token, now)
                 if hmac.compare_digest(str(token.get("hash", "")), want) and not rec.get("disabled") and not idle:
                     found = (name, rec, tid)
         return found
@@ -496,8 +514,7 @@ class Store:
                     def last(tid: str) -> float:
                         return tokens[tid].get("last_used") or tokens[tid].get("created") or 0
 
-                    for tid in [tid for tid, t in tokens.items()
-                                if t.get("kind") == "signin" and now - last(tid) > SIGNIN_IDLE]:
+                    for tid in [tid for tid, t in tokens.items() if _idle(t, now)]:
                         del tokens[tid]
                     same = sorted((tid for tid, t in tokens.items()
                                    if t.get("kind") == "signin" and bool(t.get("page")) == page), key=last)
@@ -880,7 +897,7 @@ def login(body: dict, core) -> tuple:
 
 
 def logout(token: str, core) -> None:
-    """An admin session ended (sign-out, or 8 hours): its sign-in token ends too. A key stays."""
+    """An admin session ended (sign-out, 15 idle minutes, or 8 hours): its sign-in token ends too. A key stays."""
     try:
         store(core).end_signin(token)
     except (UserError, OSError) as e:

@@ -334,13 +334,117 @@ class OAuthLimits(unittest.TestCase):
             self.assertIn(mine, self.srv.txns)
             self.assertLessEqual(len(self.srv.txns), 3)
 
-    def test_a_refresh_token_expires(self):
+    def test_a_refresh_token_expires_when_the_server_sets_days(self):
+        self.srv.clients["c"] = {"client_id": "c", "redirect_uris": ["http://localhost:1/cb"]}
+        with mock.patch.object(oauth, "REFRESH_DAYS", 30):
+            rt = self.srv._issue("tok", "c")["refresh_token"]
+            self.t[0] += 31 * 86400
+            with self.assertRaises(oauth.OAuthError) as cm:
+                self.srv.token({"grant_type": "refresh_token", "refresh_token": rt})
+        self.assertEqual(cm.exception.error, "invalid_grant")
+
+    def test_a_refresh_token_has_no_end_by_default(self):
+        self.assertEqual(oauth.REFRESH_DAYS, 0)
         self.srv.clients["c"] = {"client_id": "c", "redirect_uris": ["http://localhost:1/cb"]}
         rt = self.srv._issue("tok", "c")["refresh_token"]
-        self.t[0] += (oauth.REFRESH_DAYS + 1) * 86400
-        with self.assertRaises(oauth.OAuthError) as cm:
+        self.t[0] += 5 * 365 * 86400
+        new = self.srv.token({"grant_type": "refresh_token", "refresh_token": rt})
+        self.assertEqual(self.srv.resolve(new["access_token"]), "tok")
+        with self.assertRaises(oauth.OAuthError):          # still rotated: the old one works once
             self.srv.token({"grant_type": "refresh_token", "refresh_token": rt})
+
+    def test_the_oldest_tokens_of_a_client_go_first_also_without_an_end(self):
+        self.srv.clients["c"] = {"client_id": "c", "redirect_uris": ["http://localhost:1/cb"]}
+        with mock.patch.object(oauth, "TOKENS_PER_CLIENT", 3):
+            issued = []
+            for i in range(5):
+                self.t[0] += 10
+                issued.append(self.srv._issue(f"tok{i}", "c")["refresh_token"])
+        self.assertEqual([rt in self.srv.refresh for rt in issued], [False, False, True, True, True])
+
+
+class TokensOverARestart(unittest.TestCase):
+    """A restart or a deploy of the server asks nobody to sign in again: the tokens are in a file."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.clients = os.path.join(self.tmp.name, "logs", "oauth-clients.json")
+        self.tokens = os.path.join(self.tmp.name, "logs", "oauth-tokens.json")
+        self.t = [1000.0]
+        self.valid = {"tok"}
+
+    def server(self) -> "oauth.Server":
+        def check(token):
+            if token not in self.valid:
+                err = Exception("ended")
+                err.status = 401
+                raise err
+        return oauth.Server({"KB_LOGIN_URL": "http://127.0.0.1:1/x"}, check, self.clients,
+                            now=lambda: self.t[0], tokens_file=self.tokens)
+
+    def signed_in(self, srv) -> tuple[str, dict]:
+        cid = srv.register({"redirect_uris": ["http://localhost:1/cb"]})["client_id"]
+        srv._seen(cid, "ann")
+        return cid, srv.token({"grant_type": "refresh_token", "client_id": cid,
+                               "refresh_token": srv._issue("tok", cid, "ann")["refresh_token"]})
+
+    def test_access_and_refresh_tokens_work_after_a_restart(self):
+        cid, got = self.signed_in(self.server())
+        self.assertEqual(os.stat(self.tokens).st_mode & 0o777, 0o600)     # the owner only
+        again = self.server()                                              # the restart
+        self.assertEqual(again.resolve(got["access_token"]), "tok")
+        self.t[0] += oauth.TOKEN_TTL + 1                                    # the access token ended ...
+        self.assertIsNone(again.resolve(got["access_token"]))
+        new = again.token({"grant_type": "refresh_token", "client_id": cid,
+                           "refresh_token": got["refresh_token"]})         # ... the client refreshes, no browser
+        self.assertEqual(again.resolve(new["access_token"]), "tok")
+        third = self.server()                                              # the rotation is on disk too
+        self.assertEqual(third.resolve(new["access_token"]), "tok")
+        with self.assertRaises(oauth.OAuthError):
+            third.token({"grant_type": "refresh_token", "client_id": cid, "refresh_token": got["refresh_token"]})
+
+    def test_a_revoked_client_stays_revoked_after_a_restart(self):
+        srv = self.server()
+        cid, got = self.signed_in(srv)
+        self.assertTrue(srv.revoke(cid))
+        again = self.server()
+        self.assertIsNone(again.resolve(got["access_token"]))
+        self.assertEqual((again.refresh, again.access), ({}, {}))
+
+    def test_a_token_the_login_webhook_ended_asks_for_a_sign_in(self):
+        cid, got = self.signed_in(self.server())
+        self.valid.clear()                                 # an admin disabled the person, or a new password
+        again = self.server()
+        with self.assertRaises(oauth.OAuthError) as cm:
+            again.token({"grant_type": "refresh_token", "client_id": cid, "refresh_token": got["refresh_token"]})
         self.assertEqual(cm.exception.error, "invalid_grant")
+        self.assertNotIn(got["refresh_token"], self.server().refresh)
+
+    def test_a_broken_or_foreign_file_gives_no_tokens(self):
+        cid, got = self.signed_in(self.server())
+        with open(self.tokens, encoding="utf-8") as f:
+            data = json.load(f)
+        data["refresh"]["x"] = {"token": "tok", "client_id": "no-such-client"}
+        data["refresh"]["y"] = "not an entry"
+        data["access"]["z"] = {"token": "tok", "client_id": cid}             # an access token with no end
+        data["access"]["old"] = {"token": "tok", "client_id": cid, "exp": 1.0}
+        with open(self.tokens, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        again = self.server()
+        self.assertEqual(set(again.refresh), {got["refresh_token"]})
+        self.assertFalse({"z", "old"} & set(again.access))
+        with open(self.tokens, "w", encoding="utf-8") as f:
+            f.write("{ not json")
+        self.assertEqual(self.server().refresh, {})
+
+    def test_a_failed_save_does_not_break_the_sign_in(self):
+        srv = self.server()
+        cid = srv.register({"redirect_uris": ["http://localhost:1/cb"]})["client_id"]
+        with mock.patch.object(oauth.tempfile, "mkstemp", side_effect=OSError("disk full")):
+            got = srv.token({"grant_type": "refresh_token", "client_id": cid,
+                             "refresh_token": srv._issue("tok", cid)["refresh_token"]})
+        self.assertEqual(srv.resolve(got["access_token"]), "tok")
 
 
 class LoopbackRedirects(unittest.TestCase):

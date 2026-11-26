@@ -137,7 +137,10 @@ the registry: each setting with its choices, default, description and env variab
 | `KB_AUTH_HINT` | a sign-in hint | Text a caller without a valid token gets. |
 | `KB_RESET_PER_DAY` | `3` | Users plugin: password mails ("Forgot the password?", "Reset password") one user gets in 24 hours, on top of one per 5 minutes. Over it: no mail, the same answer. |
 | `KB_OAUTH` | `on` | `off` turns the browser sign-in of MCP clients off: ready tokens only. The admin pages stay. |
-| `KB_OAUTH_TOKEN_TTL` | `28800` | Lifetime of an access token of the browser sign-in, seconds; `expires_in` says the same. A refresh gives a new one while the login webhook's token behind it lives. |
+| `KB_OAUTH_TOKEN_TTL` | `28800` | Lifetime of an access token of the browser sign-in, seconds; `expires_in` says the same. A refresh gives a new one while the login webhook's token behind it lives. The tokens are kept in `<data>/logs/oauth-tokens.json`: a restart asks nobody to sign in again. |
+| `KB_OAUTH_REFRESH_DAYS` | `0` | Days after which a refresh token of the browser sign-in ends; `0` = no end. |
+| `KB_SIGNIN_IDLE_DAYS` | `0` | Users plugin: days without a request after which a sign-in token of an agent ends; `0` = no end. |
+| `KB_ADMIN_SESSION_IDLE` | `900` | Seconds without a request after which a session of the admin pages ends (8 hours at most in any case). |
 | `KB_LOGIN_ENV` | `<data>/kb-login.env`, then `<data>/deploy/kb-login.env` | A KEY=VALUE file with `KB_LOGIN_URL` and `KB_HOOK_HEADERS`. |
 | `KB_USAGE_FILE` | `<data>/logs/usage.json` | Base name of the usage database (`usage.sqlite` next to it). |
 | `KB_SOURCE_URL` | the public repository | Where users find the source of what they use (AGPL); set it for a changed copy. |

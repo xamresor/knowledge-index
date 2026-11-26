@@ -25,15 +25,19 @@ Deliberate limits:
     person through the browser again. The access token a refresh replaces ends a minute later, a client
     keeps at most KB_OAUTH_TOKENS_PER_CLIENT (50) access and refresh tokens, and the tokens, codes and
     sign-ins of a revoked client stop at once.
-  * Codes, login transactions, access and refresh tokens live in memory (a restart means one more
-    browser sign-in). Registered clients are kept in a file: they hold no secret.
+  * Codes and login transactions live in memory. Access and refresh tokens are kept in a file that only
+    the server user can read (`tokens_file`, mode 0600), so a restart or a deploy asks nobody to sign in
+    again. The file holds the tokens of the login webhook: whoever reads it can search as those people.
+    It lies next to the index, which the same reader has anyway. Registered clients are kept in a second
+    file: they hold no secret.
   * /register needs no sign-in, so everything a stranger can make has a limit (environment, defaults):
     KB_OAUTH_MAX_CLIENTS (1000) clients, KB_OAUTH_MAX_URIS (10) redirect URIs per client of at most
     KB_OAUTH_MAX_URI_LENGTH (512) characters, KB_OAUTH_MAX_TXNS (1000) sign-ins in progress, of them
     KB_OAUTH_TXNS_PER_ADDRESS (10) of one client address. A full list pushes out the oldest sign-in of the
     address that has the most, or one older than a minute, never a fresh sign-in of another person; a client
-    that nobody signed in with goes after KB_OAUTH_CLIENT_DAYS (1), and first when the list is full; a refresh token ends after
-    KB_OAUTH_REFRESH_DAYS (30). kb-http limits registrations per address (admin.register_throttle).
+    that nobody signed in with goes after KB_OAUTH_CLIENT_DAYS (1), and first when the list is full; a refresh token has
+    no end of its own (KB_OAUTH_REFRESH_DAYS, 0 = none): it ends when an admin revokes the client or the login
+    webhook's token behind it ends. kb-http limits registrations per address (admin.register_throttle).
   * Enrolling a new authenticator is not done here (it shows a secret): the page says to use the app
     or bin/kb-login once.
 """
@@ -74,7 +78,7 @@ CLIENT_DAYS = _env_int("KB_OAUTH_CLIENT_DAYS", 1)        # a client nobody signe
 TXNS_PER_CLIENT = _env_int("KB_OAUTH_TXNS_PER_CLIENT", 20)  # sign-ins in progress of one client
 TXNS_PER_ADDRESS = _env_int("KB_OAUTH_TXNS_PER_ADDRESS", 10)  # sign-ins in progress of one client address
 TXN_FRESH = 60       # a sign-in younger than this never gives way to another address
-REFRESH_DAYS = _env_int("KB_OAUTH_REFRESH_DAYS", 30)     # a refresh token ends after this time
+REFRESH_DAYS = _env_int("KB_OAUTH_REFRESH_DAYS", 0)      # a refresh token ends after this time; 0 = no end
 ROTATE_OVERLAP = 60  # seconds the access token a refresh replaced still works (requests in flight)
 TOKENS_PER_CLIENT = _env_int("KB_OAUTH_TOKENS_PER_CLIENT", 50)  # live access and refresh tokens of one client
 LOOPBACK = ("localhost", "127.0.0.1", "[::1]", "::1")
@@ -127,7 +131,8 @@ def is_loopback_redirect(uri: str) -> bool:
 class Server:
     """State and logic; the HTTP adapter in kb-http turns requests into calls to `handle`."""
 
-    def __init__(self, login_env: dict, check_token, clients_file: str = "", now=time.time):
+    def __init__(self, login_env: dict, check_token, clients_file: str = "", now=time.time,
+                 tokens_file: str = ""):
         self.env = login_env                 # KB_LOGIN_URL, KB_HOOK_HEADERS (docs/access-protocol.md)
         self.check_token = check_token       # token -> raises when the API no longer accepts it
         self.clients_file = clients_file
@@ -139,6 +144,9 @@ class Server:
         self.codes: dict[str, dict] = {}
         self.refresh: dict[str, dict] = {}
         self.access: dict[str, dict] = {}    # SHA-256 of an access token -> the token behind it, client, end
+        self.tokens_file = tokens_file       # refresh and access, kept over a restart; "" = memory only
+        self._dirty = False                  # refresh or access changed since the last save
+        self._load_tokens()
         self.headers: dict[str, str] = {}    # extra headers for the login webhook (kb-http: its self-call header)
         # (url, body, headers, ip) -> answer dict, or LoginError: the call of the login webhook. kb-http sets
         # it to call its access plugin in-process when the webhook is this server; else kb_login.post.
@@ -184,17 +192,65 @@ class Server:
                 pass
             raise
 
+    def _load_tokens(self) -> None:
+        """Read the refresh and access tokens of the last run. An entry that ended, that has no client any
+        more or that is not in the right form is left out. A missing or broken file means no tokens."""
+        if not self.tokens_file:
+            return
+        try:
+            with open(self.tokens_file, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return
+        t = self.now()
+        for name, table in (("refresh", self.refresh), ("access", self.access)):
+            rows = data.get(name) if isinstance(data, dict) else None
+            for k, v in (rows.items() if isinstance(rows, dict) else []):
+                if not (isinstance(v, dict) and isinstance(v.get("token"), str) and v["token"]
+                        and v.get("client_id") in self.clients):
+                    continue
+                exp = v.get("exp")
+                if exp is not None and (not isinstance(exp, (int, float)) or exp < t):
+                    continue
+                if name == "access" and exp is None:
+                    continue                  # an access token always has an end
+                table[k] = v
+
+    def _save_tokens(self) -> None:
+        """Write the refresh and access tokens when they changed. The caller holds the lock. A failed write
+        (a full disk) never breaks a sign-in: the tokens stay in memory and the next change tries again."""
+        if not self._dirty or not self.tokens_file:
+            self._dirty = False
+            return
+        folder = os.path.dirname(self.tokens_file) or "."
+        tmp = ""
+        try:
+            os.makedirs(folder, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(prefix=f".{os.path.basename(self.tokens_file)}.", suffix=".tmp", dir=folder)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:   # mkstemp: readable by the owner only
+                json.dump({"refresh": self.refresh, "access": self.access}, f)
+            os.replace(tmp, self.tokens_file)
+            self._dirty = False
+        except OSError:
+            try:
+                if tmp:
+                    os.unlink(tmp)
+            except OSError:
+                pass
+
     def _expire(self) -> None:
         t = self.now()
         for table in (self.txns, self.codes, self.refresh, self.access):
             for k in [k for k, v in table.items() if v.get("exp", float("inf")) < t]:
                 self._dropped.extend([table[k]["token"]] if table[k].get("token") else [])
                 del table[k]
+                self._dirty = self._dirty or table is self.refresh or table is self.access
 
     def _end_dropped(self) -> None:
         """Hand the upstream tokens that nothing holds any more to on_drop. Takes the lock itself; the
         callback runs without it."""
         with self.lock:
+            self._save_tokens()
             dropped, self._dropped = set(self._dropped), []
             if not dropped or self.on_drop is None:
                 return
@@ -435,6 +491,7 @@ class Server:
             for table in (self.refresh, self.codes, self.access):
                 for k in [k for k, v in table.items() if v["client_id"] == client_id]:
                     self._dropped.append(table.pop(k)["token"])
+            self._dirty = True
             self._save_clients()
         self._end_dropped()
         return True
@@ -494,6 +551,7 @@ class Server:
             with self.lock:
                 self._expire()
                 entry = self.refresh.pop(rt, None)  # rotated on use
+                self._dirty = self._dirty or entry is not None
                 self._hold(entry, held)
             if not entry:
                 raise OAuthError(400, "invalid_grant", "unknown refresh token")
@@ -508,6 +566,7 @@ class Server:
                 with self.lock:
                     if entry["client_id"] in self.clients:
                         self.refresh[rt] = entry
+                        self._dirty = True
                 raise OAuthError(503, "temporarily_unavailable",
                                  "the sign-in service is not available: try again later") from None
             self._seen(entry["client_id"], entry.get("user", ""))
@@ -515,7 +574,8 @@ class Server:
         raise OAuthError(400, "unsupported_grant_type", "use authorization_code or refresh_token")
 
     def _issue(self, token: str, client_id: str, user: str = "", replaces: str | None = None) -> dict:
-        """A new access token that ends after TOKEN_TTL, and a refresh token. The map keeps only the
+        """A new access token that ends after TOKEN_TTL, and a refresh token (no end when REFRESH_DAYS
+        is 0). The map keeps only the
         SHA-256 of the access token. The client must still exist under the lock: one revoked while the
         refresh asked the permission webhook gets nothing. `replaces` is the SHA-256 of the access token
         a refresh supersedes: it ends after ROTATE_OVERLAP. A client keeps at most TOKENS_PER_CLIENT
@@ -531,12 +591,17 @@ class Server:
             if old is not None:
                 old["exp"] = min(old["exp"], now + ROTATE_OVERLAP)
             for table in (self.access, self.refresh):
-                mine = sorted((v["exp"], k) for k, v in table.items() if v["client_id"] == client_id)
+                mine = sorted((v.get("created", v.get("exp", 0)), k) for k, v in table.items()
+                              if v["client_id"] == client_id)
                 for _, k in mine[:max(0, len(mine) - TOKENS_PER_CLIENT + 1)]:
                     self._dropped.append(table.pop(k)["token"])
             self.refresh[rt] = {"token": token, "client_id": client_id, "user": user, "at": _sha(at),
-                                "exp": now + REFRESH_DAYS * 86400}
-            self.access[_sha(at)] = {"token": token, "client_id": client_id, "exp": now + TOKEN_TTL}
+                                "created": now}
+            if REFRESH_DAYS > 0:
+                self.refresh[rt]["exp"] = now + REFRESH_DAYS * 86400
+            self.access[_sha(at)] = {"token": token, "client_id": client_id, "created": now,
+                                     "exp": now + TOKEN_TTL}
+            self._dirty = True
         return {"access_token": at, "token_type": "Bearer", "expires_in": TOKEN_TTL,
                 "refresh_token": rt}
 

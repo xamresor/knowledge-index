@@ -14,6 +14,17 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+- **An agent signs in once; a person on the pages for 15 idle minutes** (2026-11-26).
+  - The access and refresh tokens of the browser sign-in (`/mcp`, OAuth) are kept in
+    `<data>/logs/oauth-tokens.json` (mode 0600). They lived in memory, so every restart or deploy of the
+    server sent each person through the browser again.
+  - A refresh token has no end date (`KB_OAUTH_REFRESH_DAYS`, default `0`, was 30). A sign-in token of an
+    agent in the users plugin has no idle end (`KB_SIGNIN_IDLE_DAYS`, default `0`, was 30 days). An admin
+    who revokes the client or disables the person, the person on "My tokens", and a new password still end
+    it. A page sign-in token that no session ended still goes after 30 idle days.
+  - A session of the admin pages ends after 15 minutes without a request (`KB_ADMIN_SESSION_IDLE`, default
+    `900`) and after 8 hours in any case. It was 8 hours flat.
+
 - **Setup: kb is the first search tool, and the setup says so** (2026-11-26). An agent that followed the
   setup steps connected the server and stopped: the priority was a "recommended" step. New hook
   `skills/kb/install/kb-guard.py` (`PreToolUse`, matcher `Grep|Glob|Agent|Task`) refuses a Grep or Glob over

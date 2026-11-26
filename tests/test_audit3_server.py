@@ -133,6 +133,30 @@ class SignInQuotas(StoreTmp):
         s.get("nothing")   # expires tok-2 (ttl 0)
         self.assertEqual(ended, ["tok-1", "tok-2"])
 
+    def test_a_page_session_ends_after_15_idle_minutes_and_8_hours_at_most(self):
+        self.assertEqual((admin.SESSION_IDLE, admin.SESSION_TTL), (900, 8 * 3600))
+        clock = [0.0]
+        ended = []
+        with mock.patch.object(admin.time, "monotonic", lambda: clock[0]):
+            s = admin.Sessions()
+            s.on_end = ended.append
+            busy = s.create({"name": "ann"}, "busy")
+            idle = s.create({"name": "bob"}, "idle")
+            for _ in range(3):                       # a request every 10 minutes keeps the session
+                clock[0] += 600
+                self.assertIsNotNone(s.get(busy))
+            self.assertIsNone(s.get(idle))           # 30 minutes with no request
+            self.assertEqual(ended, ["idle"])
+            clock[0] += 901
+            self.assertIsNone(s.get(busy))           # 15 minutes and a second without a request
+            long = s.create({"name": "ann"}, "long")
+            for _ in range(8 * 6 - 1):
+                clock[0] += 600
+                self.assertIsNotNone(s.get(long))
+            clock[0] += 601                          # past 8 hours, whatever the person does
+            self.assertIsNone(s.get(long))
+        self.assertEqual(ended, ["idle", "busy", "long"])
+
 
 class ScryptCap(StoreTmp):
     """Finding 9: at most a few scrypt hashes at once; one more is a 503, not more memory."""

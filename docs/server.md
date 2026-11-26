@@ -55,12 +55,14 @@ other 4xx refusal is 403, an unreachable webhook, a 5xx answer or a body of anot
 | `KB_GRAPH_CACHE_FILES` / `KB_GRAPH_VIEWS` | `2` / `8` | graph files the graphify worker keeps parsed / views it keeps cut in memory (two per caller project set) |
 | `KB_OAUTH` | `on` | `off` = no browser sign-in of MCP clients, bearer tokens only. The admin pages and their sign-in stay |
 | `KB_LOGIN_ENV` | `<data>/kb-login.env`, then `<data>/deploy/kb-login.env` | a KEY=VALUE file with `KB_LOGIN_URL` and `KB_HOOK_HEADERS` |
-| `KB_OAUTH_TOKEN_TTL` | `28800` | lifetime of an access token of the browser sign-in (`kbo_…`), the `expires_in` the client is told. It stands for the login webhook's token; a refresh gives a new one while that token lives. Access tokens live in memory: a restart means one more browser sign-in |
+| `KB_OAUTH_TOKEN_TTL` | `28800` | lifetime of an access token of the browser sign-in (`kbo_…`), the `expires_in` the client is told. It stands for the login webhook's token; a refresh gives a new one while that token lives. Access and refresh tokens are kept in `<data>/logs/oauth-tokens.json` (mode 0600), so a restart or a deploy asks nobody to sign in again. The file holds the tokens of the login webhook: keep it out of backups that other people read |
 | `KB_OAUTH_MAX_CLIENTS` / `KB_OAUTH_MAX_URIS` / `KB_OAUTH_MAX_URI_LENGTH` | `1000` / `10` / `512` | registered clients, redirect URIs per client, characters per URI. `/token` answers a client it does not know (revoked by an admin, or pushed out of a full list) with `401 invalid_client`: the MCP client then registers again |
 | `KB_OAUTH_MAX_TXNS` / `KB_OAUTH_TXNS_PER_CLIENT` / `KB_OAUTH_TXNS_PER_ADDRESS` | `1000` / `20` / `10` | browser sign-ins in progress, in all, per client and per client address. An address over its limit loses its own oldest; a full list loses one of the busiest address or one older than a minute, never a fresh sign-in of another person: then the new one gets `503` |
 | `KB_TRUSTED_PROXIES` | — | proxy addresses or networks besides loopback whose last `X-Forwarded-For` entry is the client (e.g. `172.17.0.0/16` for nginx outside a Docker container) |
 | `KB_OAUTH_AUTHORIZE_LIMIT` | `60` | `GET /authorize` per address in 5 minutes |
-| `KB_OAUTH_CLIENT_DAYS` / `KB_OAUTH_REFRESH_DAYS` | `1` / `30` | a client nobody signed in with goes after this, and first when the client list is full; a refresh token ends after this |
+| `KB_OAUTH_CLIENT_DAYS` / `KB_OAUTH_REFRESH_DAYS` | `1` / `0` | a client nobody signed in with goes after this, and first when the client list is full; a refresh token ends after this many days (`0` = no end: it ends when an admin revokes the client or the token of the login webhook behind it ends) |
+| `KB_SIGNIN_IDLE_DAYS` | `0` | users plugin: a sign-in token of an agent ends after this many days without a request (`0` = no end) |
+| `KB_ADMIN_SESSION_IDLE` | `900` | a session of the pages ends after this many seconds without a request, and after 8 hours in any case |
 | `KB_OAUTH_TOKENS_PER_CLIENT` | `50` | live access and refresh tokens of one client; the oldest go first. The access token a refresh replaces ends 60 s later |
 | `KB_OAUTH_REGISTER_LIMIT` / `KB_OAUTH_REGISTER_LIMIT_ALL` | `20` / `2000` | client registrations per address per hour; then `429`. Over the second, each address gets 5. A registration that cannot be saved gets `503` |
 
@@ -101,8 +103,10 @@ from the environment, else from `<data>/smtp.env`. With an access plugin on, kb-
 
 Every password sign-in makes a sign-in token. An agent (browser sign-in of an MCP client, `kb-login`) keeps
 its 10 most recently used, and the admin pages their own 10: page sign-ins never push out the token of an
-agent. A page sign-in token ends with its session (sign-out, 8 hours, or an admin change). A sign-in token
-also ends after 30 days without a request. At most 4 password hashes run at once (about 16 MiB each); one
+agent. A page sign-in token ends with its session (sign-out, 15 minutes without a request, 8 hours, or an admin
+change). A sign-in token of an agent has no end of its own: the person removes it on "My tokens", an admin
+disables the person or revokes the client, or a new password ends it. `KB_SIGNIN_IDLE_DAYS` gives it an end
+after days without a request. At most 4 password hashes run at once (about 16 MiB each); one
 more waits 5 seconds, then the sign-in gets `503`. A users file that cannot be written (a full disk, a
 read-only folder) does not stop the tokens: the "last used" time stays in memory, the server logs it once,
 and a password sign-in gets a clear `503`.
@@ -159,7 +163,8 @@ display `name` never makes an admin: a system that lets a person choose the own 
 person become one. Give the webhook a `uname` (or `id`) and name that in `KB_ADMINS`. Without a login
 webhook (`KB_LOGIN_URL`) there is no sign-in and the pages are a 404; `KB_OAUTH=off` does not remove them.
 Sign-in goes through the login webhook with its second factor, then
-an HttpOnly, SameSite=Strict session cookie (8 hours) and a CSRF token on every form. Every request checks
+an HttpOnly, SameSite=Strict session cookie and a CSRF token on every form. The session ends after 15
+minutes without a request (`KB_ADMIN_SESSION_IDLE`) and after 8 hours in any case; an agent is not affected. Every request checks
 the token of the session again (cached `KB_AUTH_CACHE_SECONDS`): a removed token or a new password ends the
 session, and an admin who lost the right keeps only the pages of a member. Pages: status
 (version, graph, the last builds, warm helpers, a rebuild button: it runs `kb-refresh --force` and says
