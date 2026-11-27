@@ -27,9 +27,21 @@ Deliberate limits:
     sign-ins of a revoked client stop at once.
   * Codes and login transactions live in memory. Access and refresh tokens are kept in a file that only
     the server user can read (`tokens_file`, mode 0600), so a restart or a deploy asks nobody to sign in
-    again. The file holds the tokens of the login webhook: whoever reads it can search as those people.
-    It lies next to the index, which the same reader has anyway. Registered clients are kept in a second
-    file: they hold no secret.
+    again. The file is no credential: an entry is found by the SHA-256 of the client's token, and the token
+    of the login webhook in it is sealed with that client token (`_seal`). A reader of the file or of a
+    backup has no token of a client, so the reader can open no entry. Registered clients are kept in a
+    second file: they hold no secret.
+  * A change is on disk before the client gets its answer. When the write fails, the client gets 503,
+    the old refresh token still works, and nothing is half done. A revoke that cannot be saved is undone
+    and reported.
+  * A refresh token works once. The server remembers a used one for KB_OAUTH_SPENT_DAYS (90). When a used
+    token comes again, somebody else holds a copy: every token of that sign-in ends and the person signs
+    in again (KB_OAUTH_REUSE=log only writes the audit line). Two sessions of one client that refresh at
+    the same moment are no theft: for ROTATE_OVERLAP seconds the used token gives a pair of its own, at
+    most OVERLAP_PAIRS times.
+  * What the seal does not cover: a person who holds an old token of a client and an old copy of the file
+    from the time of that token can open that entry. KB_OAUTH_SEAL_KEY (a value of the service
+    environment, not in the data folder) closes that: without the key no copy of the file opens.
   * /register needs no sign-in, so everything a stranger can make has a limit (environment, defaults):
     KB_OAUTH_MAX_CLIENTS (1000) clients, KB_OAUTH_MAX_URIS (10) redirect URIs per client of at most
     KB_OAUTH_MAX_URI_LENGTH (512) characters, KB_OAUTH_MAX_TXNS (1000) sign-ins in progress, of them
@@ -45,6 +57,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import html
 import importlib.machinery
 import importlib.util
@@ -81,6 +94,16 @@ TXN_FRESH = 60       # a sign-in younger than this never gives way to another ad
 REFRESH_DAYS = _env_int("KB_OAUTH_REFRESH_DAYS", 0)      # a refresh token ends after this time; 0 = no end
 ROTATE_OVERLAP = 60  # seconds the access token a refresh replaced still works (requests in flight)
 TOKENS_PER_CLIENT = _env_int("KB_OAUTH_TOKENS_PER_CLIENT", 50)  # live access and refresh tokens of one client
+SPENT_DAYS = _env_int("KB_OAUTH_SPENT_DAYS", 90)         # a used refresh token is remembered this long
+# What a used refresh token that comes again does: "revoke" ends every token of that sign-in, "log" only
+# writes the audit line.
+REUSE = (os.environ.get("KB_OAUTH_REUSE") or "revoke").strip().lower()
+OVERLAP_PAIRS = 3    # token pairs one used refresh token gives inside ROTATE_OVERLAP (sessions at the same moment)
+TAKING_WAIT = 15.0   # seconds a /token call waits for another call that holds the same refresh token
+# Optional second key of the seal, kept outside the token file and its backups (an environment variable of
+# the service). With it, an old backup together with an old token of a client opens nothing. Set it once:
+# a change of the value ends every browser sign-in.
+SEAL_KEY = os.environ.get("KB_OAUTH_SEAL_KEY") or ""
 LOOPBACK = ("localhost", "127.0.0.1", "[::1]", "::1")
 
 
@@ -139,14 +162,21 @@ class Server:
         self.now = now
         self.on_event = None                 # (user, action, detail) -> None: the audit log, set by kb-http
         self.lock = threading.Lock()
+        self._released = threading.Condition(self.lock)   # a refresh token left _taking
         self.clients: dict[str, dict] = self._load_clients()
         self.txns: dict[str, dict] = {}
         self.codes: dict[str, dict] = {}
+        # SHA-256 of a refresh / access token -> its entry: the token behind it sealed with the client's
+        # token ("sealed"), the SHA-256 of the token behind it ("tid": one sign-in), client, end.
         self.refresh: dict[str, dict] = {}
-        self.access: dict[str, dict] = {}    # SHA-256 of an access token -> the token behind it, client, end
-        self.tokens_file = tokens_file       # refresh and access, kept over a restart; "" = memory only
-        self._dirty = False                  # refresh or access changed since the last save
-        self._load_tokens()
+        self.access: dict[str, dict] = {}
+        self.spent: dict[str, dict] = {}     # SHA-256 of a used refresh token -> its sign-in ("tid"), when
+        self._plain: dict[str, str] = {}     # tid -> the token behind it; memory only, filled when a client shows a token
+        # A refresh token between its pop and the new pair (the permission webhook is asked meanwhile). It
+        # is still written with the others: a save by another call, then a crash, must not lose it.
+        self._taking: dict[str, dict] = {}
+        self.tokens_file = tokens_file       # refresh, access and spent, kept over a restart; "" = memory only
+        self._dirty = False                  # they changed since the last save
         self.headers: dict[str, str] = {}    # extra headers for the login webhook (kb-http: its self-call header)
         # (url, body, headers, ip) -> answer dict, or LoginError: the call of the login webhook. kb-http sets
         # it to call its access plugin in-process when the webhook is this server; else kb_login.post.
@@ -155,8 +185,18 @@ class Server:
         # holds any more (a code nobody exchanged, a revoked client, an ended refresh token). kb-http ends
         # it in the access plugin, so unfinished sign-ins do not push out the real tokens of the person.
         self.on_drop = None
-        self._dropped: list[str] = []          # upstream tokens of removed entries, checked by _end_dropped
-        self._inflight: dict[str, int] = {}    # upstream tokens of a /token call between pop and issue
+        # tid -> None: the same for a token this process never saw in the open (its entries came from the
+        # disk). `tid` is the SHA-256 of the token, which is what the users plugin keeps of it.
+        self.on_drop_tid = None
+        self._dropped: list[str] = []          # tids of removed entries, checked by _end_dropped
+        self._inflight: dict[str, int] = {}    # tids of a /token call between pop and issue
+        self._load_tokens()
+        with self.lock:
+            legacy = self._dirty
+            self._save_tokens()                # entries of the format before sealing leave the disk now
+            if legacy and self._dirty:
+                print("oauth: the token file still holds tokens in the open: it could not be rewritten "
+                      f"({self.tokens_file}). Check the disk; the next change tries again.", flush=True)
 
     def clients_snapshot(self) -> dict:
         """A deep copy of the registered clients, taken under the lock: a page that iterates it never meets
@@ -193,72 +233,126 @@ class Server:
             raise
 
     def _load_tokens(self) -> None:
-        """Read the refresh and access tokens of the last run. An entry that ended, that has no client any
-        more or that is not in the right form is left out. A missing or broken file means no tokens."""
-        if not self.tokens_file:
-            return
-        try:
-            with open(self.tokens_file, encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, ValueError):
-            return
+        """Read the tokens of the last run. An entry that ended, that has no client any more or that is not
+        in the right form is left out. A missing or broken file means no tokens."""
+        if os.environ.get("KB_DATABASE_URL", "").strip() and hasattr(self, "_load_tokens_pg"):
+            data = self._load_tokens_pg()
+            if data is None:
+                return
+        else:
+            if not self.tokens_file:
+                return
+            try:
+                with open(self.tokens_file, encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, ValueError):
+                return
         t = self.now()
-        for name, table in (("refresh", self.refresh), ("access", self.access)):
+        for name, table in (("refresh", self.refresh), ("access", self.access), ("spent", self.spent)):
             rows = data.get(name) if isinstance(data, dict) else None
             for k, v in (rows.items() if isinstance(rows, dict) else []):
-                if not (isinstance(v, dict) and isinstance(v.get("token"), str) and v["token"]
-                        and v.get("client_id") in self.clients):
+                if isinstance(v, dict) and "token" in v:
+                    self._dirty = True        # the format before sealing: it leaves the disk, kept or not
+                if not (isinstance(v, dict) and v.get("client_id") in self.clients):
                     continue
                 exp = v.get("exp")
                 if exp is not None and (not isinstance(exp, (int, float)) or exp < t):
                     continue
                 if name == "access" and exp is None:
                     continue                  # an access token always has an end
+                if "sealed" not in v and isinstance(v.get("token"), str) and v["token"]:
+                    # The format before sealing: the token behind in the open. A refresh entry had the
+                    # refresh token as its key, so it can be sealed now. An access entry cannot (its key
+                    # was a hash already): it is dropped, and the client refreshes without a browser.
+                    self._dirty = True
+                    if name != "refresh":
+                        continue
+                    v = {**{x: y for x, y in v.items() if x != "token"},
+                         "sealed": _seal(v["token"], k), "tid": _sha(v["token"])}
+                    k = _sha(k)
+                if not isinstance(v.get("tid"), str) or (name != "spent" and not isinstance(v.get("sealed"), str)):
+                    continue
+                if name == "spent" and not isinstance(v.get("when"), (int, float)):
+                    continue
                 table[k] = v
 
-    def _save_tokens(self) -> None:
-        """Write the refresh and access tokens when they changed. The caller holds the lock. A failed write
-        (a full disk) never breaks a sign-in: the tokens stay in memory and the next change tries again."""
-        if not self._dirty or not self.tokens_file:
-            self._dirty = False
+    def _save_tokens(self, strict: bool = False) -> None:
+        """Write the tokens when they changed. The caller holds the lock. `strict`: a failed write raises
+        OSError, and the caller undoes its change (a token the client gets must be on disk). Without it a
+        failed write is kept for the next change: used for clean-up that no client waits for."""
+        if not self._dirty:
             return
-        folder = os.path.dirname(self.tokens_file) or "."
-        tmp = ""
         try:
-            os.makedirs(folder, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(prefix=f".{os.path.basename(self.tokens_file)}.", suffix=".tmp", dir=folder)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:   # mkstemp: readable by the owner only
-                json.dump({"refresh": self.refresh, "access": self.access}, f)
-            os.replace(tmp, self.tokens_file)
+            if os.environ.get("KB_DATABASE_URL", "").strip() and hasattr(self, "_save_tokens_pg"):
+                self._save_tokens_pg()
+            elif self.tokens_file:
+                self._write_tokens_file()
             self._dirty = False
         except OSError:
+            if strict:
+                raise
+
+    def _write_tokens_file(self) -> None:
+        folder = os.path.dirname(self.tokens_file) or "."
+        os.makedirs(folder, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=f".{os.path.basename(self.tokens_file)}.", suffix=".tmp", dir=folder)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:   # mkstemp: readable by the owner only
+                json.dump({"refresh": {**self.refresh, **self._taking}, "access": self.access,
+                           "spent": self.spent}, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.tokens_file)
+        except BaseException:
             try:
-                if tmp:
-                    os.unlink(tmp)
+                os.unlink(tmp)
             except OSError:
                 pass
+            raise
+        try:                               # the rename itself must survive a power loss
+            d = os.open(folder, os.O_RDONLY)
+            try:
+                os.fsync(d)
+            finally:
+                os.close(d)
+        except OSError:
+            pass                           # a file system without it: the data is written all the same
 
     def _expire(self) -> None:
         t = self.now()
         for table in (self.txns, self.codes, self.refresh, self.access):
             for k in [k for k, v in table.items() if v.get("exp", float("inf")) < t]:
-                self._dropped.extend([table[k]["token"]] if table[k].get("token") else [])
+                if table[k].get("tid"):
+                    self._dropped.append(table[k]["tid"])
                 del table[k]
                 self._dirty = self._dirty or table is self.refresh or table is self.access
+        for k in [k for k, v in self.spent.items() if v["when"] < t - SPENT_DAYS * 86400]:
+            del self.spent[k]
+            self._dirty = True
+        for v in self.spent.values():      # past the overlap a used token opens nothing any more
+            if "sealed" in v and v["when"] < t - ROTATE_OVERLAP:
+                del v["sealed"]
+                self._dirty = True
 
     def _end_dropped(self) -> None:
-        """Hand the upstream tokens that nothing holds any more to on_drop. Takes the lock itself; the
-        callback runs without it."""
+        """Hand the tokens of the login webhook that nothing holds any more to on_drop. Takes the lock
+        itself; the callback runs without it. A token this process never saw in the open (its entries
+        came from the disk and no client showed a token since) is handed over as its `tid` to
+        on_drop_tid."""
         with self.lock:
             self._save_tokens()
             dropped, self._dropped = set(self._dropped), []
-            if not dropped or self.on_drop is None:
+            if not dropped:
                 return
-            live = {v["token"] for table in (self.codes, self.refresh, self.access) for v in table.values()}
+            live = {v["tid"] for table in (self.codes, self.refresh, self.access) for v in table.values()}
             gone = [t for t in dropped if t not in live and not self._inflight.get(t)]
-        for token in gone:
+            tokens = [(t, self._plain.pop(t, None)) for t in gone]
+        for tid, token in tokens:
             try:
-                self.on_drop(token)
+                if token and self.on_drop is not None:
+                    self.on_drop(token)
+                elif not token and self.on_drop_tid is not None:
+                    self.on_drop_tid(tid)
             except Exception:  # noqa: BLE001 — cleanup never breaks a sign-in
                 pass
 
@@ -438,13 +532,15 @@ class Server:
             txn = self.txns.pop(txn_id, None)
             if txn:
                 code = secrets.token_urlsafe(32)
-                self.codes[code] = {"token": token, "client_id": txn["client_id"],
+                self._plain[_sha(token)] = token
+                self.codes[code] = {"token": token, "tid": _sha(token), "client_id": txn["client_id"],
                                     "redirect_uri": txn["redirect_uri"], "challenge": txn["challenge"],
                                     "exp": self.now() + CODE_TTL, "user": txn.get("user", "")}
             else:
                 # The transaction ended (it expired, or a second submit of the same form took it), but
                 # the API already gave this sign-in a token. Nothing holds it: end it upstream.
-                self._dropped.append(token)
+                self._plain[_sha(token)] = token
+                self._dropped.append(_sha(token))
         if not txn:
             self._end_dropped()
             raise OAuthError(400, "invalid_request", "the sign-in took too long: start it again")
@@ -481,18 +577,30 @@ class Server:
 
     def revoke(self, client_id: str) -> bool:
         """Forget a client, its sign-ins in progress, codes and tokens (admin page). False when there is no
-        such client."""
+        such client. Raises OSError when the change cannot be saved: nothing is revoked then, in memory or
+        on disk, so that a restart never brings a revoked client back."""
         with self.lock:
             if client_id not in self.clients:
                 return False
-            del self.clients[client_id]
-            for txn in [t for t, v in self.txns.items() if v["client_id"] == client_id]:
-                del self.txns[txn]
-            for table in (self.refresh, self.codes, self.access):
-                for k in [k for k, v in table.items() if v["client_id"] == client_id]:
-                    self._dropped.append(table.pop(k)["token"])
+            client = self.clients.pop(client_id)
+            txns = {t: self.txns.pop(t) for t in [t for t, v in self.txns.items() if v["client_id"] == client_id]}
+            taken = [(table, k, table.pop(k))
+                     for table in (self.refresh, self._taking, self.codes, self.access, self.spent)
+                     for k in [k for k, v in table.items() if v["client_id"] == client_id]]
             self._dirty = True
-            self._save_clients()
+            try:
+                self._save_tokens(strict=True)   # the tokens first: a half-done revoke leaves no token
+                self._save_clients()
+            except OSError:
+                self.clients[client_id] = client
+                self.txns.update(txns)
+                for table, k, v in taken:
+                    table[k] = v
+                self._dirty = True
+                self._save_tokens()   # the token file may be written already: put the tokens back there too
+                raise
+            self._released.notify_all()
+            self._dropped.extend(v["tid"] for table, _, v in taken if table is not self.spent)
         self._end_dropped()
         return True
 
@@ -510,10 +618,17 @@ class Server:
 
     def token(self, form: dict) -> dict:
         held: list[str] = []
+        taking: list[str] = []
         try:
-            return self._token(form, held)
+            return self._token(form, held, taking)
         finally:
             with self.lock:
+                # Still reserved by this call: it refused the token, so the token is consumed. A token that
+                # was put back or claimed left `taking`: another call may hold it by now.
+                for k in taking:
+                    if self._taking.pop(k, None) is not None:
+                        self._dirty = True
+                self._released.notify_all()
                 for t in held:   # issued, put back, or dropped: _end_dropped tells which
                     self._inflight[t] -= 1
                     if not self._inflight[t]:
@@ -522,13 +637,13 @@ class Server:
             self._end_dropped()
 
     def _hold(self, entry: dict | None, held: list[str]) -> None:
-        """Count the upstream token of a popped code or refresh token as in use until token() ends. The
-        caller holds the lock."""
-        if entry and entry.get("token"):
-            self._inflight[entry["token"]] = self._inflight.get(entry["token"], 0) + 1
-            held.append(entry["token"])
+        """Count the sign-in of a popped code or refresh token as in use until token() ends. The caller
+        holds the lock."""
+        if entry and entry.get("tid"):
+            self._inflight[entry["tid"]] = self._inflight.get(entry["tid"], 0) + 1
+            held.append(entry["tid"])
 
-    def _token(self, form: dict, held: list[str]) -> dict:
+    def _token(self, form: dict, held: list[str], taking: list[str]) -> dict:
         grant = form.get("grant_type")
         if grant in ("authorization_code", "refresh_token"):
             self._known_client(form)
@@ -545,63 +660,183 @@ class Server:
                 raise OAuthError(400, "invalid_grant", "redirect_uri does not match")
             if b64url_sha256(form.get("code_verifier", "")) != entry["challenge"]:
                 raise OAuthError(400, "invalid_grant", "PKCE verification failed")
-            return self._issue(entry["token"], entry["client_id"], entry.get("user", ""))
+            try:
+                return self._issue(entry["token"], entry["client_id"], entry.get("user", ""))
+            except OAuthError as e:
+                if e.status == 503:   # only the save failed: the code is good for another try
+                    with self.lock:
+                        if entry["client_id"] in self.clients and entry["exp"] >= self.now():
+                            self.codes[form.get("code", "")] = entry
+                raise
         if grant == "refresh_token":
             rt = form.get("refresh_token", "")
+            key = _sha(rt)
             with self.lock:
                 self._expire()
-                entry = self.refresh.pop(rt, None)  # rotated on use
-                self._dirty = self._dirty or entry is not None
+                # Another call holds this token and asks the permission webhook: wait for its end, then
+                # this call is the second session of the overlap (or takes the token that call put back).
+                deadline = time.monotonic() + TAKING_WAIT
+                while key in self._taking and time.monotonic() < deadline:
+                    self._released.wait(max(0.01, deadline - time.monotonic()))
+                if key in self._taking:
+                    raise OAuthError(503, "temporarily_unavailable",
+                                     "another refresh of this token is in progress: try again")
+                entry = self.refresh.pop(key, None)  # rotated on use
+                if entry is not None:
+                    self._taking[key] = entry         # on disk as before until the new pair is
+                    taking.append(key)
                 self._hold(entry, held)
+                used = None if entry else self.spent.get(key)
+                self._hold(used, held)
             if not entry:
+                if used:
+                    return self._used_again(key, dict(used), rt, form)
                 raise OAuthError(400, "invalid_grant", "unknown refresh token")
             if form.get("client_id") and form["client_id"] != entry["client_id"]:
                 raise OAuthError(400, "invalid_grant", "refresh token was issued to another client")
+            token = _unseal(entry["sealed"], rt)
+            if token is None:
+                raise OAuthError(400, "invalid_grant", "the refresh token cannot be read: sign in again")
+            with self.lock:
+                self._plain[entry["tid"]] = token
             try:
-                self.check_token(entry["token"])
+                self.check_token(token)
             except Exception as e:  # noqa: BLE001
                 if getattr(e, "status", None) in (401, 403):  # expired or revoked: sign in again
                     raise OAuthError(400, "invalid_grant", "the API token expired: sign in again") from None
                 # The permission webhook is down (503) or broke: the refresh token stays for the next try.
                 with self.lock:
-                    if entry["client_id"] in self.clients:
-                        self.refresh[rt] = entry
-                        self._dirty = True
+                    taking.remove(key)
+                    if self._taking.pop(key, None) is not None and entry["client_id"] in self.clients:
+                        self.refresh[key] = entry
+                    self._released.notify_all()
                 raise OAuthError(503, "temporarily_unavailable",
                                  "the sign-in service is not available: try again later") from None
             self._seen(entry["client_id"], entry.get("user", ""))
-            return self._issue(entry["token"], entry["client_id"], entry.get("user", ""), replaces=entry.get("at"))
+            return self._issue(token, entry["client_id"], entry.get("user", ""), replaces=entry.get("at"),
+                               used=(key, entry), owner=taking)
         raise OAuthError(400, "unsupported_grant_type", "use authorization_code or refresh_token")
 
-    def _issue(self, token: str, client_id: str, user: str = "", replaces: str | None = None) -> dict:
+    def _used_again(self, key: str, used: dict, rt: str, form: dict) -> dict:
+        """A refresh token that was used before comes again. Inside ROTATE_OVERLAP it is a second session
+        of the same client that read the stored token a moment before the first one replaced it: it gets
+        a pair of its own, at most OVERLAP_PAIRS times, after the same check of the token behind it.
+        Later, or from another client, or for a sign-in that ended, somebody holds a copy of an old token
+        (the client, or a thief who took it): every token of that sign-in ends, and the person signs in
+        again. The end is on disk before the answer; when it cannot be saved, it is undone (503)."""
+        same_client = not form.get("client_id") or form["client_id"] == used["client_id"]
+        if (same_client and used.get("sealed") and not used.get("ended")
+                and self.now() - used["when"] <= ROTATE_OVERLAP):
+            token = _unseal(used["sealed"], rt)
+            if token is not None:
+                with self.lock:
+                    live = self.spent.get(key)
+                    pairs = (live or {}).get("pairs", 0)
+                    if live is None or live.get("ended") or pairs >= OVERLAP_PAIRS:
+                        raise OAuthError(400, "invalid_grant", "this refresh token was used before: sign in again")
+                    live["pairs"] = pairs + 1
+                    self._dirty = True
+                try:
+                    self.check_token(token)
+                except Exception as e:  # noqa: BLE001
+                    if getattr(e, "status", None) in (401, 403):
+                        raise OAuthError(400, "invalid_grant", "the API token expired: sign in again") from None
+                    raise OAuthError(503, "temporarily_unavailable",
+                                     "the sign-in service is not available: try again later") from None
+                return self._issue(token, used["client_id"], used.get("user", ""), overlap=key)
+        client = self.clients.get(used["client_id"], {})
+        if REUSE != "log":
+            with self.lock:
+                taken = [(table, k, table.pop(k)) for table in (self.refresh, self._taking, self.access)
+                         for k in [k for k, v in table.items() if v["tid"] == used["tid"]]]
+                marks = [(v, v.pop("sealed", None)) for v in self.spent.values()
+                         if v["tid"] == used["tid"] and not v.get("ended")]
+                for v, _ in marks:
+                    v["ended"] = True          # no overlap pair for this sign-in any more
+                self._dirty = True
+                try:
+                    self._save_tokens(strict=True)
+                except OSError:
+                    for table, k, v in taken:
+                        table[k] = v
+                    for v, sealed in marks:
+                        del v["ended"]
+                        if sealed is not None:
+                            v["sealed"] = sealed
+                    raise OAuthError(503, "temporarily_unavailable",
+                                     "the change cannot be saved on the server: try again later") from None
+                self._released.notify_all()
+                self._dropped.extend(v["tid"] for _, _, v in taken)
+                self._dropped.append(used["tid"])
+        self._event(used.get("user") or "?", "refresh token used twice",
+                    f"{str(client.get('client_name') or used['client_id'])[:60]}: "
+                    + ("only logged" if REUSE == "log" else "the sign-in ended"))
+        raise OAuthError(400, "invalid_grant", "this refresh token was used before: sign in again")
+
+    def _issue(self, token: str, client_id: str, user: str = "", replaces: str | None = None,
+               used: tuple[str, dict] | None = None, owner: list[str] | None = None,
+               overlap: str | None = None) -> dict:
         """A new access token that ends after TOKEN_TTL, and a refresh token (no end when REFRESH_DAYS
-        is 0). The map keeps only the
-        SHA-256 of the access token. The client must still exist under the lock: one revoked while the
-        refresh asked the permission webhook gets nothing. `replaces` is the SHA-256 of the access token
-        a refresh supersedes: it ends after ROTATE_OVERLAP. A client keeps at most TOKENS_PER_CLIENT
-        access and refresh tokens; the oldest go first."""
+        is 0). An entry is kept under the SHA-256 of its token, with the token behind it sealed. The client
+        must still exist under the lock: one revoked while the refresh asked the permission webhook gets
+        nothing. `replaces` is the SHA-256 of the access token a refresh supersedes: it ends after
+        ROTATE_OVERLAP. `used` is the refresh token this call consumed (its key and entry): it goes to
+        `spent`; `owner` is the caller's list of reservations in `_taking`, which loses that key here.
+        `overlap` is the key of the used token an overlap pair is made for: its sign-in must not have
+        ended while the permission webhook was asked. A client keeps at most TOKENS_PER_CLIENT access and refresh tokens; the oldest go first.
+        The change is saved before the answer; when the save fails, it is undone and the client gets 503."""
         rt = secrets.token_urlsafe(32)
         at = ACCESS_PREFIX + secrets.token_urlsafe(32)
+        rkey, akey, tid = _sha(rt), _sha(at), _sha(token)
         with self.lock:
             self._expire()
             if client_id not in self.clients:
                 raise OAuthError(401, "invalid_client", "the client was revoked: register again")
+            if overlap is not None and (self.spent.get(overlap) or {"ended": True}).get("ended"):
+                raise OAuthError(400, "invalid_grant", "this sign-in ended: sign in again")
+            taken = self._taking.pop(used[0], None) if used is not None else None
+            if used is not None:
+                if owner is not None and used[0] in owner:
+                    owner.remove(used[0])
+                self._released.notify_all()
+                if taken is None:   # ended while the permission webhook was asked: nothing is changed
+                    raise OAuthError(400, "invalid_grant", "this sign-in ended: sign in again")
             now = self.now()
             old = self.access.get(replaces or "")
+            old_exp = old["exp"] if old is not None else None
             if old is not None:
                 old["exp"] = min(old["exp"], now + ROTATE_OVERLAP)
+            pruned = []
             for table in (self.access, self.refresh):
                 mine = sorted((v.get("created", v.get("exp", 0)), k) for k, v in table.items()
                               if v["client_id"] == client_id)
                 for _, k in mine[:max(0, len(mine) - TOKENS_PER_CLIENT + 1)]:
-                    self._dropped.append(table.pop(k)["token"])
-            self.refresh[rt] = {"token": token, "client_id": client_id, "user": user, "at": _sha(at),
-                                "created": now}
+                    pruned.append((table, k, table.pop(k)))
+            self.refresh[rkey] = {"sealed": _seal(token, rt), "tid": tid, "client_id": client_id, "user": user,
+                                  "at": akey, "created": now}
             if REFRESH_DAYS > 0:
-                self.refresh[rt]["exp"] = now + REFRESH_DAYS * 86400
-            self.access[_sha(at)] = {"token": token, "client_id": client_id, "created": now,
-                                     "exp": now + TOKEN_TTL}
+                self.refresh[rkey]["exp"] = now + REFRESH_DAYS * 86400
+            self.access[akey] = {"sealed": _seal(token, at), "tid": tid, "client_id": client_id, "created": now,
+                                 "exp": now + TOKEN_TTL}
+            if used is not None:
+                self.spent[used[0]] = {"tid": tid, "client_id": client_id, "user": user, "when": now,
+                                       "sealed": used[1]["sealed"]}
+            self._plain[tid] = token
             self._dirty = True
+            try:
+                self._save_tokens(strict=True)
+            except OSError:
+                del self.refresh[rkey], self.access[akey]
+                for table, k, v in pruned:
+                    table[k] = v
+                if old is not None:
+                    old["exp"] = old_exp
+                if used is not None:              # the client can try again with the token it has
+                    self.spent.pop(used[0], None)
+                    self.refresh[used[0]] = used[1]
+                raise OAuthError(503, "temporarily_unavailable",
+                                 "the sign-in cannot be saved on the server: try again later") from None
+            self._dropped.extend(v["tid"] for _, _, v in pruned)
         return {"access_token": at, "token_type": "Bearer", "expires_in": TOKEN_TTL,
                 "refresh_token": rt}
 
@@ -612,11 +847,50 @@ class Server:
             entry = self.access.get(_sha(access_token))
             if entry is None or entry["exp"] < self.now() or entry["client_id"] not in self.clients:
                 return None
-            return entry["token"]
+            token = self._plain.get(entry["tid"])
+            if token is None:
+                token = _unseal(entry["sealed"], access_token)
+                if token is not None:
+                    self._plain[entry["tid"]] = token
+            return token
 
 
 def _sha(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _stream(secret: str, size: int) -> bytes:
+    """32 bytes of MAC key, then `size` bytes of key stream, from the client's token and SEAL_KEY."""
+    seed = b"kb-oauth-seal\0" + secret.encode() + b"\0" + hashlib.sha256(SEAL_KEY.encode()).digest()
+    return hashlib.shake_256(seed).digest(32 + size)
+
+
+def _seal(token: str, secret: str) -> str:
+    """The token of the login webhook, readable only with `secret`: the refresh or access token that the
+    client holds and this server never stores. `secret` is 256 random bits and seals one token, so a key
+    stream derived from it is used once: SHAKE-256 gives 32 bytes of MAC key and the stream, the token is
+    XORed with the stream, and an HMAC-SHA256 tag (16 bytes) tells a wrong secret or a changed entry.
+    SEAL_KEY, when set, is a second key that is not in the file."""
+    data = token.encode()
+    stream = _stream(secret, len(data))
+    body = bytes(x ^ y for x, y in zip(data, stream[32:]))
+    return (hmac.new(stream[:32], body, hashlib.sha256).digest()[:16] + body).hex()
+
+
+def _unseal(sealed: str, secret: str) -> str | None:
+    """The token that _seal(token, secret) hid, or None for another secret or a broken entry."""
+    try:
+        raw = bytes.fromhex(sealed)
+    except (TypeError, ValueError):
+        return None
+    tag, body = raw[:16], raw[16:]
+    stream = _stream(secret, len(body))
+    if len(tag) != 16 or not hmac.compare_digest(tag, hmac.new(stream[:32], body, hashlib.sha256).digest()[:16]):
+        return None
+    try:
+        return bytes(x ^ y for x, y in zip(body, stream[32:])).decode()
+    except UnicodeDecodeError:
+        return None
 
 
 def _same_app(redirect: str, registered: list[str]) -> bool:

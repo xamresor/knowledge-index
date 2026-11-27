@@ -14,6 +14,26 @@ The single source of truth for the current version is the `VERSION` file. It is 
 
 ## [Unreleased]
 
+- **Security of the browser sign-in that never ends** (2026-11-26, after an audit of the change below).
+  - **The token file is no credential.** `logs/oauth-tokens.json` held the tokens of the login webhook in the
+    open; a reader of the file or of a backup could use one as a bearer token and in the password field of
+    the pages. An entry is now found by the SHA-256 of the client's token, and the token behind it is sealed
+    with that client token (`oauth._seal`). A file of the old format is taken over at the start with no new
+    sign-in. `KB_OAUTH_SEAL_KEY` adds a second key that is not in the file, against an old backup together
+    with an old token of a client.
+  - **A stolen refresh token is found out.** A refresh token works once and the server remembers a used one
+    (`KB_OAUTH_SPENT_DAYS`, 90). A used token that comes again ends every token of that sign-in and writes
+    "refresh token used twice" to the audit log (`KB_OAUTH_REUSE=log`: only the line). For 60 seconds the
+    same client gets a second pair (at most 3), so two sessions that refresh at the same moment both go on;
+    a call that meets a refresh of the same token in progress waits for it.
+  - **A change is saved before the answer.** A refresh or a sign-in whose save fails answers `503` and
+    changes nothing; the old refresh token still works. A revoke that cannot be saved is undone and the
+    admin page says so. Before, a restart could bring back a used token or a revoked client. A sign-in
+    token that the server knows only by its hash after a restart still ends in the users plugin
+    (`logout_hash`).
+  - **A page session ends only its own sign-in token.** A person who typed the sign-in token of an agent
+    into the password field lost that token when the session ended (`logout_page`).
+
 - **An agent signs in once; a person on the pages for 15 idle minutes** (2026-11-26).
   - The access and refresh tokens of the browser sign-in (`/mcp`, OAuth) are kept in
     `<data>/logs/oauth-tokens.json` (mode 0600). They lived in memory, so every restart or deploy of the

@@ -207,9 +207,12 @@ class OAuthFlow(unittest.TestCase):
         new = json.loads(text)
         self.assertTrue(new["access_token"].startswith(oauth.ACCESS_PREFIX))
         self.assertNotEqual(new["access_token"], tok["access_token"])
-        status, _, _ = self.call("POST", "/token", {"grant_type": "refresh_token",
-                                                    "refresh_token": tok["refresh_token"]}, form=True)
-        self.assertEqual(status, 400)  # the old refresh token is gone
+        status, _, text = self.call("POST", "/token", {"grant_type": "refresh_token",
+                                                       "refresh_token": tok["refresh_token"]}, form=True)
+        # The same token a moment later: a second session of the client that read the stored token before
+        # the first one replaced it. It gets a pair of its own (oauth.ROTATE_OVERLAP seconds), no sign-in.
+        self.assertEqual(status, 200)
+        self.assertNotEqual(json.loads(text)["refresh_token"], new["refresh_token"])
         # an expired API token cannot be refreshed: sign in again
         STATE["valid"] = False
         status, _, text = self.call("POST", "/token", {"grant_type": "refresh_token",

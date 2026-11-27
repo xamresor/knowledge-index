@@ -137,7 +137,10 @@ the registry: each setting with its choices, default, description and env variab
 | `KB_AUTH_HINT` | a sign-in hint | Text a caller without a valid token gets. |
 | `KB_RESET_PER_DAY` | `3` | Users plugin: password mails ("Forgot the password?", "Reset password") one user gets in 24 hours, on top of one per 5 minutes. Over it: no mail, the same answer. |
 | `KB_OAUTH` | `on` | `off` turns the browser sign-in of MCP clients off: ready tokens only. The admin pages stay. |
-| `KB_OAUTH_TOKEN_TTL` | `28800` | Lifetime of an access token of the browser sign-in, seconds; `expires_in` says the same. A refresh gives a new one while the login webhook's token behind it lives. The tokens are kept in `<data>/logs/oauth-tokens.json`: a restart asks nobody to sign in again. |
+| `KB_OAUTH_TOKEN_TTL` | `28800` | Lifetime of an access token of the browser sign-in, seconds; `expires_in` says the same. A refresh gives a new one while the login webhook's token behind it lives. The tokens are kept in `<data>/logs/oauth-tokens.json`, sealed with the token of the client: a restart asks nobody to sign in again, and the file alone signs nobody in. |
+| `KB_OAUTH_REUSE` | `revoke` | What a used refresh token that comes again does: `revoke` ends every token of that sign-in, `log` only writes the audit line. |
+| `KB_OAUTH_SPENT_DAYS` | `90` | Days the server remembers a used refresh token. |
+| `KB_OAUTH_SEAL_KEY` | — | Optional second key of the seal of the token file. Keep it outside the data folder and its backups. A change ends every browser sign-in. |
 | `KB_OAUTH_REFRESH_DAYS` | `0` | Days after which a refresh token of the browser sign-in ends; `0` = no end. |
 | `KB_SIGNIN_IDLE_DAYS` | `0` | Users plugin: days without a request after which a sign-in token of an agent ends; `0` = no end. |
 | `KB_ADMIN_SESSION_IDLE` | `900` | Seconds without a request after which a session of the admin pages ends (8 hours at most in any case). |

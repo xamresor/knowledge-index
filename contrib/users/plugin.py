@@ -529,16 +529,32 @@ class Store:
                 self._fails = {k: v for k, v in self._fails.items() if v and now - v[-1] < LOCK_SECONDS}
         raise UserError("Wrong user name or password.")
 
-    def end_signin(self, token: str) -> bool:
+    def end_signin(self, token: str, page_only: bool = False) -> bool:
         """End one sign-in token (the admin session that held it ended). A key (`kbk_`) is never ended
-        here: a person may sign in to the pages with a key in the password field. -> True when one ended."""
+        here: a person may sign in to the pages with a key in the password field. `page_only`: the caller
+        is a page session, which ends only the token made for it; a person may also sign in to the pages
+        with the sign-in token of an agent, and that token must go on. -> True when one ended."""
         with self._changing():
             hit = self._by_key(token)
             if hit is None or hit[1]["tokens"][hit[2]].get("kind") != "signin":
                 return False
+            if page_only and not hit[1]["tokens"][hit[2]].get("page"):
+                return False
             del hit[1]["tokens"][hit[2]]
             self._save()
             return True
+
+    def end_signin_hash(self, digest: str) -> bool:
+        """End the sign-in token whose SHA-256 is `digest` (never a key). The browser sign-in of an agent
+        keeps only that hash of a token it did not see since a restart. -> True when one ended."""
+        with self._changing():
+            for rec in self._users.values():
+                for tid, token in rec["tokens"].items():
+                    if token.get("kind") == "signin" and hmac.compare_digest(str(token.get("hash", "")), digest):
+                        del rec["tokens"][tid]
+                        self._save()
+                        return True
+            return False
 
     def permissions(self, token: str, asked: list[str]) -> tuple[int, dict]:
         """The permission webhook: the HTTP status and the body."""
@@ -897,9 +913,27 @@ def login(body: dict, core) -> tuple:
 
 
 def logout(token: str, core) -> None:
-    """An admin session ended (sign-out, 15 idle minutes, or 8 hours): its sign-in token ends too. A key stays."""
+    """A sign-in token that nothing holds any more ends (a browser sign-in of an agent that never finished, a
+    revoked client). A key stays. The sessions of the pages call logout_page."""
     try:
         store(core).end_signin(token)
+    except (UserError, OSError) as e:
+        _warn_once(f"users: cannot end a sign-in token ({type(e).__name__})")
+
+
+def logout_hash(digest: str, core) -> None:
+    """logout() for a token known only by its SHA-256 (bin/oauth.py after a restart)."""
+    try:
+        store(core).end_signin_hash(digest)
+    except (UserError, OSError) as e:
+        _warn_once(f"users: cannot end a sign-in token ({type(e).__name__})")
+
+
+def logout_page(token: str, core) -> None:
+    """A session of the pages ended: the sign-in token made for that session ends. A token of an agent that
+    the person typed into the password field stays."""
+    try:
+        store(core).end_signin(token, page_only=True)
     except (UserError, OSError) as e:
         _warn_once(f"users: cannot end a sign-in token ({type(e).__name__})")
 

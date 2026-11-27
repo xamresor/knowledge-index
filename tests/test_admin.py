@@ -267,13 +267,29 @@ class Admin(unittest.TestCase):
     def test_revoke_ends_a_client(self):
         server = self.srv.RequestHandlerClass.oauth
         cid = server.register({"redirect_uris": ["http://localhost:1/cb"]})["client_id"]
-        server.refresh["rt"] = {"token": TOKEN, "client_id": cid}
+        got = server._issue(TOKEN, cid)
+        self.assertEqual(server.resolve(got["access_token"]), TOKEN)
         c = self.client()
         self.sign_in(c, self.base)
         _, _, page = self.req(c, "POST", f"{self.base}/admin/clients/revoke", {"csrf": self.csrf(c), "client_id": cid})
         self.assertIn("Revoked", page)
         self.assertNotIn(cid, server.clients)
-        self.assertNotIn("rt", server.refresh)
+        self.assertEqual((server.refresh, server.access), ({}, {}))
+        self.assertIsNone(server.resolve(got["access_token"]))
+
+    def test_a_revoke_that_cannot_be_saved_changes_nothing_and_says_so(self):
+        server = self.srv.RequestHandlerClass.oauth
+        cid = server.register({"redirect_uris": ["http://localhost:1/cb"]})["client_id"]
+        got = server._issue(TOKEN, cid)
+        c = self.client()
+        self.sign_in(c, self.base)
+        with mock.patch.object(server, "_save_clients", side_effect=OSError("disk full")):
+            _, _, page = self.req(c, "POST", f"{self.base}/admin/clients/revoke",
+                                  {"csrf": self.csrf(c), "client_id": cid})
+        self.assertIn("Not revoked", page)
+        self.assertIn(cid, server.clients)
+        self.assertEqual(server.resolve(got["access_token"]), TOKEN)
+        self.assertTrue(server.revoke(cid))
 
     def test_logout(self):
         c = self.client()

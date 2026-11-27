@@ -350,8 +350,6 @@ class OAuthLimits(unittest.TestCase):
         self.t[0] += 5 * 365 * 86400
         new = self.srv.token({"grant_type": "refresh_token", "refresh_token": rt})
         self.assertEqual(self.srv.resolve(new["access_token"]), "tok")
-        with self.assertRaises(oauth.OAuthError):          # still rotated: the old one works once
-            self.srv.token({"grant_type": "refresh_token", "refresh_token": rt})
 
     def test_the_oldest_tokens_of_a_client_go_first_also_without_an_end(self):
         self.srv.clients["c"] = {"client_id": "c", "redirect_uris": ["http://localhost:1/cb"]}
@@ -360,11 +358,240 @@ class OAuthLimits(unittest.TestCase):
             for i in range(5):
                 self.t[0] += 10
                 issued.append(self.srv._issue(f"tok{i}", "c")["refresh_token"])
-        self.assertEqual([rt in self.srv.refresh for rt in issued], [False, False, True, True, True])
+        self.assertEqual([oauth._sha(rt) in self.srv.refresh for rt in issued], [False, False, True, True, True])
+
+
+class UsedRefreshTokens(unittest.TestCase):
+    """A refresh token works once. One that comes again after the overlap is a copy in other hands: the
+    whole sign-in ends. Inside the overlap it is a second session of the same client."""
+
+    def setUp(self):
+        self.t = [1_000_000.0]
+        self.events, self.ended = [], []
+        self.srv = oauth.Server({"KB_LOGIN_URL": "http://127.0.0.1:1/x"}, lambda t: None, now=lambda: self.t[0])
+        self.srv.on_event = lambda user, action, detail: self.events.append((user, action))
+        self.srv.on_drop = self.ended.append
+        self.srv.clients["c"] = {"client_id": "c", "redirect_uris": ["http://localhost:1/cb"]}
+        self.first = self.srv._issue("upstream-1", "c", "ann")
+
+    def refresh(self, rt, **more):
+        return self.srv.token({"grant_type": "refresh_token", "refresh_token": rt, **more})
+
+    def test_a_stolen_token_used_first_ends_the_sign_in_when_the_owner_comes(self):
+        thief = self.refresh(self.first["refresh_token"])             # the thief refreshes first
+        thief = self.refresh(thief["refresh_token"])                  # ... and goes on
+        self.t[0] += 3600
+        with self.assertRaises(oauth.OAuthError) as cm:               # the owner comes with the old token
+            self.refresh(self.first["refresh_token"])
+        self.assertEqual((cm.exception.status, cm.exception.error), (400, "invalid_grant"))
+        self.assertIsNone(self.srv.resolve(thief["access_token"]))    # the chain of the thief is dead
+        with self.assertRaises(oauth.OAuthError):
+            self.refresh(thief["refresh_token"])
+        self.assertEqual((self.srv.refresh, self.srv.access), ({}, {}))
+        self.assertIn(("ann", "refresh token used twice"), self.events)
+        self.assertEqual(self.ended, ["upstream-1"])                  # the sign-in token ends upstream too
+
+    def test_a_token_stolen_and_used_later_ends_the_sign_in_too(self):
+        owner = self.refresh(self.first["refresh_token"])
+        self.t[0] += 3600
+        with self.assertRaises(oauth.OAuthError):                     # the thief comes with the old token
+            self.refresh(self.first["refresh_token"])
+        self.assertIsNone(self.srv.resolve(owner["access_token"]))    # the owner signs in again: a known cost
+
+    def test_another_sign_in_of_the_same_client_is_not_touched(self):
+        other = self.srv._issue("upstream-2", "c", "ann")
+        self.refresh(self.first["refresh_token"])
+        self.t[0] += 3600
+        with self.assertRaises(oauth.OAuthError):
+            self.refresh(self.first["refresh_token"])
+        self.assertEqual(self.srv.resolve(other["access_token"]), "upstream-2")
+        self.assertEqual(self.ended, ["upstream-1"])
+
+    def test_two_sessions_that_refresh_at_the_same_moment_both_go_on(self):
+        a = self.refresh(self.first["refresh_token"])
+        self.t[0] += oauth.ROTATE_OVERLAP - 1
+        b = self.refresh(self.first["refresh_token"])                 # the second session, with the same token
+        self.assertNotEqual(a["refresh_token"], b["refresh_token"])
+        self.assertEqual(self.srv.resolve(a["access_token"]), "upstream-1")
+        self.assertEqual(self.srv.resolve(b["access_token"]), "upstream-1")
+        self.assertEqual(self.events, [])
+        self.t[0] += 3600
+        self.assertEqual(self.srv.resolve(self.refresh(a["refresh_token"])["access_token"]), "upstream-1")
+        self.assertEqual(self.srv.resolve(self.refresh(b["refresh_token"])["access_token"]), "upstream-1")
+
+    def test_the_overlap_is_for_the_same_client_only_and_ends(self):
+        self.srv.clients["d"] = {"client_id": "d", "redirect_uris": ["http://localhost:1/cb"]}
+        self.refresh(self.first["refresh_token"])
+        with self.assertRaises(oauth.OAuthError):                     # another client: no pair, the sign-in ends
+            self.refresh(self.first["refresh_token"], client_id="d")
+        self.assertEqual(self.srv.access, {})
+        again = self.srv._issue("upstream-3", "c", "ann")
+        self.refresh(again["refresh_token"])
+        self.t[0] += oauth.ROTATE_OVERLAP + 1
+        with self.assertRaises(oauth.OAuthError):                     # the same client, but too late
+            self.refresh(again["refresh_token"])
+        self.assertNotIn("sealed", next(iter(self.srv.spent.values())))   # a used token opens nothing later
+
+    def test_a_sign_in_that_ended_gives_no_overlap_pair(self):
+        self.srv.clients["d"] = {"client_id": "d", "redirect_uris": ["http://localhost:1/cb"]}
+        self.refresh(self.first["refresh_token"])
+        with self.assertRaises(oauth.OAuthError):                     # another client shows it: the sign-in ends
+            self.refresh(self.first["refresh_token"], client_id="d")
+        with self.assertRaises(oauth.OAuthError):                     # the right client, still inside the overlap
+            self.refresh(self.first["refresh_token"], client_id="c")
+        with self.assertRaises(oauth.OAuthError):
+            self.refresh(self.first["refresh_token"])
+        self.assertEqual((self.srv.refresh, self.srv.access), ({}, {}))
+        self.assertTrue(all(v.get("ended") and "sealed" not in v for v in self.srv.spent.values()))
+
+    def test_one_used_token_gives_a_few_overlap_pairs_and_ends_nothing_after_them(self):
+        other = self.srv._issue("upstream-2", "c", "ann")
+        a = self.refresh(self.first["refresh_token"])
+        for _ in range(oauth.OVERLAP_PAIRS):
+            self.refresh(self.first["refresh_token"])
+        with self.assertRaises(oauth.OAuthError):
+            self.refresh(self.first["refresh_token"])
+        self.assertEqual(self.srv.resolve(a["access_token"]), "upstream-1")       # not a theft: nothing ends
+        self.assertEqual(self.srv.resolve(other["access_token"]), "upstream-2")   # the other sign-in is not pushed out
+        self.assertEqual(self.events, [])
+
+    def test_an_overlap_pair_needs_a_live_token_behind_it(self):
+        state = {"status": 200}
+
+        def check(token):
+            if state["status"] != 200:
+                err = Exception("x")
+                err.status = state["status"]
+                raise err
+        self.srv.check_token = check
+        self.refresh(self.first["refresh_token"])
+        state["status"] = 503
+        with self.assertRaises(oauth.OAuthError) as cm:
+            self.refresh(self.first["refresh_token"])
+        self.assertEqual(cm.exception.status, 503)
+        state["status"] = 401
+        with self.assertRaises(oauth.OAuthError) as cm:
+            self.refresh(self.first["refresh_token"])
+        self.assertEqual((cm.exception.status, cm.exception.error), (400, "invalid_grant"))
+
+    def test_two_calls_with_one_token_at_the_very_same_time_both_go_on(self):
+        import threading
+        inside, go = threading.Event(), threading.Event()
+
+        def check(token):
+            if not inside.is_set():      # the first call stops in the middle of its refresh
+                inside.set()
+                go.wait(5)
+        self.srv.check_token = check
+        results = {}
+
+        def call(name):
+            try:
+                results[name] = self.refresh(self.first["refresh_token"])
+            except oauth.OAuthError as e:
+                results[name] = e
+        a = threading.Thread(target=call, args=("a",))
+        a.start()
+        self.assertTrue(inside.wait(5))
+        b = threading.Thread(target=call, args=("b",))   # the second session comes while the first is inside
+        b.start()
+        b.join(0.3)
+        self.assertTrue(b.is_alive())                    # it waits, it is not refused
+        go.set()
+        a.join(5)
+        b.join(5)
+        self.assertEqual({type(v) for v in results.values()}, {dict}, results)
+        self.assertNotEqual(results["a"]["refresh_token"], results["b"]["refresh_token"])
+        for pair in results.values():
+            self.assertEqual(self.srv.resolve(pair["access_token"]), "upstream-1")
+
+    def test_a_sign_in_that_ends_while_its_refresh_is_inside_leaves_nothing_behind(self):
+        second = self.refresh(self.first["refresh_token"])
+        self.t[0] += 3600
+
+        def check(token):                                # meanwhile the first token comes again: a theft
+            self.srv.check_token = lambda t: None
+            with self.assertRaises(oauth.OAuthError):
+                self.refresh(self.first["refresh_token"])
+        self.srv.check_token = check
+        with self.assertRaises(oauth.OAuthError) as cm:
+            self.refresh(second["refresh_token"])
+        self.assertEqual(cm.exception.error, "invalid_grant")
+        self.assertEqual((self.srv.refresh, self.srv.access, self.srv._taking), ({}, {}, {}))
+
+    def test_an_overlap_pair_is_not_given_when_the_sign_in_ends_meanwhile(self):
+        self.refresh(self.first["refresh_token"])
+        self.srv.clients["d"] = {"client_id": "d", "redirect_uris": ["http://localhost:1/cb"]}
+
+        def check(token):                                # while the overlap asks the webhook, a theft is found
+            self.srv.check_token = lambda t: None
+            with self.assertRaises(oauth.OAuthError):
+                self.refresh(self.first["refresh_token"], client_id="d")
+        self.srv.check_token = check
+        with self.assertRaises(oauth.OAuthError) as cm:
+            self.refresh(self.first["refresh_token"])
+        self.assertEqual(cm.exception.error, "invalid_grant")
+        self.assertEqual((self.srv.refresh, self.srv.access), ({}, {}))
+        self.assertEqual(self.ended, ["upstream-1"])
+
+    def test_a_call_gives_up_its_reservation_when_it_puts_the_token_back(self):
+        """Its clean-up must not take the token from another call that claimed it meanwhile."""
+        def down(token):
+            err = Exception("down")
+            err.status = 503
+            raise err
+        self.srv.check_token = down
+        held, taking = [], []
+        form = {"grant_type": "refresh_token", "refresh_token": self.first["refresh_token"]}
+        with self.assertRaises(oauth.OAuthError):
+            self.srv._token(form, held, taking)
+        self.assertEqual(taking, [])                     # put back: no longer this call's
+        self.srv.check_token = lambda t: None
+        held, taking = [], []
+        self.srv._token(form, held, taking)
+        self.assertEqual((taking, self.srv._taking), ([], {}))   # claimed by _issue: the same
+
+    def test_a_second_key_of_the_seal(self):
+        with mock.patch.object(oauth, "SEAL_KEY", "key-in-the-service-environment"):
+            sealed = oauth._seal("kbs_upstream", "client-token")
+            self.assertEqual(oauth._unseal(sealed, "client-token"), "kbs_upstream")
+        self.assertIsNone(oauth._unseal(sealed, "client-token"))      # the file and the client token are not enough
+        with mock.patch.object(oauth, "SEAL_KEY", "another"):
+            self.assertIsNone(oauth._unseal(sealed, "client-token"))
+
+    def test_reuse_can_be_logged_only(self):
+        with mock.patch.object(oauth, "REUSE", "log"):
+            new = self.refresh(self.first["refresh_token"])
+            self.t[0] += 3600
+            with self.assertRaises(oauth.OAuthError):
+                self.refresh(self.first["refresh_token"])
+        self.assertEqual(self.srv.resolve(new["access_token"]), "upstream-1")
+        self.assertIn(("ann", "refresh token used twice"), self.events)
+
+    def test_a_used_token_is_forgotten_after_its_days(self):
+        self.refresh(self.first["refresh_token"])
+        self.t[0] += (oauth.SPENT_DAYS + 1) * 86400
+        with self.assertRaises(oauth.OAuthError) as cm:
+            self.refresh(self.first["refresh_token"])
+        self.assertIn("unknown refresh token", str(cm.exception))
+        self.assertEqual(self.srv.spent, {})
+
+    def test_seal(self):
+        sealed = oauth._seal("kbs_upstream", "client-token")
+        self.assertNotIn("kbs_upstream".encode().hex(), sealed)
+        self.assertEqual(oauth._unseal(sealed, "client-token"), "kbs_upstream")
+        self.assertIsNone(oauth._unseal(sealed, "another-token"))
+        self.assertIsNone(oauth._unseal(sealed[:-2] + ("00" if sealed[-2:] != "00" else "01"), "client-token"))
+        self.assertIsNone(oauth._unseal("not hex", "client-token"))
+        self.assertNotEqual(sealed, oauth._seal("kbs_upstream", "client-token-2"))
+
+
+UP = "kbs_the-token-of-the-login-webhook"
 
 
 class TokensOverARestart(unittest.TestCase):
-    """A restart or a deploy of the server asks nobody to sign in again: the tokens are in a file."""
+    """A restart or a deploy of the server asks nobody to sign in again: the tokens are in a file. The
+    file is no credential: it holds no token of a client and no readable token of the login webhook."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -372,7 +599,7 @@ class TokensOverARestart(unittest.TestCase):
         self.clients = os.path.join(self.tmp.name, "logs", "oauth-clients.json")
         self.tokens = os.path.join(self.tmp.name, "logs", "oauth-tokens.json")
         self.t = [1000.0]
-        self.valid = {"tok"}
+        self.valid = {UP}
 
     def server(self) -> "oauth.Server":
         def check(token):
@@ -386,23 +613,58 @@ class TokensOverARestart(unittest.TestCase):
     def signed_in(self, srv) -> tuple[str, dict]:
         cid = srv.register({"redirect_uris": ["http://localhost:1/cb"]})["client_id"]
         srv._seen(cid, "ann")
-        return cid, srv.token({"grant_type": "refresh_token", "client_id": cid,
-                               "refresh_token": srv._issue("tok", cid, "ann")["refresh_token"]})
+        return cid, srv._issue(UP, cid, "ann")
+
+    def refresh(self, srv, cid, rt):
+        return srv.token({"grant_type": "refresh_token", "client_id": cid, "refresh_token": rt})
+
+    def file_text(self) -> str:
+        with open(self.tokens, encoding="utf-8") as f:
+            return f.read()
 
     def test_access_and_refresh_tokens_work_after_a_restart(self):
         cid, got = self.signed_in(self.server())
         self.assertEqual(os.stat(self.tokens).st_mode & 0o777, 0o600)     # the owner only
         again = self.server()                                              # the restart
-        self.assertEqual(again.resolve(got["access_token"]), "tok")
+        self.assertEqual(again.resolve(got["access_token"]), UP)
         self.t[0] += oauth.TOKEN_TTL + 1                                    # the access token ended ...
         self.assertIsNone(again.resolve(got["access_token"]))
-        new = again.token({"grant_type": "refresh_token", "client_id": cid,
-                           "refresh_token": got["refresh_token"]})         # ... the client refreshes, no browser
-        self.assertEqual(again.resolve(new["access_token"]), "tok")
+        new = self.refresh(again, cid, got["refresh_token"])               # ... the client refreshes, no browser
+        self.assertEqual(again.resolve(new["access_token"]), UP)
         third = self.server()                                              # the rotation is on disk too
-        self.assertEqual(third.resolve(new["access_token"]), "tok")
-        with self.assertRaises(oauth.OAuthError):
-            third.token({"grant_type": "refresh_token", "client_id": cid, "refresh_token": got["refresh_token"]})
+        self.assertEqual(third.resolve(new["access_token"]), UP)
+        self.t[0] += oauth.ROTATE_OVERLAP + 1
+        with self.assertRaises(oauth.OAuthError):                          # ... and so is the used token
+            self.refresh(third, cid, got["refresh_token"])
+        self.assertIsNone(self.server().resolve(new["access_token"]))      # used twice: the sign-in ended, on disk
+
+    def test_the_file_holds_nothing_that_signs_in(self):
+        cid, got = self.signed_in(self.server())
+        new = self.refresh(self.server(), cid, got["refresh_token"])
+        text = self.file_text()
+        for secret in (UP, got["refresh_token"], got["access_token"], new["refresh_token"], new["access_token"],
+                       UP.encode().hex()):
+            self.assertNotIn(secret, text)
+        data = json.loads(text)
+        self.assertEqual(sorted(data), ["access", "refresh", "spent"])
+        for row in list(data["refresh"].values()) + list(data["access"].values()):
+            self.assertNotIn("token", row)
+            self.assertIsNone(oauth._unseal(row["sealed"], row["tid"]))    # what the file has opens nothing
+            self.assertIsNone(oauth._unseal(row["sealed"], cid))
+
+    def test_a_file_of_the_format_before_sealing_is_taken_over_without_a_sign_in(self):
+        cid = self.server().register({"redirect_uris": ["http://localhost:1/cb"]})["client_id"]
+        old = {"refresh": {"old-refresh-token": {"token": UP, "client_id": cid, "user": "ann", "at": "ab",
+                                                 "created": 900.0}},
+               "access": {"ab": {"token": UP, "client_id": cid, "created": 900.0, "exp": 9e9}}}
+        with open(self.tokens, "w", encoding="utf-8") as f:
+            json.dump(old, f)
+        srv = self.server()
+        self.assertNotIn(UP, self.file_text())                # the open token left the disk at the start
+        self.assertNotIn("old-refresh-token", self.file_text())
+        self.assertEqual(srv.access, {})                      # an old access entry cannot be sealed: dropped
+        new = self.refresh(srv, cid, "old-refresh-token")     # the client refreshes: no browser
+        self.assertEqual(self.server().resolve(new["access_token"]), UP)
 
     def test_a_revoked_client_stays_revoked_after_a_restart(self):
         srv = self.server()
@@ -412,39 +674,164 @@ class TokensOverARestart(unittest.TestCase):
         self.assertIsNone(again.resolve(got["access_token"]))
         self.assertEqual((again.refresh, again.access), ({}, {}))
 
+    def test_a_revoke_that_cannot_be_saved_is_undone(self):
+        srv = self.server()
+        cid, got = self.signed_in(srv)
+        for broken in ("_save_clients", "_write_tokens_file"):
+            with self.subTest(broken=broken), mock.patch.object(srv, broken, side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    srv.revoke(cid)
+                self.assertEqual(srv.resolve(got["access_token"]), UP)     # nothing half done in memory
+        self.assertTrue(srv.revoke(cid))
+        self.assertIsNone(self.server().resolve(got["access_token"]))
+
     def test_a_token_the_login_webhook_ended_asks_for_a_sign_in(self):
         cid, got = self.signed_in(self.server())
         self.valid.clear()                                 # an admin disabled the person, or a new password
         again = self.server()
         with self.assertRaises(oauth.OAuthError) as cm:
-            again.token({"grant_type": "refresh_token", "client_id": cid, "refresh_token": got["refresh_token"]})
+            self.refresh(again, cid, got["refresh_token"])
         self.assertEqual(cm.exception.error, "invalid_grant")
-        self.assertNotIn(got["refresh_token"], self.server().refresh)
+        self.assertEqual(self.server().refresh, {})
 
     def test_a_broken_or_foreign_file_gives_no_tokens(self):
         cid, got = self.signed_in(self.server())
-        with open(self.tokens, encoding="utf-8") as f:
-            data = json.load(f)
-        data["refresh"]["x"] = {"token": "tok", "client_id": "no-such-client"}
+        data = json.loads(self.file_text())
+        (key, row), = data["refresh"].items()
+        data["refresh"]["x"] = {**row, "client_id": "no-such-client"}
         data["refresh"]["y"] = "not an entry"
-        data["access"]["z"] = {"token": "tok", "client_id": cid}             # an access token with no end
-        data["access"]["old"] = {"token": "tok", "client_id": cid, "exp": 1.0}
+        data["refresh"]["w"] = {"client_id": cid}                            # no sealed token
+        data["access"]["z"] = {**row}                                        # an access token with no end
+        data["access"]["old"] = {**row, "exp": 1.0}
+        data["spent"]["s"] = {"tid": "t", "client_id": cid}                  # no time
         with open(self.tokens, "w", encoding="utf-8") as f:
             json.dump(data, f)
         again = self.server()
-        self.assertEqual(set(again.refresh), {got["refresh_token"]})
+        self.assertEqual(set(again.refresh), {key})
         self.assertFalse({"z", "old"} & set(again.access))
+        self.assertEqual(again.spent, {})
         with open(self.tokens, "w", encoding="utf-8") as f:
             f.write("{ not json")
         self.assertEqual(self.server().refresh, {})
 
-    def test_a_failed_save_does_not_break_the_sign_in(self):
+    def test_a_refresh_that_cannot_be_saved_is_refused_and_the_old_token_still_works(self):
+        srv = self.server()
+        cid, got = self.signed_in(srv)
+        with mock.patch.object(srv, "_write_tokens_file", side_effect=OSError("disk full")):
+            with self.assertRaises(oauth.OAuthError) as cm:
+                self.refresh(srv, cid, got["refresh_token"])
+            self.assertEqual(cm.exception.status, 503)
+            self.assertEqual(srv.resolve(got["access_token"]), UP)          # the old access token keeps its end
+        self.assertEqual((len(srv.refresh), len(srv.access), srv.spent), (1, 1, {}))
+        new = self.refresh(srv, cid, got["refresh_token"])                 # the disk is back: the same token works
+        self.assertEqual(self.server().resolve(new["access_token"]), UP)   # ... and a restart keeps the new pair
+
+    def test_a_crash_while_a_refresh_asks_the_webhook_loses_no_sign_in(self):
+        """Between the pop of the refresh token and the new pair, another call saves the tokens. A server
+        that starts from that file (a crash) still knows the refresh token."""
+        seen = {}
+
+        def check(token):
+            with srv.lock:
+                srv._dirty = True
+                srv._save_tokens()                    # another call saves now
+            seen["after a crash"] = set(self.server().refresh)
+            err = Exception("the webhook is down")
+            err.status = 503
+            raise err
+        srv = oauth.Server({"KB_LOGIN_URL": "http://127.0.0.1:1/x"}, check, self.clients,
+                           now=lambda: self.t[0], tokens_file=self.tokens)
+        cid, got = self.signed_in(srv)
+        key = oauth._sha(got["refresh_token"])
+        with self.assertRaises(oauth.OAuthError) as cm:
+            self.refresh(srv, cid, got["refresh_token"])
+        self.assertEqual(cm.exception.status, 503)
+        self.assertEqual(seen["after a crash"], {key})
+        self.assertEqual((set(srv.refresh), srv._taking), ({key}, {}))
+
+    def test_a_sign_in_that_ends_while_its_refresh_runs_gets_no_new_pair(self):
+        def check(token):
+            self.assertTrue(srv.revoke(cid))          # an admin revokes the client meanwhile
+        srv = oauth.Server({"KB_LOGIN_URL": "http://127.0.0.1:1/x"}, check, self.clients,
+                           now=lambda: self.t[0], tokens_file=self.tokens)
+        cid, got = self.signed_in(srv)
+        with self.assertRaises(oauth.OAuthError):
+            self.refresh(srv, cid, got["refresh_token"])
+        self.assertEqual((srv.refresh, srv.access, srv._taking), ({}, {}, {}))
+        self.assertEqual(self.server().refresh, {})
+
+    def test_the_end_of_a_stolen_sign_in_is_saved_or_not_done(self):
+        srv = self.server()
+        cid, got = self.signed_in(srv)
+        new = self.refresh(srv, cid, got["refresh_token"])
+        self.t[0] += 3600
+        with mock.patch.object(srv, "_write_tokens_file", side_effect=OSError("disk full")):
+            with self.assertRaises(oauth.OAuthError) as cm:
+                self.refresh(srv, cid, got["refresh_token"])
+        self.assertEqual(cm.exception.status, 503)                    # not half done: the pair still works
+        self.assertEqual(srv.resolve(new["access_token"]), UP)
+        with self.assertRaises(oauth.OAuthError) as cm:               # the disk is back: now it ends
+            self.refresh(srv, cid, got["refresh_token"])
+        self.assertEqual(cm.exception.status, 400)
+        again = self.server()
+        self.assertEqual((again.refresh, again.access), ({}, {}))
+
+    def test_a_file_of_the_old_format_with_nothing_to_keep_is_rewritten_too(self):
+        cid = self.server().register({"redirect_uris": ["http://localhost:1/cb"]})["client_id"]
+        old = {"refresh": {"raw-token-1": {"token": UP, "client_id": "gone-client"},
+                           "raw-token-2": {"token": UP, "client_id": cid, "exp": 1.0}},
+               "access": {"ab": {"token": UP, "client_id": cid, "exp": 1.0}}}
+        with open(self.tokens, "w", encoding="utf-8") as f:
+            json.dump(old, f)
+        srv = self.server()
+        self.assertEqual((srv.refresh, srv.access), ({}, {}))
+        text = self.file_text()
+        self.assertNotIn(UP, text)
+        self.assertNotIn("raw-token", text)
+
+    def test_a_revoke_whose_second_write_fails_keeps_the_tokens_on_disk(self):
+        srv = self.server()
+        cid, got = self.signed_in(srv)
+        with mock.patch.object(srv, "_save_clients", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                srv.revoke(cid)
+        self.assertEqual(self.server().resolve(got["access_token"]), UP)   # a restart loses no sign-in
+
+    def test_a_code_whose_tokens_cannot_be_saved_is_good_for_another_try(self):
         srv = self.server()
         cid = srv.register({"redirect_uris": ["http://localhost:1/cb"]})["client_id"]
-        with mock.patch.object(oauth.tempfile, "mkstemp", side_effect=OSError("disk full")):
-            got = srv.token({"grant_type": "refresh_token", "client_id": cid,
-                             "refresh_token": srv._issue("tok", cid)["refresh_token"]})
-        self.assertEqual(srv.resolve(got["access_token"]), "tok")
+        ended = []
+        srv.on_drop = ended.append
+        srv.codes["code-1"] = {"token": UP, "tid": oauth._sha(UP), "client_id": cid, "user": "ann",
+                               "redirect_uri": "http://localhost:1/cb", "challenge": oauth.b64url_sha256("v"),
+                               "exp": self.t[0] + 300}
+        form = {"grant_type": "authorization_code", "code": "code-1", "code_verifier": "v", "client_id": cid}
+        with mock.patch.object(srv, "_write_tokens_file", side_effect=OSError("disk full")):
+            with self.assertRaises(oauth.OAuthError) as cm:
+                srv.token(dict(form))
+        self.assertEqual(cm.exception.status, 503)
+        self.assertEqual(ended, [])                                    # the sign-in behind it is not ended
+        got = srv.token(dict(form))
+        self.assertEqual(srv.resolve(got["access_token"]), UP)
+        with self.assertRaises(oauth.OAuthError):                      # used now
+            srv.token(dict(form))
+
+    def test_a_revoke_after_a_restart_ends_the_sign_in_by_its_hash(self):
+        cid, got = self.signed_in(self.server())
+        srv = self.server()                                            # a restart: no token in the open
+        by_token, by_hash = [], []
+        srv.on_drop, srv.on_drop_tid = by_token.append, by_hash.append
+        self.assertTrue(srv.revoke(cid))
+        self.assertEqual((by_token, by_hash), ([], [oauth._sha(UP)]))
+
+    def test_a_sign_in_that_cannot_be_saved_gives_no_token(self):
+        srv = self.server()
+        cid = srv.register({"redirect_uris": ["http://localhost:1/cb"]})["client_id"]
+        with mock.patch.object(srv, "_write_tokens_file", side_effect=OSError("disk full")):
+            with self.assertRaises(oauth.OAuthError) as cm:
+                srv._issue(UP, cid)
+        self.assertEqual(cm.exception.status, 503)
+        self.assertEqual((srv.refresh, srv.access), ({}, {}))
 
 
 class LoopbackRedirects(unittest.TestCase):

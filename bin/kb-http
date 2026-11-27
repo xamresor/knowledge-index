@@ -747,7 +747,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/admin/clients/revoke":
                 cid = str(form.get("client_id", ""))
-                note = "Revoked." if self.oauth is not None and self.oauth.revoke(cid) else "No such client."
+                try:
+                    note = "Revoked." if self.oauth is not None and self.oauth.revoke(cid) else "No such client."
+                except OSError as e:   # nothing changed: a restart must not bring a revoked client back
+                    note = f"Not revoked: the change cannot be saved on the server ({type(e).__name__}). Try again."
                 log(f"admin: revoke {cid[:12]} by {admin_name(session['user'])}")
                 _audit(admin_name(session["user"]), "revoke client", f"{cid[:12]} {note}")
                 self._send_page(200, admin.clients_page(base, session["csrf"], self._clients(), note))
@@ -1155,7 +1158,11 @@ def make_server(host: str = HOST, port: int = PORT, auth: Authenticator | None =
         def ended(token: str) -> None:
             access.logout(token, kb_core)
             auth.forget()
-        sessions.on_end = ended
+
+        def page_ended(token: str) -> None:   # only the token made for the session, never one of an agent
+            (getattr(access, "logout_page", None) or access.logout)(token, kb_core)
+            auth.forget()
+        sessions.on_end = page_ended
         if srv_oauth is not None:
             # A browser sign-in that never finished, a revoked client, an ended refresh token: its sign-in
             # token ends too, so it does not push out a token the person still uses. Only when the login
@@ -1164,6 +1171,13 @@ def make_server(host: str = HOST, port: int = PORT, auth: Authenticator | None =
                 if is_self_url(env.get("KB_LOGIN_URL", "")):
                     ended(token)
             srv_oauth.on_drop = dropped
+            if callable(getattr(access, "logout_hash", None)):
+                # After a restart the server holds only the SHA-256 of such a token, until its client shows one.
+                def dropped_hash(digest: str) -> None:
+                    if is_self_url(env.get("KB_LOGIN_URL", "")):
+                        access.logout_hash(digest, kb_core)
+                        auth.forget()
+                srv_oauth.on_drop_tid = dropped_hash
     handler = type("KbHandler", (Handler,), {"auth": auth, "oauth": srv_oauth, "hook_env": hook_env,
                                               "access": access,
                                               "admins": admin.admins() if admins is None else admins,

@@ -198,6 +198,28 @@ class StoreTest(unittest.TestCase):
             self.clock[0] += 30 * 86400 + users.TOUCH_SECONDS + 1
             self.assertEqual(self.store.permissions(tokens[-1], ["api"])[0], 401)
 
+    def test_a_page_session_ends_its_own_token_and_never_the_token_of_an_agent(self):
+        self.store.add("ann@example.com", ["api"], key=False)
+        self.store.set_password("ann@example.com", "correct horse battery")
+        page = self.store.login("ann@example.com", "correct horse battery", purpose="page")
+        agent = self.store.login("ann@example.com", "correct horse battery")
+        self.assertEqual(self.store.login("ann@example.com", agent, purpose="page"), agent)   # typed as the password
+        self.assertFalse(self.store.end_signin(agent, page_only=True))     # that session ends: the agent goes on
+        self.assertEqual(self.store.permissions(agent, ["api"])[0], 200)
+        self.assertTrue(self.store.end_signin(page, page_only=True))
+        self.assertEqual(self.store.permissions(page, ["api"])[0], 401)
+        self.assertTrue(self.store.end_signin(agent))                      # a revoked client still ends it
+
+    def test_a_sign_in_token_ends_by_its_hash_and_a_key_does_not(self):
+        key = self.store.add("ann@example.com", ["api"])
+        self.store.set_password("ann@example.com", "correct horse battery")
+        agent = self.store.login("ann@example.com", "correct horse battery")
+        self.assertFalse(self.store.end_signin_hash(users._hash(key)))
+        self.assertFalse(self.store.end_signin_hash("0" * 64))
+        self.assertTrue(self.store.end_signin_hash(users._hash(agent)))
+        self.assertEqual(self.store.permissions(agent, ["api"])[0], 401)
+        self.assertEqual(self.store.permissions(key, ["api"])[0], 200)
+
     def test_a_page_sign_in_token_that_no_session_ended_goes_when_idle(self):
         self.store.add("ann@example.com", ["api"], key=False)
         self.store.set_password("ann@example.com", "correct horse battery")
